@@ -22,6 +22,14 @@ Two repositories:
 copilot-to-automation ladder with its promotion criteria, a 3–5 seller pilot design, and the
 GMV and operator-load metrics.
 
+## Self-audit
+
+**[`docs/REVIEW.md`](docs/REVIEW.md)** — an adversarial review of this system
+against the brief, written after driving it on real eBay Live shows. 16 findings
+with measured evidence, a clarity pass over the console, and a prioritised list
+of Whissle platform gaps. Read it before the code: it says where this is weak
+more precisely than the Known Limitations section below.
+
 ## TDD
 
 **[`docs/TDD.md`](docs/TDD.md)** — streaming ingestion, catalog grounding, the two-layer
