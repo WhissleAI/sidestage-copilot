@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rig, PINNED } from "./helpers.js";
+import { rig, judge, PINNED } from "./helpers.js";
 import { admit, classify, isHype, RateLimiter } from "../src/ingest/classify.js";
 import { cacheKey, ReplyCache } from "../src/latency/cache.js";
 import { decideAction, decideReply } from "../src/autonomy/ladder.js";
@@ -393,4 +393,63 @@ test("normalising junk yields nothing rather than a fake reading", () => {
   assert.equal(normalizeDistribution(undefined), null);
   assert.equal(normalizeDistribution(""), null);
   assert.equal(normalizeDistribution({}), null);
+});
+
+// ── grounding holes found on a live show ────────────────────────────────────
+
+test("a reply written from the host transcript alone is NOT waved through", () => {
+  // Seen live, at confidence 0.10 with a green grounding pill — unverified AND
+  // presented as verified, which is the worst combination available. It carried
+  // no digits and no catalog keywords, so the old FACTUAL test never fired.
+  const r = rig();
+  const res = judge(
+    r,
+    "what's up next",
+    "Next up I'm diving into the rarity and significance of a historic coin, as I just discussed its volume and surviving examples.",
+    [],
+  );
+  const g = res.guards.find((x) => x.guard === "claim_grounding")!;
+  assert.equal(g.verdict, "revise", `expected revise, got ${g.verdict}`);
+});
+
+test("a greeting or an explicit deferral may still go uncited", () => {
+  const r = rig();
+  for (const text of [
+    "Right here — what can I get you?",
+    "The host will cover that shortly.",
+    "Let me check on that for you.",
+  ]) {
+    const g = judge(r, "you there?", text, []).guards.find((x) => x.guard === "claim_grounding")!;
+    assert.equal(g.verdict, "allow", `"${text}" should need no citation, got ${g.verdict}`);
+  }
+});
+
+test("a generic colour word alone does not match an item", () => {
+  // "Do you have any $2.50 incuse Indian gold coin" matched an Ivan Rodriguez
+  // card, because "gold" appears in "Topps Gold".
+  const r = rig();
+  const res = r.retriever.retrieve("Do you have any $2.50 incuse Indian gold coin", { pinnedId: PINNED });
+  const listingChips = res.evidence.filter((e) => e.factId.startsWith("listing:"));
+  assert.equal(listingChips.length, 0, `matched on a generic word: ${listingChips.map((e) => e.factId).join(", ")}`);
+  assert.equal(res.evidence[0]?.factId, "catalog:lineup");
+});
+
+test("item descriptions survive a catalog that is not sneaker-shaped", () => {
+  const r = rig();
+  // brand === the leading word of model, and no size — the card shape.
+  r.repo.insertListing({
+    sku: "SS-PUDGE-92", title: "Ivan Rodriguez 1992 Topps Gold #78", shortName: "Pudge 92 Gold",
+    brand: "Topps", model: "Topps Gold", colorway: "Ivan Rodriguez", size: "",
+    condition: "USED", priceCents: 2200, floorPriceCents: 1800, costCents: 1400, qty: 2,
+    state: "queued", shippingProfile: "us-standard", authenticated: false, certId: null,
+    description: "1992 Topps Gold parallel.", imageUrl: "",
+  });
+  r.retriever.rebuild();
+
+  const facts = r.retriever.retrieve("any pudge", { pinnedId: PINNED }).facts;
+  const ident = facts.find((f) => f.field === "identity" && f.text.includes("Ivan Rodriguez"));
+  assert.ok(ident, "the card's identity fact should be retrievable");
+  assert.ok(!/Topps Topps/.test(ident!.text), `brand duplicated into model: ${ident!.text}`);
+  assert.ok(!/size ,/.test(ident!.text), `dangling empty size: ${ident!.text}`);
+  assert.ok(!/colorway/i.test(ident!.text), `"colorway" is wrong for a card: ${ident!.text}`);
 });

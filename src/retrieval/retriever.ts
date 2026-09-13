@@ -18,7 +18,7 @@ import type { Repo } from "../domain/repo.js";
 import { buildFacts, type Fact, type FactField } from "./facts.js";
 import { Bm25Index } from "./bm25.js";
 import { cosine, ngramVector, terms } from "./text.js";
-import { POLICY_LED, resolveSlots, type Slots } from "./slots.js";
+import { GENERIC_TITLE_TOKENS, POLICY_LED, resolveSlots, type Slots } from "./slots.js";
 
 /** RRF damping. 60 is the value from the original Cormack et al. formulation;
  *  it flattens the head enough that one leg cannot dominate the fusion. */
@@ -102,10 +102,21 @@ export class Retriever {
       const searchable = listings.filter((l) => !l.externalRef);
       for (const l of (searchable.length ? searchable : listings)) {
         if (l.state === "ended") continue;
-        const hay = new Set(terms(`${l.title} ${l.shortName} ${l.brand} ${l.model} ${l.colorway} ${l.description}`));
+        // Identity fields only. Matching the DESCRIPTION made every prose word a
+        // hit, which is how "any $2.50 incuse Indian gold coin" matched a
+        // baseball card: "gold" appears in "Topps Gold".
+        const hay = new Set(terms(`${l.title} ${l.shortName} ${l.brand} ${l.model} ${l.colorway}`));
         let hits = 0;
-        for (const t of q) if (hay.has(t)) hits++;
-        if (hits) matches.push({ id: l.id, hits });
+        let distinct = 0;
+        for (const t of q) {
+          if (!hay.has(t)) continue;
+          hits++;
+          if (!GENERIC_TITLE_TOKENS.has(t)) distinct++;
+        }
+        // A single GENERIC token is not a match. Colours, metals and grades
+        // appear across half a catalog; they qualify an item, they do not name
+        // one. Two hits, or one distinctive hit, is a real match.
+        if (distinct > 0 || hits >= 2) matches.push({ id: l.id, hits: distinct * 2 + hits });
       }
       matches.sort((a, b) => b.hits - a.hits);
 

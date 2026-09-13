@@ -220,13 +220,37 @@ export const policyGuard: Guard = {
 // Does this reply assert anything checkable? Prefix-matched on purpose: the
 // word-boundary version missed "Returns" and every multi-digit number, which is
 // most of what actually needs grounding.
+// A reply that commits to nothing: a greeting, or an explicit deferral to the
+// host. These are the ONLY things allowed to carry no citation.
+const NON_COMMITTAL =
+  /\b(host will (?:cover|get to|answer)|i'?ll (?:check|find out|ask)|let me (?:check|get)|coming (?:up|right up)|one (?:sec|moment)|right here|what can i (?:get|do)|thanks|thank you|welcome|hey|hi there)\b/i;
+
+/** Keywords that make a reply obviously checkable. Retained as a fast path, but
+ *  no longer the ONLY trigger — see the guard below. */
 const FACTUAL = /\d|\$|\b(ship\w*|return\w*|refund\w*|authentic\w*|cert\w*|size|available|stock|left|condition|deadstock|vnds|box|free|polic\w*|median|comps?)\b/i;
+
+/** Long enough to be an assertion rather than an acknowledgement. */
+const SUBSTANTIVE_CHARS = 60;
 
 export const claimGroundingGuard: Guard = {
   name: "claim_grounding",
   run(i: GuardInput): GuardResult {
     const a = i.draft.answer;
-    const needsGrounding = FACTUAL.test(a);
+
+    // A reply must either CITE something or commit to nothing. The old test —
+    // "does it contain a number or a catalog keyword" — let a whole class
+    // through: an answer written entirely from the host's live transcript.
+    //
+    //   "Next up I'm diving into the rarity and significance of a historic coin,
+    //    as I just discussed its volume and surviving examples."
+    //
+    // No digits, no catalog keywords, so it was never checked — and it went out
+    // at confidence 0.10 with a green grounding pill, which is the worst
+    // combination available: unverified and presented as verified. The show
+    // context is a real source, but nothing traceable backs that sentence.
+    const substantive =
+      FACTUAL.test(a) || (a.trim().length >= SUBSTANTIVE_CHARS && !NON_COMMITTAL.test(a));
+    const needsGrounding = substantive;
 
     for (const c of i.draft.claims) {
       if (!i.factById.has(c.factId)) {
@@ -239,7 +263,7 @@ export const claimGroundingGuard: Guard = {
       if (!needsGrounding) return allow("claim_grounding");
       return fail("claim_grounding", "revise",
         i.draft.parsedOk
-          ? "Reply makes factual statements but cites no grounding facts."
+          ? "Reply asserts something but cites no grounding fact. Only a greeting or an explicit deferral may go uncited."
           : "Model did not return the claim-structured JSON, so no citation can be checked.");
     }
 

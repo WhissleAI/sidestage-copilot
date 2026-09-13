@@ -42,17 +42,52 @@ function mk(f: Omit<Fact, "tokens" | "vector">): Fact {
   return { ...f, tokens: terms(indexable), vector: ngramVector(indexable) };
 }
 
+/**
+ * A human description of an item, built from the fields that are actually
+ * present and distinct.
+ *
+ * The first version assumed sneaker-shaped data — brand and model always
+ * different, size always set — and produced this on a card catalog:
+ *
+ *   "Ivan Rodriguez 1992 Topps Gold #78 — Topps Topps Gold, colorway Ivan
+ *    Rodriguez, size , condition USED."
+ *
+ * Duplicated brand into model, labelled a player as a colorway, and left a
+ * dangling empty size. Three defects in one sentence the operator reads as
+ * provenance, in a tooltip whose whole job is to be checkable.
+ */
+function describe(l: ListingWithDescription): string {
+  const parts: string[] = [];
+  const brandModel = [l.brand, l.model]
+    .map((x) => (x || "").trim())
+    .filter(Boolean)
+    // "Topps" + "Topps Gold" is one thing said twice.
+    .filter((x, idx, arr) => !arr.some((y, j) => j < idx && y.toLowerCase().includes(x.toLowerCase())));
+  if (brandModel.length) parts.push(brandModel.join(" "));
+  // `colorway` is the catalog's free-form variant field. It is a colourway for
+  // sneakers and a player for cards, so name it neutrally.
+  if (l.colorway?.trim()) parts.push(l.colorway.trim());
+  if (l.size?.trim()) parts.push(`size ${l.size.trim()}`);
+  parts.push(`condition ${l.condition}`);
+  return parts.join(", ");
+}
+
+/** The item's name, with its size only when it has one. */
+function itemName(l: ListingWithDescription): string {
+  return l.size?.trim() ? `${l.title} size ${l.size.trim()}` : l.title;
+}
+
 export function listingFacts(l: ListingWithDescription): Fact[] {
-  const name = `${l.title} size ${l.size}`;
+  const name = itemName(l);
   // The chip label has to say WHICH listing, or a reply grounded across several
   // lots renders as five identical "Listing - shipping" chips and the operator
   // cannot verify any of them.
-  const short = `${l.shortName} ${l.size}`;
+  const short = l.size?.trim() ? `${l.shortName} ${l.size.trim()}` : l.shortName;
   const out: Fact[] = [
     mk({
       factId: `listing:${l.id}#identity`, source: "listing", label: `${short} · item`,
       field: "identity", listingId: l.id, listingVersion: l.version,
-      text: `${l.title} — ${l.brand} ${l.model}, colorway ${l.colorway}, size ${l.size}, condition ${l.condition}.`,
+      text: `${l.title} — ${describe(l)}.`,
     }),
     mk({
       factId: `listing:${l.id}#price`, source: "listing", label: `${short} · price`,
@@ -74,7 +109,9 @@ export function listingFacts(l: ListingWithDescription): Fact[] {
     mk({
       factId: `listing:${l.id}#sizing`, source: "listing", label: `${short} · size`,
       field: "sizing", listingId: l.id, listingVersion: l.version,
-      text: `This ${l.model} is a size ${l.size}. Only that size is available in this listing.`,
+      text: l.size?.trim()
+        ? `This ${l.model || l.title} is a size ${l.size.trim()}. Only that size is available in this listing.`
+        : `This ${l.model || l.title} has no size variant — it is a single item.`,
     }),
     mk({
       factId: `listing:${l.id}#authenticity`, source: "listing", label: `${short} · authentication`,
@@ -116,7 +153,9 @@ export function buildFacts(repo: Repo): Fact[] {
     factId: "catalog:lineup", source: "catalog", label: "Catalog · tonight's lineup",
     field: "identity",
     text: sellable.length
-      ? `Tonight's lineup, and the ONLY items available: ${sellable.map((l) => `${l.title} (size ${l.size}, ${formatMoney(l.priceCents)})`).join("; ")}.` +
+      ? `Tonight's lineup, and the ONLY items available: ${sellable
+          .map((l) => `${l.title} (${l.size?.trim() ? `size ${l.size.trim()}, ` : ""}${formatMoney(l.priceCents)})`)
+          .join("; ")}.` +
         " Anything not on this list is not in tonight's show."
       : "Nothing is currently available in tonight's lineup.",
   }));

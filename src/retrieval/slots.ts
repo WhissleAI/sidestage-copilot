@@ -80,7 +80,11 @@ const FIELD_EXPANSION: Partial<Record<FactField, FactField[]>> = {
 // The character class allows "/" and "#" because collectors ask in shorthand —
 // "any 1/1?", "any #/25", "got any RCs". Without them "Any 1/1?" matched nothing
 // and fell through to a generic defer instead of a grounded "not tonight".
-const ITEM_TERM = "[a-z0-9'’\\-\\./# ]{2,40}";
+// "$" and "," belong in an item term because collectors name denominations:
+// "any $2.50 incuse Indian gold coin". Without them that question was not an
+// inventory search at all, so it skipped the abstain path and got answered from
+// whatever the similarity leg happened to surface.
+const ITEM_TERM = "[a-z0-9'’$,\\-\\./# ]{2,40}";
 const INVENTORY_SEARCH = [
   new RegExp(`\\b(?:got |have |u got |you got |do you have |any more |anymore |any )\\s*(${ITEM_TERM})\\??$`, "i"),
   new RegExp(`\\blooking for\\s+(${ITEM_TERM})\\??$`, "i"),
@@ -99,13 +103,26 @@ const ATTRIBUTE_WORD = /^(price|prices|cost|costs|shipping|ship|returns|return|r
 
 const ANAPHORA = /\b(it|its|it's|this|these|those|that|them|they|the pair|the one|current|right now)\b/;
 
-/** Generic commerce vocabulary that appears in listing titles but discriminates
- *  nothing. Without this, "does it come with the original box" matched the
- *  Supreme BOX Logo hoodie instead of the lot on screen. */
-const GENERIC_TITLE_TOKENS = new Set([
+/**
+ * Vocabulary that QUALIFIES an item rather than naming one.
+ *
+ * Two bugs came from matching on these. "Does it come with the original box"
+ * matched the Supreme BOX Logo hoodie instead of the lot on screen; and "do you
+ * have any $2.50 incuse Indian gold coin" matched an Ivan Rodriguez card,
+ * because "gold" is in "Topps Gold". Colours, metals, grades and product-category
+ * nouns appear across half a catalog: they narrow a search, they never identify one.
+ *
+ * Exported because the inventory search needs the same judgement.
+ */
+export const GENERIC_TITLE_TOKENS = new Set([
   "box", "hoodie", "hooded", "sweatshirt", "jacket", "retro", "high", "low", "og",
-  "sp", "black", "white", "grey", "gray", "mens", "womens", "shoe", "shoes",
-  "sneaker", "sneakers", "pair", "size", "new",
+  "sp", "mens", "womens", "shoe", "shoes", "sneaker", "sneakers", "pair", "size",
+  // colours and metals
+  "black", "white", "grey", "gray", "red", "blue", "green", "brown", "pink",
+  "purple", "orange", "yellow", "gold", "silver", "bronze", "bone", "cream", "chrome",
+  // condition, format and category nouns
+  "new", "old", "vintage", "rare", "mint", "used", "graded", "raw", "slab", "slabs",
+  "card", "cards", "coin", "coins", "item", "items", "piece", "pieces", "auto", "rc", "set",
 ]);
 
 /** Tokens worth matching a listing on. Brand/model/colorway words plus the size. */
@@ -143,11 +160,18 @@ export function resolveSlots(
   for (const l of listings) {
     const { strong, size } = listingKeys(l);
     let score = 0;
-    for (const t of qTokens) if (strong.has(t)) score += 2;
+    let distinct = 0; // hits on tokens that actually name this item
+    for (const t of qTokens) {
+      if (!strong.has(t)) continue;
+      score += 2;
+      if (!GENERIC_TITLE_TOKENS.has(t)) distinct++;
+    }
     // A size token only counts once a model token already matched, otherwise
     // "size 10" would match every size-10 listing in the catalog equally.
-    if (score > 0 && qTokens.has(fold(size))) score += 1;
-    if (score > 0) scored.push({ id: l.id, score });
+    if (score > 0 && size && qTokens.has(fold(size))) score += 1;
+    // One GENERIC hit is not a match. "gold" alone resolved a question about an
+    // Indian gold coin to a Topps Gold baseball card and pulled its whole fact set.
+    if (distinct > 0 || score >= 4) scored.push({ id: l.id, score: distinct * 2 + score });
   }
   scored.sort((a, b) => b.score - a.score);
 
