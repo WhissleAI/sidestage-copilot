@@ -19,6 +19,8 @@ const MAX_CONTEXT_CHARS = 12_000;
 
 export interface ComposeInputs {
   show: ShowState;
+  /** From the catalog the operator chose at setup. */
+  seller?: { handle: string; name: string; about: string; voice: string } | null;
   pinned: ListingWithDescription | null;
   context: ShowContext | null;
   facts: Fact[];
@@ -32,9 +34,22 @@ export function buildContextBlock(i: ComposeInputs): string {
 
   lines.push(
     "=== ROLE ===",
-    `You are the live-chat copilot for ${i.show.sellerHandle}, who is running the live selling`,
+    `You are the live-chat copilot for ${i.seller?.name || i.show.sellerHandle}` +
+      `${i.seller ? ` (${i.seller.handle})` : ""}, who is running the live selling`,
     `show "${i.show.title}" right now. You draft the reply the seller will send to ONE buyer.`,
     "",
+  );
+
+  if (i.seller) {
+    lines.push(
+      "=== THE SELLER ===",
+      i.seller.about,
+      `Their voice: ${i.seller.voice}`,
+      "",
+    );
+  }
+
+  lines.push(
     "=== HOW TO REPLY ===",
     "- One or two sentences. Answer the actual question first, then at most one useful detail.",
     "- Warm, fast, specific. Plain text: no markdown, no bullet points, no emoji.",
@@ -55,10 +70,12 @@ export function buildContextBlock(i: ComposeInputs): string {
   } else {
     lines.push("Pinned lot: none right now.");
   }
+  // What the host is SAYING right now, from the listen-only audio session. This
+  // is the part neither the catalog nor the chat can supply.
   if (i.context) {
     lines.push(`The host is currently talking about: ${i.context.currentTopic}.`);
-    if (i.context.recentPoints.length) lines.push(`Recent points: ${i.context.recentPoints.join("; ")}.`);
-    if (i.context.tone) lines.push(`Host tone: ${i.context.tone}.`);
+    if (i.context.recentPoints.length) lines.push(`What the host just said: ${i.context.recentPoints.join("; ")}.`);
+    if (i.context.tone) lines.push(`Host tone, from voice metadata: ${i.context.tone}.`);
   }
   if (i.viaAnaphora) {
     lines.push(

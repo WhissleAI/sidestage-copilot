@@ -189,6 +189,11 @@ export class Repo {
   }
 
   // ── policies / comps / qa ─────────────────────────────────────────────────
+  upsertPolicy(p: PolicyClause): void {
+    this.d.prepare("INSERT OR REPLACE INTO policies (id, topic, title, body) VALUES (?, ?, ?, ?)")
+      .run(p.id, p.topic, p.title, p.body);
+  }
+
   policies(): PolicyClause[] {
     return this.d.prepare("SELECT id, topic, title, body FROM policies").all() as PolicyClause[];
   }
@@ -245,12 +250,13 @@ export class Repo {
     };
   }
 
-  updateShow(patch: Partial<Pick<ShowState, "viewers" | "pinnedListingId" | "lotQueue" | "autonomyLevel" | "status">>): ShowState {
+  updateShow(patch: Partial<Pick<ShowState, "viewers" | "pinnedListingId" | "lotQueue" | "autonomyLevel" | "status" | "sellerHandle" | "title">>): ShowState {
     const cur = this.show();
     const next = { ...cur, ...patch };
     this.d.prepare(
-      "UPDATE show SET viewers = ?, pinned_listing_id = ?, lot_queue = ?, autonomy_level = ?, status = ? WHERE id = ?",
-    ).run(next.viewers, next.pinnedListingId, JSON.stringify(next.lotQueue), next.autonomyLevel, next.status, cur.id);
+      "UPDATE show SET viewers = ?, pinned_listing_id = ?, lot_queue = ?, autonomy_level = ?, status = ?, seller_handle = ?, title = ? WHERE id = ?",
+    ).run(next.viewers, next.pinnedListingId, JSON.stringify(next.lotQueue), next.autonomyLevel,
+          next.status, next.sellerHandle, next.title, cur.id);
     return next;
   }
 }

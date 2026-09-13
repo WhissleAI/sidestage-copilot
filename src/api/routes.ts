@@ -10,6 +10,7 @@ import type { AutonomyLevel } from "../domain/types.js";
 import { LADDER } from "../autonomy/ladder.js";
 import { discoverLiveShows } from "../ingest/ebaylive/discovery.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
+import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import type { AppContext } from "./context.js";
 
@@ -37,15 +38,25 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       "Access-Control-Allow-Origin": "*",
     });
 
-    const id = hub.add(reply);
+    let id = -1;
     try {
       const target = rt(req.query.showId);
+      id = hub.add(reply, target.showId);
       reply.raw.write(`event: hello\ndata: ${JSON.stringify({ showId: target.showId, ...target.snapshot() })}\n\n`);
       reply.raw.write(`event: shows\ndata: ${JSON.stringify(shows.list())}\n\n`);
     } catch (e) {
       reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`);
     }
-    req.raw.on("close", () => hub.remove(id));
+    req.raw.on("close", () => { if (id >= 0) hub.remove(id); });
+  });
+
+  // ── catalogs ──────────────────────────────────────────────────────────────
+  // What the operator picks first: which of my inventories am I selling tonight.
+  app.get("/api/catalogs", async () => listCatalogs());
+
+  app.post("/api/catalogs/reload", async () => {
+    reloadCatalogs();
+    return listCatalogs();
   });
 
   // ── shows ─────────────────────────────────────────────────────────────────
@@ -60,23 +71,81 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
-  /** Attach to a real eBay Live show by event id or URL. */
-  app.post<{ Body: { eventId?: string; url?: string; title?: string; host?: string } }>(
+  /**
+   * Start a monitoring session: attach to a live eBay show AND load the catalog
+   * the operator is selling from, in one call.
+   *
+   * The two belong together. A show with no catalog can only answer about the
+   * lot on screen, and a catalog with no show has nothing to listen to — so the
+   * setup screen asks for both and this is the one call it makes.
+   */
+  app.post<{ Body: { eventId?: string; url?: string; title?: string; host?: string; catalogId?: string } }>(
     "/api/shows/attach",
     async (req, reply) => {
       const input = (req.body?.eventId || req.body?.url || "").trim();
       if (!input) return reply.code(400).send({ error: "eventId or url is required" });
+
+      const catalogId = (req.body?.catalogId || "").trim();
+      const catalog = catalogId ? getCatalog(catalogId) : null;
+      if (catalogId && !catalog) return reply.code(400).send({ error: `unknown catalog "${catalogId}"` });
+
       try {
         const target = await shows.attachEbayLive(input, { title: req.body?.title, host: req.body?.host });
-        // Seed the agent's knowledge base with this show's catalog in the
-        // background — the reply path is grounded per-turn regardless.
+
+        let applied = null;
+        if (catalog) {
+          applied = applyCatalog(target.repo, catalog);
+          target.seller = catalog.seller;
+          target.catalogId = catalog.id;
+          // Answer as THIS seller's agent, with THIS seller's knowledge base.
+          if (catalog.agentId) target.useAgent(catalog.agentId);
+          target.retriever.rebuild();
+          for (const l of target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
+        }
+
+        // A newly started session becomes the one a console without a showId sees.
+        shows.activate(target.showId);
+
+        // Seed the agent's knowledge base in the background — the reply path is
+        // grounded per-turn regardless.
         void kb.syncShow(target).catch(() => {});
-        return { showId: target.showId, show: target.show, snapshot: target.snapshot() };
+        return { showId: target.showId, show: target.show, catalog: applied, snapshot: target.snapshot() };
       } catch (e) {
         return reply.code(502).send({ error: (e as Error).message });
       }
     },
   );
+
+  /** Load (or swap) the catalog on an already-attached show. */
+  app.post<{ Params: { showId: string }; Body: { catalogId?: string } }>(
+    "/api/shows/:showId/catalog/apply",
+    async (req, reply) => {
+      const catalog = getCatalog((req.body?.catalogId || "").trim());
+      if (!catalog) return reply.code(400).send({ error: "a known catalogId is required" });
+      try {
+        const target = rt(req.params.showId);
+        const applied = applyCatalog(target.repo, catalog);
+        target.seller = catalog.seller;
+        target.catalogId = catalog.id;
+        if (catalog.agentId) target.useAgent(catalog.agentId);
+        target.retriever.rebuild();
+        for (const l of target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
+        const kbResult = await kb.syncShow(target).catch((e) => ({ uploaded: false, lots: 0, reason: (e as Error).message }));
+        return { ...applied, kb: kbResult };
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+    },
+  );
+
+  /** Make this the show a console sees when it does not name one. */
+  app.post<{ Params: { showId: string } }>("/api/shows/:showId/activate", async (req, reply) => {
+    try {
+      return shows.activate(req.params.showId);
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+  });
 
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/detach", async (req, reply) => {
     try {
@@ -112,6 +181,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
       const result = importCatalog(target.repo, items);
       target.retriever.rebuild();
+      // An import is the one time emitting the whole catalog is right.
       for (const l of target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
 
       // Push the imported lineup to the agent's knowledge base so it can also be
@@ -144,22 +214,47 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
-  /** A finalized transcript segment of the host's speech. */
-  app.post<{ Params: { showId: string }; Body: { text?: string } }>(
-    "/api/shows/:showId/audio/transcript",
-    async (req, reply) => {
-      const text = (req.body?.text || "").trim();
-      if (!text) return reply.code(400).send({ error: "text is required" });
-      try {
-        const target = rt(req.params.showId);
-        target.showContext.push(text);
-        hub.emit("source", { showId: target.showId, source: "host-audio", detail: text.slice(0, 160) });
-        return { ok: true, showId: target.showId };
-      } catch (e) {
-        return reply.code(404).send({ error: (e as Error).message });
-      }
-    },
-  );
+  /**
+   * A finalized transcript segment of the host's speech, with whatever voice
+   * metadata Whissle emitted alongside it (emotion, intent, speech rate).
+   *
+   * The metadata is surfaced to the console as well as fed to the context
+   * engine: an operator watching "host tone: excited" against a lot that is not
+   * selling is reading something the transcript alone does not say.
+   */
+  app.post<{
+    Params: { showId: string };
+    Body: {
+      text?: string;
+      emotion?: { label: string; p?: number } | string;
+      intent?: { label: string; p?: number } | string;
+      speechRate?: number;
+      final?: boolean;
+    };
+  }>("/api/shows/:showId/audio/transcript", async (req, reply) => {
+    const text = (req.body?.text || "").trim();
+    if (!text) return reply.code(400).send({ error: "text is required" });
+    try {
+      const target = rt(req.params.showId);
+      const norm = (v: { label: string; p?: number } | string | undefined) =>
+        typeof v === "string" ? { label: v } : v && v.label ? v : null;
+
+      const segment = {
+        showId: target.showId,
+        text,
+        emotion: norm(req.body?.emotion),
+        intent: norm(req.body?.intent),
+        speechRate: typeof req.body?.speechRate === "number" ? req.body.speechRate : null,
+        at: new Date().toISOString(),
+      };
+
+      target.showContext.push(text);
+      hub.emit("transcript", segment);
+      return { ok: true, ...segment };
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+  });
 
   /** Force a knowledge-base sync for one show. */
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/kb-sync", async (req, reply) => {

@@ -83,8 +83,15 @@ const INVENTORY_SEARCH = [
   /\bany\s+([a-z0-9'’\-\. ]{3,40})\b/i,
 ];
 
-/** Words that make a phrase an attribute question, not an inventory hunt. */
-const NOT_INVENTORY = /\b(price|cost|how much|ship|shipping|return|refund|authentic|legit|size|fit|discount|deal|lower|bundle|left|available|stock)\b/i;
+/**
+ * Attribute vocabulary. Used to VALIDATE an extracted inventory term, not to veto
+ * the whole question — a blanket veto on these words meant "any skenes left"
+ * (the word "left") was read as an availability question about whatever lot was
+ * on screen, and answered "no skenes left, the lot is sold out". It is both an
+ * inventory hunt for Skenes AND an availability question; the hunt has to win,
+ * because the item is the part the seller does not know.
+ */
+const ATTRIBUTE_WORD = /^(price|prices|cost|costs|shipping|ship|returns|return|refund|authentic|legit|size|sizes|fit|discount|discounts|deal|deals|lower|lowest|bundle|left|available|stock|more|else|other|good|new|thing|things|stuff|tonight|today|up|coming)$/i;
 
 const ANAPHORA = /\b(it|its|it's|this|these|those|that|them|they|the pair|the one|current|right now)\b/;
 
@@ -144,20 +151,30 @@ export function resolveSlots(
 
   // ── inventory search? ──
   let inventoryQuery: string | null = null;
-  if (!NOT_INVENTORY.test(lower)) {
-    for (const re of INVENTORY_SEARCH) {
-      const m = lower.match(re);
-      const term = m?.[1]
-        ?.trim()
-        .replace(/[?.!]+$/, "")
-        // The alternation can leave a leading quantifier on the captured term
-        // ("Got any Grady Sizemore" -> "any grady sizemore").
-        .replace(/^(?:any|more|some|other)\s+/i, "")
-        .trim();
-      if (term && term.length >= 3 && !/^(one|more|other|else|thing|stuff|good|new)s?$/.test(term)) {
-        inventoryQuery = term;
-        break;
-      }
+  for (const re of INVENTORY_SEARCH) {
+    const m = lower.match(re);
+    if (!m?.[1]) continue;
+
+    let words = m[1]
+      .trim()
+      .replace(/[?.!]+$/, "")
+      // The alternation can leave a leading quantifier on the captured term
+      // ("Got any Grady Sizemore" -> "any grady sizemore").
+      .replace(/^(?:any|more|some|other)\s+/i, "")
+      .split(/\s+/)
+      .filter(Boolean);
+
+    // "any skenes left" -> the item is "skenes"; "left" is how they asked.
+    while (words.length && ATTRIBUTE_WORD.test(words[words.length - 1])) words.pop();
+
+    // A term that STARTS with an attribute word is asking about the attribute,
+    // not hunting for an item: "any deal if i take two" is a discount question.
+    if (!words.length || ATTRIBUTE_WORD.test(words[0])) continue;
+
+    const term = words.join(" ");
+    if (term.length >= 3) {
+      inventoryQuery = term;
+      break;
     }
   }
 
@@ -173,8 +190,13 @@ export function resolveSlots(
   // or names an attribute ("how much"). Falling back unconditionally was worse
   // than it sounds: it made EVERY question resolve to something, which silently
   // removed the system's ability to abstain at all.
+  //
+  // NOT when the buyer named an item we could not find. "any skenes left" with no
+  // Skenes in the catalog must answer "not in tonight's lineup" — falling back to
+  // the lot on screen produced "no cards left for the pinned lot, it's sold out",
+  // which is a confident answer to a question nobody asked.
   let viaAnaphora = false;
-  if (!listingIds.length && pinnedId && (ANAPHORA.test(lower) || namedAnAttribute)) {
+  if (!listingIds.length && !inventoryQuery && pinnedId && (ANAPHORA.test(lower) || namedAnAttribute)) {
     listingIds = [pinnedId];
     viaAnaphora = true;
   }

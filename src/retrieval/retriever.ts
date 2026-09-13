@@ -85,6 +85,7 @@ export class Retriever {
   ): RetrievalResult {
     const mode = opts.mode ?? "hybrid";
     let maxFacts = opts.maxFacts ?? MAX_FACTS;
+    let noMatchInventory = false;
     const listings = this.repo.listings();
     const slots = resolveSlots(question, listings, opts.pinnedId ?? null);
 
@@ -98,7 +99,8 @@ export class Retriever {
     if (slots.inventoryQuery && mode !== "lexical" && mode !== "ngram") {
       const q = new Set(terms(slots.inventoryQuery));
       const matches: { id: string; hits: number }[] = [];
-      for (const l of listings) {
+      const searchable = listings.filter((l) => !l.externalRef);
+      for (const l of (searchable.length ? searchable : listings)) {
         if (l.state === "ended") continue;
         const hay = new Set(terms(`${l.title} ${l.shortName} ${l.brand} ${l.model} ${l.colorway} ${l.description}`));
         let hits = 0;
@@ -110,8 +112,16 @@ export class Retriever {
       // The lineup fact ALWAYS rides along: with a match it names the lot, and
       // with no match it is the evidence for an honest "not in tonight's show".
       picked.set("catalog:lineup", 1);
-      // Enough room for three matched lots' fact sets plus the lineup.
-      maxFacts = Math.max(maxFacts, 16);
+      if (matches.length) {
+        // Room for up to three matched lots' fact sets plus the lineup.
+        maxFacts = Math.max(maxFacts, 16);
+      } else {
+        // NOTHING matched. The honest answer is "not in tonight's lineup", and
+        // it needs exactly one fact. Letting the similarity leg fill fifteen
+        // slots with unrelated lots made the console unreadable and handed the
+        // model a pile of items it was not asked about.
+        noMatchInventory = true;
+      }
       // Give a matched lot the SAME fact set an attribute question would get.
       // Supplying only identity/price/availability made the model cite a
       // condition fact it had never been handed, which the grounding guard then
@@ -166,7 +176,7 @@ export class Retriever {
 
     // ── leg 2: similarity, fused ──────────────────────────────────────────
     let bestFused = 0;
-    if (mode !== "structured-only") {
+    if (mode !== "structured-only" && !noMatchInventory) {
       const fused = this.fuse(question, mode);
       bestFused = fused[0]?.score ?? 0;
       for (const { factId, score } of fused) {

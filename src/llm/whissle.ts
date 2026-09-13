@@ -39,7 +39,25 @@ export class WhissleClient implements LlmPort {
     this.base = (o.baseUrl || config.whissle.base).replace(/\/$/, "");
   }
 
+  get agentId(): string {
+    return this.o.agentId;
+  }
+
+  /**
+   * Point this client at a different agent.
+   *
+   * Each CATALOG owns an agent — the catalog is what defines the seller's
+   * persona, voice, never-say list and knowledge base, and those are stable
+   * while streams come and go. So when a show loads a catalog, its client
+   * switches to that catalog's agent, and two sellers monitored at the same time
+   * cannot retrieve each other's inventory.
+   */
+  setAgent(agentId: string): void {
+    this.o = { ...this.o, agentId };
+  }
+
   async chatTurn(message: string, context: string, opts: { maxTokens?: number } = {}): Promise<string> {
+    if (!this.o.agentId) throw new LlmError(400, "no Whissle agent configured for this show");
     const body = {
       message,
       context,

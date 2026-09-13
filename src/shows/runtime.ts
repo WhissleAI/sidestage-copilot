@@ -24,7 +24,7 @@ import type { RemoteListing } from "../actions/marketplace/port.js";
 import { ResearchService } from "../research/research.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
 import { Pipeline } from "../pipeline/pipeline.js";
-import type { LlmPort } from "../llm/types.js";
+import { WhissleClient } from "../llm/whissle.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
 import { EbayLiveWatcher } from "../ingest/ebaylive/watcher.js";
 import { SimulatedShowSource, ScriptedHostAudio, type ChatSource } from "../ingest/sources.js";
@@ -40,7 +40,6 @@ export interface ShowRuntimeOpts {
   source: "simulated" | "ebaylive";
   externalId?: string | null;
   readOnly?: boolean;
-  llm: LlmPort;
   events: RuntimeEvents;
   /** Use this database instead of a per-show file (the seeded demo show). */
   dbPath?: string;
@@ -59,6 +58,20 @@ export class ShowRuntime {
   readonly pipeline: Pipeline;
   readonly market: MockMarketplace;
 
+  /**
+   * This show's OWN client. Each catalog owns a Whissle agent, so two sellers
+   * monitored at once talk to two agents with two knowledge bases and cannot
+   * retrieve each other's inventory. Until a catalog is loaded it falls back to
+   * WHISSLE_AGENT_ID, which is what the seeded demo show uses.
+   */
+  readonly llm: WhissleClient;
+
+  /** Set when a catalog is applied. Feeds the composer so replies carry the
+   *  seller's identity and voice, not a generic one. */
+  seller: { handle: string; name: string; about: string; voice: string } | null = null;
+  /** The catalog currently loaded into this show. */
+  catalogId: string | null = null;
+
   private watcher: EbayLiveWatcher | null = null;
   private simSource: ChatSource | null = null;
   private hostAudio: ScriptedHostAudio | null = null;
@@ -66,6 +79,12 @@ export class ShowRuntime {
 
   constructor(private o: ShowRuntimeOpts) {
     this.showId = o.showId;
+    this.llm = new WhissleClient({
+      apiKey: config.whissle.apiKey,
+      agentId: config.whissle.agentId,
+      baseUrl: config.whissle.base,
+      timeoutMs: Math.max(4000, config.latencyBudgetMs * 3),
+    });
 
     const path = o.dbPath ?? join(config.showsDir, `${o.showId}.db`);
     mkdirSync(config.showsDir, { recursive: true });
@@ -107,7 +126,13 @@ export class ShowRuntime {
       },
       onListingWrite: (id) => {
         this.retriever.rebuild();
-        for (const l of this.repo.listings()) emit("listing", l);
+        // Emit the listing that changed, plus whatever is pinned (a swap moves
+        // the pin off another row). Re-emitting the whole catalog on every write
+        // put 315 listing frames on the wire in 30 seconds against a live show.
+        const changed = this.repo.listing(id);
+        if (changed) emit("listing", changed);
+        const pinned = this.repo.pinned();
+        if (pinned && pinned.id !== id) emit("listing", pinned);
       },
     });
 
@@ -115,14 +140,15 @@ export class ShowRuntime {
     this.research = new ResearchService(this.repo);
 
     this.showContext = new ShowContextEngine({
-      llm: o.llm,
+      llm: this.llm,
       lotTitles: () => this.repo.listings().map((l) => ({ id: l.id, title: `${l.title} size ${l.size}` })),
       onUpdate: (c) => emit("context", c),
     });
 
     this.pipeline = new Pipeline({
       repo: this.repo,
-      llm: o.llm,
+      seller: () => this.seller,
+      llm: this.llm,
       retriever: this.retriever,
       executor: this.executor,
       proposer: this.proposer,
@@ -144,8 +170,20 @@ export class ShowRuntime {
     return this.repo.show();
   }
 
+  /** Point this show at the agent belonging to the catalog it just loaded. */
+  useAgent(agentId: string): void {
+    this.llm.setAgent(agentId);
+  }
+
+  get agentId(): string {
+    return this.llm.agentId;
+  }
+
   snapshot(): Record<string, unknown> {
     return {
+      seller: this.seller,
+      catalogId: this.catalogId,
+      agentId: this.llm.agentId,
       show: this.repo.show(),
       listings: this.repo.listings(),
       proposals: this.pipeline.list(),
@@ -185,6 +223,13 @@ export class ShowRuntime {
       eventId,
       onStatus: (s) => emit("source", { source: "ebaylive", eventId, ...s }),
 
+      onTitle: (title) => {
+        // Attaching by id alone gives the show a placeholder name; the page knows
+        // what it is actually called.
+        this.db.prepare("UPDATE show SET title = ? WHERE id = ?").run(title, this.showId);
+        emit("show", this.repo.show());
+      },
+
       onComment: (c) => {
         // Straight into the same pipeline the simulated source feeds. eBay's own
         // per-comment UUID becomes the message id, so a re-attach cannot replay
@@ -206,8 +251,13 @@ export class ShowRuntime {
         });
         if (changed) {
           this.retriever.rebuild();
+          const prevPinned = this.repo.show().pinnedListingId;
           this.repo.updateShow({ pinnedListingId: listing.id });
-          for (const l of this.repo.listings()) emit("listing", l);
+          emit("listing", listing);
+          if (prevPinned && prevPinned !== listing.id) {
+            const prev = this.repo.listing(prevPinned);
+            if (prev) emit("listing", prev);
+          }
           this.audit.append(
             "action_committed",
             "system",

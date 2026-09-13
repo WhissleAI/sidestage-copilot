@@ -103,7 +103,15 @@ export function buildFacts(repo: Repo): Fact[] {
   // One fact describing the whole lineup. This is what makes "do you have X?"
   // answerable and, more importantly, makes "no, not tonight" a GROUNDED answer
   // rather than an absence of one — the model can cite this instead of guessing.
-  const sellable = listings.filter((l) => l.state !== "ended" && l.qty > 0);
+  //
+  // Lots OBSERVED on a live stream are excluded. They carry the seller's generic
+  // on-air titles ("#414 - SUNDAY - 9/13/26- MLB $.99 Starts"), and once a few
+  // dozen have scrolled past they drown the real catalog: a buyer asking "any
+  // skenes left" got a confident answer about lot #414. The lineup is the
+  // seller's INVENTORY; an observed lot is just what is on screen right now, and
+  // it is already represented by the pinned-lot facts.
+  const inventory = listings.filter((l) => !l.externalRef);
+  const sellable = (inventory.length ? inventory : listings).filter((l) => l.state !== "ended" && l.qty > 0);
   facts.push(mk({
     factId: "catalog:lineup", source: "catalog", label: "Catalog · tonight's lineup",
     field: "identity",

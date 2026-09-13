@@ -50,6 +50,8 @@ export interface PipelineEvents {
 
 export interface PipelineDeps {
   repo: Repo;
+  /** Who is selling, and in what voice. Supplied by the chosen catalog. */
+  seller?: () => { handle: string; name: string; about: string; voice: string } | null;
   llm: LlmPort;
   retriever: Retriever;
   executor: ActionExecutor;
@@ -186,6 +188,7 @@ export class Pipeline {
           show,
           pinned: show.pinnedListingId ? this.d.repo.listing(show.pinnedListingId) : null,
           context: this.d.showContext.current(),
+          seller: this.d.seller?.() ?? null,
           facts: r.facts,
           abstain: r.abstain,
           viaAnaphora: r.slots.viaAnaphora,

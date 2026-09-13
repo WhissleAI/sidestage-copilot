@@ -17,7 +17,6 @@
 // grows, debounced hard. Prices deliberately appear only as "indicative".
 
 import { config } from "../config.js";
-import type { WhissleClient } from "./whissle.js";
 import type { ShowRuntime } from "../shows/runtime.js";
 import { formatMoney } from "../domain/money.js";
 
@@ -29,11 +28,12 @@ export class KbSync {
   private timers = new Map<string, NodeJS.Timeout>();
   private lastSignature = new Map<string, string>();
 
-  constructor(private llm: WhissleClient) {}
-
   /** Sync now. Returns false when there was nothing new to say. */
   async syncShow(rt: ShowRuntime): Promise<{ uploaded: boolean; lots: number; reason?: string }> {
-    if (!config.whissle.apiKey || !config.whissle.agentId) {
+    // Sync to the show's OWN agent — the one its catalog owns — so a lineup
+    // never lands on another seller's knowledge base.
+    const agentId = rt.agentId;
+    if (!config.whissle.apiKey || !agentId) {
       return { uploaded: false, lots: 0, reason: "no Whissle credentials" };
     }
 
@@ -48,8 +48,8 @@ export class KbSync {
 
     // Replace rather than accumulate: an agent that collects six stale copies of
     // the same lineup will retrieve the wrong one.
-    await this.removePrevious(title);
-    await this.llm.uploadKb(`${title}.md`, doc);
+    await this.removePrevious(agentId, title);
+    await rt.llm.uploadKb(`${title}.md`, doc);
 
     this.lastSignature.set(rt.showId, signature);
     return { uploaded: true, lots: listings.length };
@@ -75,9 +75,9 @@ export class KbSync {
     this.lastSignature.delete(showId);
   }
 
-  private async removePrevious(title: string): Promise<void> {
+  private async removePrevious(agentId: string, title: string): Promise<void> {
     try {
-      const r = await fetch(`${config.whissle.base}/api/agents/${config.whissle.agentId}/kb`, {
+      const r = await fetch(`${config.whissle.base}/api/agents/${agentId}/kb`, {
         headers: { Authorization: `Bearer ${config.whissle.apiKey}` },
       });
       if (!r.ok) return;
@@ -85,7 +85,7 @@ export class KbSync {
       const docs = Array.isArray(body) ? body : body.documents || [];
       for (const d of docs) {
         if ((d.title || "").startsWith(title)) {
-          await fetch(`${config.whissle.base}/api/agents/${config.whissle.agentId}/kb/${d.id}`, {
+          await fetch(`${config.whissle.base}/api/agents/${agentId}/kb/${d.id}`, {
             method: "DELETE",
             headers: { Authorization: `Bearer ${config.whissle.apiKey}` },
           }).catch(() => {});

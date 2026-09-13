@@ -141,6 +141,19 @@ const CASES: GuardCase[] = [
     expect: "allow",
   },
   {
+    // Regression: found on a live eBay Live show. An inventory search returns
+    // several lots at different quantities; the guard checked "last one" against
+    // only the first and blocked a correct reply.
+    name: "covers two lots at different quantities in one reply",
+    question: "any jordans",
+    answer: "We have two: the Chicago Reimagined in a 10 (1 left) and the Travis Mocha in a 9, the last one.",
+    claims: [
+      { text: "Chicago Reimagined size 10 has 1 left", factId: `listing:${PINNED}#availability` },
+      { text: "Travis Mocha size 9 is the last one", factId: "listing:lst_travis_9#availability" },
+    ],
+    expect: "allow",
+  },
+  {
     name: "says sold out when stock remains",
     question: "are the pandas gone",
     answer: "Those are sold out, sorry!",

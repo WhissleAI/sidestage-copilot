@@ -116,39 +116,51 @@ export const priceGuard: Guard = {
 };
 
 // ── 2. availability ───────────────────────────────────────────────────────────
+//
+// Checks run against EVERY listing the reply was grounded in, not just the first
+// one slot resolution picked. Inventory search ("any griffey") routinely returns
+// several lots, and a reply that says "the 1989 has 2 available and the 1994 is
+// the last one" is correct — but a guard holding a single listing read "last one"
+// against the 1989's quantity of 2 and blocked it.
 export const availabilityGuard: Guard = {
   name: "availability",
   run(i: GuardInput): GuardResult {
-    const listing = firstResolvedListing(i);
-    if (!listing) return na("availability");
+    const listings = groundedListings(i);
+    if (!listings.length) return na("availability");
     const a = i.draft.answer;
 
     const claimsAvailable = ASSERTS_AVAILABLE.test(a);
     const claimsSoldOut = ASSERTS_SOLD_OUT.test(a);
 
-    if (claimsAvailable && !claimsSoldOut && listing.qty === 0) {
-      return fail("availability", "block", `Reply says the item is available but ${listing.title} has 0 left.`,
+    // Only a problem when EVERY grounded lot is out of stock. With several in
+    // play, "yes we have some" is true if any of them does.
+    if (claimsAvailable && !claimsSoldOut && listings.every((l) => l.qty === 0)) {
+      const l = listings[0];
+      return fail("availability", "block", `Reply says the item is available but ${l.title} has 0 left.`,
         { expected: "sold out (qty 0)", found: "available" });
     }
-    if (claimsSoldOut && !claimsAvailable && listing.qty > 0) {
-      return fail("availability", "revise", `Reply says sold out but ${listing.qty} remain.`,
-        { expected: `${listing.qty} available`, found: "sold out" });
+    if (claimsSoldOut && !claimsAvailable && listings.every((l) => l.qty > 0)) {
+      const l = listings[0];
+      return fail("availability", "revise", `Reply says sold out but ${l.qty} remain.`,
+        { expected: `${l.qty} available`, found: "sold out" });
     }
 
     // "last one" is a scarcity claim the prohibited-claims policy only permits
-    // when it is literally true.
-    if (/\b(last (?:one|pair|piece)|only one left|final one)\b/i.test(a) && listing.qty !== 1) {
-      return fail("availability", "block", `Reply calls it the last one but quantity is ${listing.qty}.`,
-        { expected: "qty 1", found: `qty ${listing.qty}` });
+    // when it is literally true of SOMETHING the reply is about.
+    if (/\b(last (?:one|pair|piece)|only one left|final one)\b/i.test(a) && !listings.some((l) => l.qty === 1)) {
+      const l = listings[0];
+      return fail("availability", "block", `Reply calls it the last one but quantity is ${l.qty}.`,
+        { expected: "qty 1", found: `qty ${l.qty}` });
     }
 
-    // A stated count must match the live count.
+    // A stated count must match the live count of one of the grounded lots.
     const counts = [...a.matchAll(/\b(\d{1,3})\s*(?:left|available|in stock|remaining|pairs?|units?)\b/gi)]
       .map((m) => Number(m[1]));
     for (const c of counts) {
-      if (c !== listing.qty) {
-        return fail("availability", "block", `Reply states ${c} available; the listing has ${listing.qty}.`,
-          { expected: `${listing.qty}`, found: `${c}` });
+      if (!listings.some((l) => l.qty === c)) {
+        return fail("availability", "block",
+          `Reply states ${c} available; no lot it cites has that quantity.`,
+          { expected: listings.map((l) => String(l.qty)).join(" or "), found: `${c}` });
       }
     }
 
@@ -302,13 +314,41 @@ export const piiGuard: Guard = {
   },
 };
 
-/** The listing the question resolved to, read at CURRENT state. */
+/** The listing the question resolved to, read at CURRENT state. Guards that
+ *  reason about ONE item (a price commitment, a floor) use this. */
 function firstResolvedListing(i: GuardInput) {
   for (const id of i.slots.listingIds) {
     const l = i.currentListings.get(id);
     if (l) return l;
   }
-  return null;
+  // An inventory search resolves no slot but still grounds in real listings.
+  return groundedListings(i)[0] ?? null;
+}
+
+/**
+ * The listings the reply is ABOUT.
+ *
+ * Slot-resolved listings when the buyer named an item ("how many pandas left") —
+ * a scarcity claim there must be true of THAT lot, and checking it against every
+ * lot in evidence would let "this is the last pair" pass because some unrelated
+ * item happens to have one left.
+ *
+ * Everything grounded when the question was an inventory search ("any griffey"),
+ * because the reply legitimately covers several lots at different quantities.
+ */
+function groundedListings(i: GuardInput) {
+  const resolve = (ids: Iterable<string>) => {
+    const out = [];
+    for (const id of new Set(ids)) {
+      const l = i.currentListings.get(id);
+      if (l) out.push(l);
+    }
+    return out;
+  };
+
+  const named = resolve(i.slots.listingIds);
+  if (named.length) return named;
+  return resolve(i.facts.map((f) => f.listingId).filter((x): x is string => Boolean(x)));
 }
 
 export const GUARDS: Guard[] = [

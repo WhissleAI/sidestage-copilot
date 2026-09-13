@@ -21,6 +21,8 @@ export const config = {
   dbPath: resolve(process.env.DB_PATH || "./data/sidestage.db"),
   /** One SQLite file per watched live show. */
   showsDir: resolve(process.env.SHOWS_DIR || "./data/shows"),
+  /** Seller catalogs the operator picks from when starting a session. */
+  catalogsDir: resolve(process.env.CATALOGS_DIR || "./fixtures/catalogs"),
   /** Each watched show costs a browser page; cap it. */
   maxWatchedShows: num("MAX_WATCHED_SHOWS", 6),
 

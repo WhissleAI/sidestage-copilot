@@ -44,6 +44,8 @@ export interface LiveLot {
 }
 
 export interface WatcherEvents {
+  /** The show's real name, read off the page once on attach. */
+  onTitle?: (title: string) => void;
   onComment?: (c: LiveComment) => void;
   onLot?: (l: LiveLot) => void;
   onViewers?: (n: number) => void;
@@ -130,6 +132,9 @@ export class EbayLiveWatcher {
     // The first scrape is a BACKLOG, not new traffic: mark everything already on
     // screen as seen so a freshly attached show does not replay an hour of chat
     // through the reply pipeline.
+    const pageTitle = (await this.page.title()).replace(/\s*\|\s*eBay Live.*$/i, "").trim();
+    if (pageTitle) this.o.onTitle?.(pageTitle);
+
     const backlog = await this.scrape();
     for (const c of backlog.comments) this.seen.add(c.id);
     if (backlog.lot) this.emitLot(backlog.lot);

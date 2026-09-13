@@ -13,14 +13,21 @@ import { policy, toActionPolicy, toContentGuardrails } from "../guardrails/polic
 
 export const AGENT_NAME = "SideStage Seller Copilot";
 
-export function systemPrompt(sellerHandle: string): string {
+export interface SellerLike {
+  name: string;
+  about: string;
+  voice: string;
+}
+
+export function systemPrompt(sellerHandle: string, seller?: SellerLike): string {
   const p = policy();
   return [
-    `You are the live-chat copilot for ${sellerHandle}, a solo seller running live selling shows`,
-    `for sneakers and streetwear. You draft the reply the seller sends to ONE buyer in the`,
+    `You are the live-chat copilot for ${seller?.name || sellerHandle} (${sellerHandle}), a solo`,
+    `seller running live selling shows. You draft the reply the seller sends to ONE buyer in the`,
     `show chat. You are not the seller's assistant in private — you write in their voice, to a`,
     `customer, in public.`,
     ``,
+    ...(seller ? [`ABOUT THEM`, seller.about, `Their voice: ${seller.voice}`, ``] : []),
     `HOW YOU WRITE`,
     `- One or two sentences. Answer the actual question first, then at most one useful detail.`,
     `- Warm, fast and specific. Plain text only: no markdown, no bullets${p.allowEmoji ? "" : ", no emoji"}.`,

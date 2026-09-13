@@ -4,7 +4,6 @@
 
 import { config, hasWhissleCreds } from "../config.js";
 import { WhissleClient } from "../llm/whissle.js";
-import type { LlmPort } from "../llm/types.js";
 import { EventHub } from "./hub.js";
 import { ShowRegistry, DEMO_SHOW_ID } from "../shows/registry.js";
 import { KbSync } from "../llm/kbSync.js";
@@ -37,8 +36,8 @@ export async function buildContext(): Promise<AppContext> {
     timeoutMs: Math.max(4000, config.latencyBudgetMs * 3),
   });
 
-  const shows = new ShowRegistry(llm as LlmPort, hub);
-  const kb = new KbSync(llm);
+  const shows = new ShowRegistry(hub);
+  const kb = new KbSync();
 
   let heartbeat: NodeJS.Timeout | null = null;
 
@@ -54,11 +53,18 @@ export async function buildContext(): Promise<AppContext> {
       heartbeat = setInterval(() => hub.heartbeat(), 20_000);
 
       // Attach to eBay Live shows named at boot: WATCH_EBAY=id1,id2
+      // The first one that attaches becomes the ACTIVE show, so a console that
+      // opens without a showId lands on the live stream rather than the demo.
       const watch = (process.env.WATCH_EBAY || "").split(",").map((x) => x.trim()).filter(Boolean);
+      let activated = false;
       for (const id of watch) {
         try {
           const rt = await shows.attachEbayLive(id);
           console.log(`  watching eBay Live ${id} as ${rt.showId}`);
+          if (!activated) {
+            shows.activate(rt.showId);
+            activated = true;
+          }
           void kb.syncShow(rt);
         } catch (e) {
           console.warn(`  could not attach eBay Live ${id}: ${(e as Error).message}`);

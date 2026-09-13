@@ -94,12 +94,25 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
     el("status").innerHTML = '<span class="dot ' + (cls || "") + '" id="dot"></span>' + text;
   }
 
+  // Whissle emits voice metadata on its own frames, slightly out of step with
+  // the transcript. Hold the most recent and attach it to the next final
+  // segment — near enough at a one-utterance granularity, and far simpler than
+  // trying to align two streams by timestamp.
+  var pending = { emotion: null, intent: null, speechRate: null };
+
   async function postTranscript(showId, text) {
     if (!text || !text.trim()) return;
+    var body = {
+      text: text,
+      emotion: pending.emotion,
+      intent: pending.intent,
+      speechRate: pending.speechRate
+    };
+    pending = { emotion: null, intent: null, speechRate: null };
     await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/transcript", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: text })
+      body: JSON.stringify(body)
     }).catch(function (e) { log("transcript post failed: " + e.message); });
   }
 
@@ -141,6 +154,11 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
           var final = d.final !== false;
           if (text && final) { log("host: " + text); postTranscript(showId, text); }
         } else if (/metadata|signal/i.test(type)) {
+          var m = d.metadata || d;
+          if (m.emotion) pending.emotion = m.emotion;
+          if (m.intent) pending.intent = m.intent;
+          if (typeof m.speech_rate === "number") pending.speechRate = m.speech_rate;
+          if (typeof m.speechRate === "number") pending.speechRate = m.speechRate;
           log("signal: " + JSON.stringify(d).slice(0, 140));
         }
       });

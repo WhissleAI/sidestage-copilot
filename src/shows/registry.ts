@@ -6,7 +6,6 @@
 // to the SSE hub tagged with the show they came from.
 
 import { config } from "../config.js";
-import type { LlmPort } from "../llm/types.js";
 import type { EventHub, EventName } from "../api/hub.js";
 import { ShowRuntime } from "./runtime.js";
 import { parseEventId } from "../ingest/ebaylive/discovery.js";
@@ -15,6 +14,9 @@ export const DEMO_SHOW_ID = "show_ep42";
 
 export interface ShowSummary {
   showId: string;
+  /** The Whissle agent answering for this show — one per catalog. */
+  agentId: string;
+  catalogId: string | null;
   title: string;
   sellerHandle: string;
   source: "simulated" | "ebaylive";
@@ -29,7 +31,17 @@ export interface ShowSummary {
 export class ShowRegistry {
   private runtimes = new Map<string, ShowRuntime>();
 
-  constructor(private llm: LlmPort, private hub: EventHub) {}
+  /**
+   * The show a console sees when it does not name one.
+   *
+   * The operator console opens one SSE stream and does not pass a showId, so
+   * something has to decide which show it is looking at. Rather than make the
+   * console carry a switcher before it needs one, the server holds an ACTIVE
+   * show that `POST /api/shows/:id/activate` moves.
+   */
+  private activeShowId: string = DEMO_SHOW_ID;
+
+  constructor(private hub: EventHub) {}
 
   /** Fan a runtime's event out to consoles, tagged with its show. */
   private events = {
@@ -48,7 +60,6 @@ export class ShowRegistry {
       title: "Friday Night Grails — Ep. 42",
       sellerHandle: "@kicksbyrae",
       source: "simulated",
-      llm: this.llm,
       events: this.events,
       dbPath: config.dbPath,
     });
@@ -81,7 +92,6 @@ export class ShowRegistry {
       source: "ebaylive",
       externalId: eventId,
       readOnly: true,
-      llm: this.llm,
       events: this.events,
     });
     this.runtimes.set(showId, rt);
@@ -103,12 +113,24 @@ export class ShowRegistry {
     const rt = this.runtimes.get(showId);
     if (!rt) return;
     this.runtimes.delete(showId);
+    if (this.activeShowId === showId) this.activeShowId = DEMO_SHOW_ID;
     await rt.close().catch(() => {});
     this.hub.emit("shows", this.list());
   }
 
+  get active(): string {
+    return this.runtimes.has(this.activeShowId) ? this.activeShowId : DEMO_SHOW_ID;
+  }
+
+  activate(showId: string): ShowSummary {
+    if (!this.runtimes.has(showId)) throw new Error(`show ${showId} is not being watched`);
+    this.activeShowId = showId;
+    this.hub.emit("shows", this.list());
+    return this.list().find((s) => s.showId === showId)!;
+  }
+
   get(showId?: string | null): ShowRuntime {
-    const rt = this.runtimes.get(showId || DEMO_SHOW_ID);
+    const rt = this.runtimes.get(showId || this.active);
     if (!rt) throw new Error(`show ${showId} is not being watched`);
     return rt;
   }
@@ -122,6 +144,8 @@ export class ShowRegistry {
       const s = rt.show;
       return {
         showId: rt.showId,
+        agentId: rt.agentId,
+        catalogId: rt.catalogId,
         title: s.title,
         sellerHandle: s.sellerHandle,
         source: s.source,
