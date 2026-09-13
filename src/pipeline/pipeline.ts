@@ -148,7 +148,7 @@ export class Pipeline {
   }
 
   // ── the reply path ────────────────────────────────────────────────────────
-  private async draft(msg: ChatMessage, attempt = 0): Promise<void> {
+  private async draft(msg: ChatMessage, attempt = 0, previous?: string): Promise<void> {
     const timer = new SpanTimer();
     const show = this.d.repo.show();
 
@@ -163,17 +163,21 @@ export class Pipeline {
       createdAt: new Date().toISOString(),
     };
     this.proposals.set(proposal.id, proposal);
-    this.counters.proposals++;
+    // A regenerate replaces a proposal; counting it again would inflate the
+    // answered-rate denominator with work the seller already saw.
+    if (!previous) this.counters.proposals++;
     this.d.events.onProposal(proposal);
 
     // 1. retrieve (local, no network)
     const r = this.d.retriever.retrieve(msg.text, { pinnedId: show.pinnedListingId });
     timer.mark("retrieve");
 
-    // 2. cache, keyed on the versions of every listing the grounding touched
+    // 2. cache, keyed on the versions of every listing the grounding touched.
+    //    A regenerate deliberately skips it: the seller is asking for something
+    //    OTHER than the answer we already have.
     const versions = listingVersions(r.evidence);
     const key = cacheKey({ question: msg.text, versions });
-    const hit = this.cache.get(key);
+    const hit = previous ? null : this.cache.get(key);
     if (hit) {
       proposal = this.finish(proposal, {
         ...hit, spans: timer.result(config.latencyBudgetMs, true),
@@ -195,6 +199,7 @@ export class Pipeline {
         },
         msg.author,
         msg.text,
+        previous,
       );
       timer.mark("compose");
 
@@ -239,7 +244,7 @@ export class Pipeline {
       // than dropping a buyer's question on the floor.
       if (e instanceof LlmError && e.isRateLimited && attempt < 3) {
         await sleep(350 * 2 ** attempt + Math.random() * 250);
-        return this.draft(msg, attempt + 1);
+        return this.draft(msg, attempt + 1, previous);
       }
       const failed: ReplyProposal = {
         ...proposal,
@@ -344,8 +349,9 @@ export class Pipeline {
   async regenerate(id: string): Promise<ReplyProposal> {
     const p = this.proposals.get(id);
     if (!p) throw new Error(`proposal ${id} not found`);
-    this.cache.clear();
-    await this.draft(p.message);
+    // Retrieval re-runs too, so a regenerate after a price move is grounded on
+    // the new state rather than re-wording a stale answer.
+    await this.draft(p.message, 0, p.draft || undefined);
     return this.proposals.get(id)!;
   }
 

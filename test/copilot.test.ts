@@ -11,6 +11,7 @@ import { ActionProposer } from "../src/actions/proposer.js";
 import { extractMoneyCents, formatMoney } from "../src/domain/money.js";
 import { extractJsonObject, normalizeFactId, parseDraft } from "../src/compose/composer.js";
 import { toContentGuardrails, toActionPolicy, policy } from "../src/guardrails/policy.js";
+import { buildRegenerateBlock } from "../src/compose/prompts.js";
 
 // ── ingest ──────────────────────────────────────────────────────────────────
 
@@ -282,4 +283,40 @@ test("fact ids never reach the buyer-facing answer", () => {
   assert.match(d.answer, /Devers \(\$38\)/);
   // The citation itself must survive — only the buyer-facing copy is cleaned.
   assert.equal(d.claims[0].factId, "listing:lst_83de657499aa#price");
+});
+
+// ── inventory search: how collectors actually type ──────────────────────────
+
+test("collector shorthand is recognised as an inventory search", () => {
+  const r = rig();
+  const q = (text: string) =>
+    r.retriever.retrieve(text, { pinnedId: PINNED }).slots.inventoryQuery;
+
+  // "1/1" is a one-of-one card. The term regex excluded "/" and "#", so these
+  // fell through to a generic defer instead of a grounded "not in the lineup".
+  assert.equal(q("Any 1/1?"), "1/1");
+  assert.equal(q("any #/25"), "#/25");
+  assert.equal(q("got any rc"), "rc");
+  // Attribute questions must still not be read as inventory hunts.
+  assert.equal(q("any deal if i take two"), null);
+  assert.equal(q("whats the return policy"), null);
+});
+
+test("a question with no match in the lineup retrieves ONE fact, not a pile", () => {
+  const r = rig();
+  const res = r.retriever.retrieve("any lakers jerseys", { pinnedId: PINNED });
+  assert.equal(res.evidence.length, 1, "an honest 'we don't have that' needs only the lineup");
+  assert.equal(res.evidence[0].factId, "catalog:lineup");
+});
+
+test("regenerate asks for a DIFFERENT reply, not the same prompt again", () => {
+  // The agent is effectively deterministic: re-running an identical prompt
+  // returns identical text, so Regenerate appeared to do nothing at all.
+  const base = "=== GROUNDING FACTS ===\n[listing:x#price] It is $10.";
+  const block = buildRegenerateBlock(base, "It is ten dollars.");
+  assert.ok(block.startsWith(base), "the grounding must be preserved verbatim");
+  assert.match(block, /REGENERATE/);
+  assert.match(block, /It is ten dollars\./, "the rejected draft must be shown to the model");
+  assert.match(block, /DIFFERENT reply/);
+  assert.match(block, /SAME facts/);
 });

@@ -77,10 +77,14 @@ const FIELD_EXPANSION: Partial<Record<FactField, FactField[]>> = {
 };
 
 /** "any X", "got any X", "do you have X", "looking for X", "X?" as a bare name. */
+// The character class allows "/" and "#" because collectors ask in shorthand —
+// "any 1/1?", "any #/25", "got any RCs". Without them "Any 1/1?" matched nothing
+// and fell through to a generic defer instead of a grounded "not tonight".
+const ITEM_TERM = "[a-z0-9'’\\-\\./# ]{2,40}";
 const INVENTORY_SEARCH = [
-  /\b(?:got |have |u got |you got |do you have |any more |anymore |any )\s*([a-z0-9'’\-\. ]{3,40})\??$/i,
-  /\blooking for\s+([a-z0-9'’\-\. ]{3,40})\??$/i,
-  /\bany\s+([a-z0-9'’\-\. ]{3,40})\b/i,
+  new RegExp(`\\b(?:got |have |u got |you got |do you have |any more |anymore |any )\\s*(${ITEM_TERM})\\??$`, "i"),
+  new RegExp(`\\blooking for\\s+(${ITEM_TERM})\\??$`, "i"),
+  new RegExp(`\\bany\\s+(${ITEM_TERM})\\b`, "i"),
 ];
 
 /**
@@ -172,7 +176,8 @@ export function resolveSlots(
     if (!words.length || ATTRIBUTE_WORD.test(words[0])) continue;
 
     const term = words.join(" ");
-    if (term.length >= 3) {
+    // "1/1" is only three characters but is a real, specific ask.
+    if (term.length >= 2) {
       inventoryQuery = term;
       break;
     }

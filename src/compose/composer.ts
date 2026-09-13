@@ -9,7 +9,9 @@
 
 import type { Claim } from "../domain/types.js";
 import type { LlmPort } from "../llm/types.js";
-import { buildContextBlock, buildRepairBlock, buildUserMessage, type ComposeInputs } from "./prompts.js";
+import {
+  buildContextBlock, buildRegenerateBlock, buildRepairBlock, buildUserMessage, type ComposeInputs,
+} from "./prompts.js";
 
 /** The tone guard caps a reply at 400 characters — roughly 110 tokens of prose,
  *  plus the claims array. 400 max_tokens was budgeting for output we would reject
@@ -28,8 +30,15 @@ export interface Draft {
 export class Composer {
   constructor(private llm: LlmPort) {}
 
-  async draft(inputs: ComposeInputs, author: string, question: string): Promise<{ draft: Draft; contextBlock: string }> {
-    const contextBlock = buildContextBlock(inputs);
+  async draft(
+    inputs: ComposeInputs,
+    author: string,
+    question: string,
+    /** The reply the seller rejected, when this is a regenerate. */
+    previous?: string,
+  ): Promise<{ draft: Draft; contextBlock: string }> {
+    const base = buildContextBlock(inputs);
+    const contextBlock = previous ? buildRegenerateBlock(base, previous) : base;
     const raw = await this.llm.chatTurn(buildUserMessage(author, question), contextBlock, { maxTokens: REPLY_MAX_TOKENS });
     return { draft: parseDraft(raw), contextBlock };
   }

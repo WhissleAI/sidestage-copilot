@@ -131,6 +131,26 @@ export function buildRepairBlock(base: string, failures: { guard: string; reason
   );
 }
 
+/**
+ * The regenerate turn.
+ *
+ * Re-running the same prompt against the same facts returns the SAME text — the
+ * agent is effectively deterministic, so a Regenerate button that just re-asks
+ * is a button that does nothing visible. Show the model what it already wrote
+ * and ask for a genuinely different take on the same facts.
+ */
+export function buildRegenerateBlock(base: string, previous: string): string {
+  return (
+    base +
+    "\n\n=== REGENERATE ===\n" +
+    `You already drafted this reply, and the seller asked for a different one:\n` +
+    `  "${previous}"\n` +
+    "Write a DIFFERENT reply to the same question, grounded in the SAME facts above.\n" +
+    "Change the wording, the order, or which single detail you add — not the facts.\n" +
+    "If the facts genuinely do not answer the question, say so more directly than before."
+  );
+}
+
 export function buildUserMessage(author: string, text: string): string {
   return `Buyer "${author}" asked: ${JSON.stringify(text)}\n\nWrite the seller's reply as the JSON object.`;
 }
