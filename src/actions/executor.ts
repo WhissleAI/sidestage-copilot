@@ -89,6 +89,12 @@ export class ActionStore {
     return this.get(id)!;
   }
 
+  /** The action carrying this idempotency key, if one already exists. */
+  byIdempotencyKey(key: string): ActionProposal | null {
+    const r = this.d.prepare("SELECT * FROM actions WHERE idempotency_key = ?").get(key) as ActionRow | undefined;
+    return r ? toAction(r) : null;
+  }
+
   /** Has this exact intent already been committed? */
   commitFor(idemKey: string): { action_id: string; committed_at: string; result: string } | null {
     return (this.d.prepare("SELECT action_id, committed_at, result FROM action_commits WHERE idempotency_key = ?")
@@ -144,6 +150,14 @@ export class ActionExecutor {
       }),
     );
 
+    // The same intent against the same listing VERSION is the same action, not a
+    // new one — that is what the idempotency key means. Returning the existing
+    // row keeps a restarted process (whose in-memory dedupe set is empty) from
+    // colliding with actions already on disk.
+    const key = idempotencyKey(kind, listingId, Number(pre.before.version ?? 0), params);
+    const prior = this.store.byIdempotencyKey(key);
+    if (prior) return prior;
+
     const action: ActionProposal = {
       id: `act_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
       kind,
@@ -155,7 +169,7 @@ export class ActionExecutor {
       before: pre.before,
       status: pre.ok ? "proposed" : "preflight_failed",
       preflight: { ok: pre.ok, checks: pre.checks },
-      idempotencyKey: idempotencyKey(kind, listingId, Number(pre.before.version ?? 0), params),
+      idempotencyKey: key,
       undoableUntil: null,
       createdAt: new Date().toISOString(),
     };

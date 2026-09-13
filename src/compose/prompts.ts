@@ -40,6 +40,8 @@ export function buildContextBlock(i: ComposeInputs): string {
     "- Warm, fast, specific. Plain text: no markdown, no bullet points, no emoji.",
     "- Never invent a price, a quantity, a date, a certificate number or a policy.",
     "- Every factual statement must come from a GROUNDING FACT below and cite its id.",
+    "- Put ids ONLY in the `claims` array. NEVER write a fact id inside `answer` —",
+    "  the buyer sees `answer`, and an id in it looks like a system error.",
     "- If the facts do not answer the question, say the host will cover it shortly. Do not guess.",
     "",
   );

@@ -32,6 +32,15 @@ export const priceGuard: Guard = {
 
     const echoed = new Set(extractMoneyCents(i.question));
     const priceFacts = i.facts.filter((f) => f.numericCents !== undefined);
+
+    // Every money amount that any retrieved fact STATES, not just the ones a
+    // fact carries as a typed price. Shipping costs, flat fees and thresholds
+    // live in the prose of a listing or policy fact ("ships USPS Ground
+    // Advantage at a flat $9.95"), and without this the guard read a shipping
+    // charge as an item-price commitment and blocked it for being below the
+    // floor. Found against a real eBay Live show, not in the eval set.
+    const statedInFacts = new Set<number>();
+    for (const f of i.facts) for (const c of extractMoneyCents(f.text)) statedInFacts.add(c);
     const listing = firstResolvedListing(i);
     const cap = policy().maxDiscountPct;
 
@@ -60,7 +69,12 @@ export const priceGuard: Guard = {
       //     offer in order to refuse it commits to nothing.
       if (echoed.has(amount) && declining) continue;
 
-      // (c) Otherwise this number is a COMMITMENT: either accepting the buyer's
+      // (c) The amount is stated verbatim by a grounding fact that is not a
+      //     price fact — a shipping charge, a free-shipping threshold, a bundle
+      //     percentage. Repeating a fact is not making an offer.
+      if (statedInFacts.has(amount)) continue;
+
+      // (d) Otherwise this number is a COMMITMENT: either accepting the buyer's
       //     offer, or proposing a discount of our own. A proposed discount is
       //     legitimate — the discount policy authorises it — so it is not
       //     required to match an existing fact. It is required to respect the

@@ -269,3 +269,17 @@ test("the policy projects into the gateway's action_policy shape", () => {
   assert.equal(ap.send_email, "approve");
   assert.equal(ap.send_sms, "approve");
 });
+
+test("fact ids never reach the buyer-facing answer", () => {
+  // Observed against the live agent: it wrote the citation inline, producing
+  // "Mookie Betts ($92) listing:lst_83de657499aa#price, Rafael Devers ...".
+  const d = parseDraft(JSON.stringify({
+    answer: "We have Betts ($92) listing:lst_83de657499aa#price and Devers ($38) [listing:lst_c2#price].",
+    claims: [{ text: "Betts is $92", factId: "listing:lst_83de657499aa#price" }],
+  }));
+  assert.ok(!/listing:/.test(d.answer), `answer still contains an id: ${d.answer}`);
+  assert.match(d.answer, /Betts \(\$92\)/);
+  assert.match(d.answer, /Devers \(\$38\)/);
+  // The citation itself must survive — only the buyer-facing copy is cleaned.
+  assert.equal(d.claims[0].factId, "listing:lst_83de657499aa#price");
+});

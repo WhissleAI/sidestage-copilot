@@ -33,6 +33,19 @@ recorded per decision, as are the places the implementation diverges from this d
 
 Runnable locally. There is no hosted deployment — see **Known limitations**.
 
+**It runs on real eBay Live shows.** Attach to a live stream, import the seller's
+catalog, and the copilot answers real buyers grounded in real inventory while the live
+lot's price moves under it:
+
+```bash
+npm run dev                                   # server on :8790
+npm run ebay:shows                            # what is on air (best effort)
+npm run demo:ebaylive -- <eventId|showUrl>    # attach + import catalog + ask real questions
+```
+
+See **[`docs/EBAY_LIVE.md`](docs/EBAY_LIVE.md)** for how that works, what is real, and
+what its limits are.
+
 ```bash
 # ── backend ──────────────────────────────────────────────────────────────────
 git clone https://github.com/WhissleAI/sidestage-copilot && cd sidestage-copilot
@@ -92,7 +105,7 @@ the repair pass re-ground, and both events land in the audit chain.
 ### Tests, evaluations and the benchmark
 
 ```bash
-npm test     # 39 unit tests — actions, audit chain, ingest, cache, ladder, proposer
+npm test     # 41 unit tests — actions, audit chain, ingest, cache, ladder, proposer
 npm run eval # 6 evaluations — guardrail precision/recall, retrieval ablation
 npm run bench -- 24   # latency: per-stage p50/p95/p99, cold vs cached
 ```
@@ -115,6 +128,10 @@ This repository. Start here:
 | `src/actions/` | `preflight.ts`, `executor.ts` (two-phase commit + rollback), `audit.ts` (hash chain), `proposer.ts`, `marketplace/` |
 | `src/llm/` | `whissle.ts` (the agent client), `agentSpec.ts` + `seedAgent.ts` (agent config, incl. its guardrails) |
 | `src/autonomy/ladder.ts` | the five-rung copilot-to-automation ladder |
+| `src/ingest/ebaylive/` | real eBay Live ingestion — `watcher.ts` (chat + lots), `discovery.ts` |
+| `src/shows/` | `runtime.ts` (one isolated pipeline per show), `registry.ts`, `catalogImport.ts` |
+| `src/llm/kbSync.ts` | pushes a show's catalog into the Whissle agent's knowledge base |
+| `src/api/audioBridge.ts` | host-audio capture into a Whissle listen-only session |
 | `src/latency/` | span instrumentation and the version-keyed reply cache |
 
 ## Access notes / credentials
@@ -148,15 +165,23 @@ Stated plainly, because these are the things a reviewer would otherwise find.
 3. **No neural embeddings.** The second retrieval leg is character-trigram cosine, not a
    learned embedding. `docs/EVALS.md` measures exactly what it buys (nothing on clean questions;
    it halves degradation on misspelled ones). An ONNX MiniLM is a drop-in at the same seam.
-4. **Host audio is scripted, not live.** The rolling show-context engine consumes a scripted
-   transcript. The real path — a Whissle `listen_only` voice session that streams transcript and
-   emotion metadata — is implemented in `WhissleClient.startListenSession()` but is not wired to
-   a browser audio capture in this build.
-5. **Single show, single seller, in-process.** One SQLite database, one show row, no auth, no
-   tenancy. CORS is wide open, which is correct for a local operator tool and wrong for anything
-   deployed.
-6. **Chat replies are drafted, never delivered.** Nothing posts back to a marketplace or to
-   Twitch. `TwitchChatSource` is read-only by construction and has no send path — see
-   `docs/TDD.md` §8 for why that is a deliberate boundary rather than an unfinished feature.
-7. **The `comparison` intent has no dedicated handler.** It retrieves and answers like any other
+4. **Host audio needs one operator click.** The listen-only Whissle session mints correctly and
+   transcripts feed the show context, but browsers require a user gesture to hand a page tab
+   audio, so `/audio-bridge` is a page the seller opens and clicks once. It cannot be started
+   from the backend — by us or anyone.
+5. **eBay Live ingestion is a scrape, not an API.** eBay publishes no Live chat or lot API, so
+   `src/ingest/ebaylive/watcher.ts` drives a headless browser over the show's own player DOM.
+   Read-only by construction, but it is subject to selector drift on an eBay deploy and to
+   eBay's terms on automated access. Full details and limits in
+   [`docs/EBAY_LIVE.md`](docs/EBAY_LIVE.md).
+6. **A monitored show's lineup must be imported.** eBay Live renders only the lot on the block;
+   the full list needs sign-in. Without a catalog import the copilot honestly abstains on
+   everything except the current lot.
+7. **Chat replies are drafted, never delivered.** Nothing posts back to eBay or Twitch. Both
+   live sources are read-only by construction with no send path — see `docs/TDD.md` §8 for why
+   that is a deliberate boundary rather than an unfinished feature.
+8. **No auth, no tenancy.** Shows are isolated per SQLite file, but anyone who can reach the
+   port can drive every show. CORS is wide open, which is correct for a local operator tool and
+   wrong for anything deployed.
+9. **The `comparison` intent has no dedicated handler.** It retrieves and answers like any other
    question rather than running a structured spec diff, even though `ResearchService` can produce one.

@@ -19,6 +19,10 @@ function num(name: string, dflt: number): number {
 export const config = {
   port: num("PORT", 8790),
   dbPath: resolve(process.env.DB_PATH || "./data/sidestage.db"),
+  /** One SQLite file per watched live show. */
+  showsDir: resolve(process.env.SHOWS_DIR || "./data/shows"),
+  /** Each watched show costs a browser page; cap it. */
+  maxWatchedShows: num("MAX_WATCHED_SHOWS", 6),
 
   whissle: {
     apiKey: process.env.WHISSLE_API_KEY || "",

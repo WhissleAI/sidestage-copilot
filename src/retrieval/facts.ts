@@ -96,8 +96,22 @@ export function listingFacts(l: ListingWithDescription): Fact[] {
 
 export function buildFacts(repo: Repo): Fact[] {
   const facts: Fact[] = [];
+  const listings = repo.listings();
 
-  for (const l of repo.listings()) facts.push(...listingFacts(l));
+  for (const l of listings) facts.push(...listingFacts(l));
+
+  // One fact describing the whole lineup. This is what makes "do you have X?"
+  // answerable and, more importantly, makes "no, not tonight" a GROUNDED answer
+  // rather than an absence of one — the model can cite this instead of guessing.
+  const sellable = listings.filter((l) => l.state !== "ended" && l.qty > 0);
+  facts.push(mk({
+    factId: "catalog:lineup", source: "catalog", label: "Catalog · tonight's lineup",
+    field: "identity",
+    text: sellable.length
+      ? `Tonight's lineup, and the ONLY items available: ${sellable.map((l) => `${l.title} (size ${l.size}, ${formatMoney(l.priceCents)})`).join("; ")}.` +
+        " Anything not on this list is not in tonight's show."
+      : "Nothing is currently available in tonight's lineup.",
+  }));
 
   for (const p of repo.policies()) {
     facts.push(mk({

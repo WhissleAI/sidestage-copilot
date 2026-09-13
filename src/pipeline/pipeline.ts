@@ -125,7 +125,11 @@ export class Pipeline {
       this.pump();
     }
 
-    void this.evaluateActions();
+    // An action proposal failing must never take down chat ingestion: the reply
+    // path is the product, the action rail is an enhancement.
+    void this.evaluateActions().catch((e) =>
+      console.warn(`[pipeline] action evaluation failed: ${(e as Error).message}`),
+    );
     return msg;
   }
 
@@ -364,6 +368,9 @@ export class Pipeline {
       this.seenActionKeys.add(p.dedupeKey);
 
       const action = this.d.executor.propose(p.kind, p.listingId, p.params, p.summary, p.rationale);
+      // `propose` is idempotent; a returned action we have already handled needs
+      // no second approval pass.
+      if (action.status !== "proposed" && action.status !== "preflight_failed") continue;
       const disposition = decideAction(level, p.kind, action.preflight.ok);
       if (disposition.kind === "auto_commit") {
         await this.d.executor.approve(action.id, "copilot").catch(() => {});

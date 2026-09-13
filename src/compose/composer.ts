@@ -77,8 +77,21 @@ export function normalizeFactId(raw: string): string {
   return raw.trim().replace(/^[[\s"'`]+/, "").replace(/[\]\s"'`]+$/, "").trim();
 }
 
+/** Fact ids belong in `claims`, never in the buyer-facing text. Models put them
+ *  inline anyway — observed against the live agent, which emitted
+ *  "Mookie Betts ($92) listing:lst_83de657499aa#price, ...". Strip them, and any
+ *  punctuation left stranded, rather than shipping an id to a buyer. */
+function stripFactIds(s: string): string {
+  return s
+    .replace(/[\[(]?\b(?:listing|policy|qa|market|catalog):[A-Za-z0-9_.:-]+(?:#[A-Za-z_]+)?[\])]?/g, "")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function cleanAnswer(s: string): string {
-  return s.replace(/\s+/g, " ").replace(/^["'`]|["'`]$/g, "").trim();
+  return stripFactIds(s).replace(/\s+/g, " ").replace(/^["'`]|["'`]$/g, "").trim();
 }
 
 function stripFences(s: string): string {

@@ -38,13 +38,20 @@ LLM pool or the seller's attention.
   were being classified as hype and silently dropped. `INTERROGATIVE` now admits a leading
   question word. Found by the benchmark hanging, not by a test — the test came after.
 
+**Real eBay Live ingestion.** `EbayLiveWatcher` attaches to a live eBay Live show and reads its
+buyer chat and current lot from the player DOM — eBay publishes no Live API. Each watched show is
+a `ShowRuntime` with its own SQLite file, pipeline and audit chain. A lot's price moving on air
+bumps the listing version, so the staleness guard and the version-keyed cache run against **real**
+auction movement. Full design, verification and limits: [`EBAY_LIVE.md`](EBAY_LIVE.md).
+
 **Host audio.** Show context comes from what the seller is *saying*, which the catalog cannot
 supply: the catalog knows what the Chicago 1s are, not that she just explained the cracked
 leather is factory-intended. `WhissleClient.startListenSession()` opens a Whissle **listen-only**
-voice session — STT plus emotion metadata, no LLM, no TTS, the bot never speaks — and returns a
-LiveKit room for a browser to publish show audio into. **Divergence: this build feeds
-`ShowContextEngine` from a scripted transcript.** The session mint is implemented and correct;
-the browser audio capture is not wired.
+voice session — STT plus emotion metadata, no LLM, no TTS, the bot never speaks — and
+`/audio-bridge` publishes captured tab audio into it. The `wsk_` key stays server-side; the
+browser gets only a room token. **Constraint, not divergence:** browsers require an operator
+gesture to release tab audio, so capture is a page the seller clicks, never something the backend
+can start.
 
 ## 2. Catalog grounding
 

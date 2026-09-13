@@ -21,6 +21,8 @@ import { formatMoney } from "../domain/money.js";
 import { policy } from "../guardrails/policy.js";
 
 export interface PreflightContext {
+  /** True for a stream we are monitoring but do not own. */
+  readOnlyShow?: boolean;
   /** How many actions have already been committed in this show. */
   committedThisShow: number;
   /** Hard ceiling on writes per show, so a stuck proposer cannot churn the catalog. */
@@ -61,6 +63,14 @@ export function preflight(
     pinned: listing.pinned,
     version: listing.version,
   };
+
+  // ── ownership ─────────────────────────────────────────────────────────────
+  // Monitoring someone else's eBay Live show is read-only by construction: we
+  // hold no seller credentials for it, so a markdown we could never commit would
+  // be theatre. The copilot still drafts replies; it just cannot act.
+  if (ctx.readOnlyShow) {
+    checks.push(no("show is yours to edit", "this is a monitored stream — no seller credentials for it"));
+  }
 
   // ── global limits, every action kind ──────────────────────────────────────
   checks.push(
@@ -190,9 +200,12 @@ export function idempotencyKey(kind: ActionKind, listingId: string, version: num
   return `${kind}:${listingId}:v${version}:${norm}`;
 }
 
-export function showBudgetContext(repo: Repo, d: { committedThisShow: number; committedLastMinute: number }): PreflightContext {
-  void repo;
+export function showBudgetContext(
+  repo: Repo,
+  d: { committedThisShow: number; committedLastMinute: number },
+): PreflightContext {
   return {
+    readOnlyShow: repo.show().readOnly,
     committedThisShow: d.committedThisShow,
     actionBudget: Number(process.env.ACTION_BUDGET_PER_SHOW || 25),
     committedLastMinute: d.committedLastMinute,

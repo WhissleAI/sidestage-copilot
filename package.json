@@ -13,12 +13,16 @@
     "test": "node --import tsx --test test/*.test.ts",
     "eval": "node --import tsx --test test/*.eval.ts",
     "bench": "tsx bench/latency.bench.ts",
-    "demo:stale-price": "tsx bench/stalePrice.demo.ts"
+    "demo:stale-price": "tsx bench/stalePrice.demo.ts",
+    "ebay:watch": "tsx bench/ebayWatch.demo.ts",
+    "ebay:shows": "tsx src/ingest/ebaylive/discovery.ts",
+    "demo:ebaylive": "tsx bench/ebayLive.demo.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "better-sqlite3": "^11.5.0",
-    "fastify": "^5.1.0"
+    "fastify": "^5.1.0",
+    "playwright": "^1.63.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

@@ -22,6 +22,13 @@ export interface ShowState {
   lotQueue: string[];
   autonomyLevel: AutonomyLevel;
   undoWindowS: number;
+  /** Where buyer chat comes from. */
+  source: "simulated" | "ebaylive";
+  /** The eBay Live event id, when source is "ebaylive". */
+  externalId: string | null;
+  /** A show we do not own: every write action is refused at preflight. */
+  readOnly: boolean;
+  status: "live" | "ended";
 }
 
 export interface Listing {

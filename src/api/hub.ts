@@ -9,7 +9,10 @@
 import type { FastifyReply } from "fastify";
 
 export type EventName =
-  | "hello" | "chat" | "proposal" | "action" | "listing" | "audit" | "metrics" | "context";
+  | "hello" | "chat" | "proposal" | "action" | "listing" | "audit" | "metrics" | "context"
+  // Multi-show additions. Every payload above now also carries `showId`, so a
+  // console can watch one show or all of them from a single stream.
+  | "shows" | "show" | "source";
 
 interface Client {
   id: number;

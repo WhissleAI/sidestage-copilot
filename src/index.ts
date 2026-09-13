@@ -22,24 +22,28 @@ async function main(): Promise<void> {
   // deployment behind a shared origin would tighten this.
   await app.register(cors, { origin: true });
 
-  const ctx = buildContext();
+  const ctx = await buildContext();
   await registerRoutes(app, ctx);
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
-  ctx.start();
+  await ctx.start();
 
-  const show = ctx.repo.show();
+  const rows = ctx.shows.list();
   console.log(
     `\nSideStage copilot on http://localhost:${config.port}\n` +
-    `  show        ${show.title} (${show.sellerHandle}) — autonomy ${show.autonomyLevel}\n` +
-    `  catalog     ${ctx.repo.listings().length} listings, ${ctx.retriever.size} grounding facts\n` +
-    `  llm         ${ctx.llmName}${config.whissle.agentId ? ` · agent ${config.whissle.agentId.slice(0, 8)}` : " · NO AGENT SET"}\n` +
-    `  budget      p95 target ${config.latencyBudgetMs}ms\n` +
-    `  chat source ${ctx.chatSource?.name ?? "none (SIMULATE=false)"}\n`,
+    `  llm      ${ctx.llmName}${config.whissle.agentId ? ` · agent ${config.whissle.agentId.slice(0, 8)}` : " · NO AGENT SET"}\n` +
+    `  budget   p95 target ${config.latencyBudgetMs}ms\n` +
+    `  shows    ${rows.length} watched\n` +
+    rows.map((s) =>
+      `           ${s.showId.padEnd(24)} ${s.source.padEnd(10)} ${s.readOnly ? "read-only" : "writable "} ${s.title.slice(0, 40)}\n`,
+    ).join("") +
+    `\n  attach a real eBay Live show:\n` +
+    `    curl -X POST localhost:${config.port}/api/shows/attach -H 'content-type: application/json' \\\n` +
+    `      -d '{"url":"https://www.ebay.com/ebaylive/events/<eventId>/stream"}'\n`,
   );
 
   const shutdown = async () => {
-    ctx.stop();
+    await ctx.stop();
     await app.close();
     process.exit(0);
   };

@@ -1,145 +1,76 @@
-// Composition root. Everything is constructed once here and wired together, so
-// there is exactly one place to read to understand what talks to what.
+// Composition root. One LLM client, one event hub, one show registry — and the
+// registry owns everything per-show, so this file stays a wiring diagram rather
+// than a god object.
 
 import { config, hasWhissleCreds } from "../config.js";
-import { db } from "../db/index.js";
-import { Repo } from "../domain/repo.js";
-import { Retriever } from "../retrieval/retriever.js";
 import { WhissleClient } from "../llm/whissle.js";
 import type { LlmPort } from "../llm/types.js";
-import { AuditLog } from "../actions/audit.js";
-import { ActionExecutor } from "../actions/executor.js";
-import { ActionProposer } from "../actions/proposer.js";
-import { MockMarketplace } from "../actions/marketplace/mock.js";
-import type { RemoteListing } from "../actions/marketplace/port.js";
-import { ResearchService } from "../research/research.js";
-import { ShowContextEngine } from "../ingest/showContext.js";
-import { Pipeline } from "../pipeline/pipeline.js";
 import { EventHub } from "./hub.js";
-import type { ChatSource } from "../ingest/sources.js";
-import { ScriptedHostAudio, SimulatedShowSource } from "../ingest/sources.js";
+import { ShowRegistry, DEMO_SHOW_ID } from "../shows/registry.js";
+import { KbSync } from "../llm/kbSync.js";
 
 export interface AppContext {
-  repo: Repo;
-  retriever: Retriever;
-  audit: AuditLog;
-  executor: ActionExecutor;
-  proposer: ActionProposer;
-  research: ResearchService;
-  showContext: ShowContextEngine;
-  pipeline: Pipeline;
   hub: EventHub;
-  market: MockMarketplace;
+  shows: ShowRegistry;
+  llm: WhissleClient;
   llmName: string;
-  chatSource: ChatSource | null;
-  hostAudio: ScriptedHostAudio | null;
-  snapshot(): Record<string, unknown>;
-  start(): void;
-  stop(): void;
+  kb: KbSync;
+  start(): Promise<void>;
+  stop(): Promise<void>;
 }
 
-export function buildContext(): AppContext {
-  const d = db();
-  const repo = new Repo(d);
-  const retriever = new Retriever(repo);
-  const audit = new AuditLog(d);
+export async function buildContext(): Promise<AppContext> {
   const hub = new EventHub();
 
   if (!hasWhissleCreds()) {
     console.warn(
       "\n  WHISSLE_API_KEY / WHISSLE_AGENT_ID are not set.\n" +
-      "  Retrieval, guardrails, actions, audit and the API all work without them,\n" +
-      "  but no reply can be DRAFTED. Run `npm run seed:agent` first — see README.\n",
+      "  Ingestion, retrieval, guardrails, actions, audit and the API all work without\n" +
+      "  them, but no reply can be DRAFTED. Run `npm run seed:agent` first — see README.\n",
     );
   }
 
-  const llm: LlmPort = new WhissleClient({
+  const llm = new WhissleClient({
     apiKey: config.whissle.apiKey,
     agentId: config.whissle.agentId,
     baseUrl: config.whissle.base,
     timeoutMs: Math.max(4000, config.latencyBudgetMs * 3),
   });
 
-  // The marketplace starts as a mirror of our catalog and then diverges as
-  // writes land — which is the condition the two-phase commit exists for.
-  const remote: RemoteListing[] = repo.listings().map((l) => ({
-    id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
-  }));
-  const market = new MockMarketplace(remote);
-
-  const executor = new ActionExecutor(d, repo, market, audit, {
-    undoWindowS: config.undoWindowS,
-    onChange: (a) => {
-      hub.emit("action", a);
-      hub.emit("audit", audit.list(1)[0]);
-    },
-    onListingWrite: (id) => {
-      retriever.rebuild();
-      const l = repo.listing(id);
-      if (l) hub.emit("listing", l);
-      for (const other of repo.listings()) if (other.id !== id) hub.emit("listing", other);
-    },
-  });
-
-  const proposer = new ActionProposer(repo);
-  const research = new ResearchService(repo);
-
-  const showContext = new ShowContextEngine({
-    llm,
-    lotTitles: () => repo.listings().map((l) => ({ id: l.id, title: `${l.title} size ${l.size}` })),
-    onUpdate: (c) => hub.emit("context", c),
-  });
-
-  const pipeline = new Pipeline({
-    repo, llm, retriever, executor, proposer, showContext, audit,
-    events: {
-      onChat: (m) => hub.emit("chat", m),
-      onProposal: (p) => hub.emit("proposal", p),
-      onMetrics: (m) => hub.emit("metrics", m),
-      onListingChanged: (id) => {
-        const l = repo.listing(id);
-        if (l) hub.emit("listing", l);
-      },
-    },
-  });
-
-  const chatSource: ChatSource | null = config.simulate ? new SimulatedShowSource() : null;
-  const hostAudio = config.simulate ? new ScriptedHostAudio() : null;
+  const shows = new ShowRegistry(llm as LlmPort, hub);
+  const kb = new KbSync(llm);
 
   let heartbeat: NodeJS.Timeout | null = null;
 
-  const ctx: AppContext = {
-    repo, retriever, audit, executor, proposer, research, showContext, pipeline, hub, market,
-    llmName: llm.name, chatSource, hostAudio,
+  return {
+    hub,
+    shows,
+    llm,
+    llmName: llm.name,
+    kb,
 
-    snapshot() {
-      return {
-        show: repo.show(),
-        listings: repo.listings(),
-        proposals: pipeline.list(),
-        actions: executor.list(),
-        audit: audit.list(200),
-        metrics: pipeline.metrics(),
-        context: showContext.current(),
-      };
-    },
-
-    start() {
-      showContext.start();
-      hostAudio?.onSegment((t) => showContext.push(t));
-      hostAudio?.start();
-      chatSource?.onMessage((m) => pipeline.ingest(m));
-      void chatSource?.start();
+    async start() {
+      await shows.ensureDemo();
       heartbeat = setInterval(() => hub.heartbeat(), 20_000);
+
+      // Attach to eBay Live shows named at boot: WATCH_EBAY=id1,id2
+      const watch = (process.env.WATCH_EBAY || "").split(",").map((x) => x.trim()).filter(Boolean);
+      for (const id of watch) {
+        try {
+          const rt = await shows.attachEbayLive(id);
+          console.log(`  watching eBay Live ${id} as ${rt.showId}`);
+          void kb.syncShow(rt);
+        } catch (e) {
+          console.warn(`  could not attach eBay Live ${id}: ${(e as Error).message}`);
+        }
+      }
     },
 
-    stop() {
-      showContext.stop();
-      hostAudio?.stop();
-      chatSource?.stop();
+    async stop() {
       if (heartbeat) clearInterval(heartbeat);
+      await shows.stopAll();
     },
   };
-
-  return ctx;
 }
+
+export { DEMO_SHOW_ID };

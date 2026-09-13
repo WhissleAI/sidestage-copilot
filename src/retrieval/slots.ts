@@ -16,6 +16,17 @@ import type { FactField } from "./facts.js";
 import { fold, tokenize } from "./text.js";
 
 export interface Slots {
+  /**
+   * What the buyer is hunting for, when the question is an inventory SEARCH
+   * rather than a question about the lot on screen.
+   *
+   * This exists because real live-commerce chat is dominated by it. Reading an
+   * actual eBay Live card show, the traffic is "any red sox", "Got any Grady
+   * Sizemore?", "Any more Jeter's?", "any skubal" — asking whether something is
+   * in tonight's lineup at all. Answering those against the pinned lot gives a
+   * confident answer to a question nobody asked.
+   */
+  inventoryQuery: string | null;
   listingIds: string[];
   fields: FactField[];
   /** The FIRST attribute cue that matched — what the buyer actually asked about,
@@ -64,6 +75,16 @@ const FIELD_EXPANSION: Partial<Record<FactField, FactField[]>> = {
   market: ["price"],
   price: ["availability"],
 };
+
+/** "any X", "got any X", "do you have X", "looking for X", "X?" as a bare name. */
+const INVENTORY_SEARCH = [
+  /\b(?:got |have |u got |you got |do you have |any more |anymore |any )\s*([a-z0-9'’\-\. ]{3,40})\??$/i,
+  /\blooking for\s+([a-z0-9'’\-\. ]{3,40})\??$/i,
+  /\bany\s+([a-z0-9'’\-\. ]{3,40})\b/i,
+];
+
+/** Words that make a phrase an attribute question, not an inventory hunt. */
+const NOT_INVENTORY = /\b(price|cost|how much|ship|shipping|return|refund|authentic|legit|size|fit|discount|deal|lower|bundle|left|available|stock)\b/i;
 
 const ANAPHORA = /\b(it|its|it's|this|these|those|that|them|they|the pair|the one|current|right now)\b/;
 
@@ -121,6 +142,25 @@ export function resolveSlots(
 
   let listingIds = scored.filter((s) => s.score >= scored[0]?.score).map((s) => s.id).slice(0, 3);
 
+  // ── inventory search? ──
+  let inventoryQuery: string | null = null;
+  if (!NOT_INVENTORY.test(lower)) {
+    for (const re of INVENTORY_SEARCH) {
+      const m = lower.match(re);
+      const term = m?.[1]
+        ?.trim()
+        .replace(/[?.!]+$/, "")
+        // The alternation can leave a leading quantifier on the captured term
+        // ("Got any Grady Sizemore" -> "any grady sizemore").
+        .replace(/^(?:any|more|some|other)\s+/i, "")
+        .trim();
+      if (term && term.length >= 3 && !/^(one|more|other|else|thing|stuff|good|new)s?$/.test(term)) {
+        inventoryQuery = term;
+        break;
+      }
+    }
+  }
+
   // ── which attribute(s) ──
   const fields: FactField[] = [];
   for (const [field, re] of ATTRIBUTE_CUES) if (re.test(lower)) fields.push(field);
@@ -146,5 +186,5 @@ export function resolveSlots(
 
   const policyTopics = [...new Set(fields.map((f) => FIELD_TO_POLICY[f]).filter((x): x is string => !!x))];
 
-  return { listingIds, fields, primaryField: fields[0], policyTopics, viaAnaphora };
+  return { inventoryQuery, listingIds, fields, primaryField: fields[0], policyTopics, viaAnaphora };
 }

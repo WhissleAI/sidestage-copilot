@@ -17,7 +17,7 @@ import type { Evidence } from "../domain/types.js";
 import type { Repo } from "../domain/repo.js";
 import { buildFacts, type Fact, type FactField } from "./facts.js";
 import { Bm25Index } from "./bm25.js";
-import { cosine, ngramVector } from "./text.js";
+import { cosine, ngramVector, terms } from "./text.js";
 import { POLICY_LED, resolveSlots, type Slots } from "./slots.js";
 
 /** RRF damping. 60 is the value from the original Cormack et al. formulation;
@@ -84,12 +84,51 @@ export class Retriever {
     opts: { pinnedId?: string | null; mode?: RetrievalMode; maxFacts?: number } = {},
   ): RetrievalResult {
     const mode = opts.mode ?? "hybrid";
-    const maxFacts = opts.maxFacts ?? MAX_FACTS;
+    let maxFacts = opts.maxFacts ?? MAX_FACTS;
     const listings = this.repo.listings();
     const slots = resolveSlots(question, listings, opts.pinnedId ?? null);
 
-    // ── leg 1: structured lookup ──────────────────────────────────────────
     const picked = new Map<string, number>(); // factId -> score
+
+    // ── leg 0: inventory search ───────────────────────────────────────────
+    // "any red sox", "Got any Grady Sizemore?" — the dominant question shape in
+    // a real live-commerce chat. This is a SEARCH over the lineup, not a field
+    // lookup on the pinned lot, and answering it the other way produces a
+    // confident answer to a question nobody asked.
+    if (slots.inventoryQuery && mode !== "lexical" && mode !== "ngram") {
+      const q = new Set(terms(slots.inventoryQuery));
+      const matches: { id: string; hits: number }[] = [];
+      for (const l of listings) {
+        if (l.state === "ended") continue;
+        const hay = new Set(terms(`${l.title} ${l.shortName} ${l.brand} ${l.model} ${l.colorway} ${l.description}`));
+        let hits = 0;
+        for (const t of q) if (hay.has(t)) hits++;
+        if (hits) matches.push({ id: l.id, hits });
+      }
+      matches.sort((a, b) => b.hits - a.hits);
+
+      // The lineup fact ALWAYS rides along: with a match it names the lot, and
+      // with no match it is the evidence for an honest "not in tonight's show".
+      picked.set("catalog:lineup", 1);
+      // Enough room for three matched lots' fact sets plus the lineup.
+      maxFacts = Math.max(maxFacts, 16);
+      // Give a matched lot the SAME fact set an attribute question would get.
+      // Supplying only identity/price/availability made the model cite a
+      // condition fact it had never been handed, which the grounding guard then
+      // correctly blocked — a self-inflicted false positive.
+      const perMatch: [FactField, number][] = [
+        ["identity", 0.98], ["price", 0.96], ["availability", 0.94],
+        ["condition", 0.9], ["sizing", 0.88], ["authenticity", 0.86], ["shipping", 0.84],
+      ];
+      for (const m of matches.slice(0, 3)) {
+        for (const [field, score] of perMatch) {
+          const f = this.byId.get(`listing:${m.id}#${field}`);
+          if (f) picked.set(f.factId, Math.max(picked.get(f.factId) ?? 0, score));
+        }
+      }
+    }
+
+    // ── leg 1: structured lookup ──────────────────────────────────────────
     if (mode !== "lexical" && mode !== "ngram" && mode !== "fused") {
       // A listing fact for the field the buyer actually asked about ranks above
       // one pulled in by expansion; and where the answer is really a policy, the
@@ -139,7 +178,10 @@ export class Retriever {
     // Nothing resolved structurally AND nothing matched lexically with any
     // conviction: say so, rather than hand the composer a loosely-related fact
     // and invite it to answer from it.
-    const abstain = structuredCount === 0 && this.bm25.topScore(question) < ABSTAIN_BM25_BELOW;
+    const abstain =
+      !slots.inventoryQuery &&
+      structuredCount === 0 &&
+      this.bm25.topScore(question) < ABSTAIN_BM25_BELOW;
 
     const chosen = [...picked.entries()]
       .sort((a, b) => b[1] - a[1])

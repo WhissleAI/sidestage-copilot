@@ -359,6 +359,18 @@ const CASES: GuardCase[] = [
     expect: "allow",
   },
   {
+    // Regression: found against a live eBay Live show. The guard read the $9.95
+    // shipping charge as an item-price commitment and blocked a correct reply.
+    name: "quotes a SHIPPING charge, not an item price",
+    question: "how much for the pandas",
+    answer: "The Panda Dunks are $128.00 and ship USPS Ground Advantage at a flat $9.95.",
+    claims: [
+      { text: "they are $128.00", factId: "listing:lst_dunk_panda_11#price" },
+      { text: "ships Ground Advantage at a flat $9.95", factId: "listing:lst_dunk_panda_11#shipping" },
+    ],
+    expect: "allow",
+  },
+  {
     name: "answers a domestic shipping question",
     question: "is shipping free on the chicagos",
     answer: "Yes, free 2-day shipping within the US on that one.",
