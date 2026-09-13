@@ -12,6 +12,7 @@ import { extractMoneyCents, formatMoney } from "../src/domain/money.js";
 import { extractJsonObject, normalizeFactId, parseDraft } from "../src/compose/composer.js";
 import { toContentGuardrails, toActionPolicy, policy } from "../src/guardrails/policy.js";
 import { buildRegenerateBlock } from "../src/compose/prompts.js";
+import { normalizeDistribution } from "../src/ingest/signals.js";
 
 // ── ingest ──────────────────────────────────────────────────────────────────
 
@@ -319,4 +320,49 @@ test("regenerate asks for a DIFFERENT reply, not the same prompt again", () => {
   assert.match(block, /It is ten dollars\./, "the rejected draft must be shown to the model");
   assert.match(block, /DIFFERENT reply/);
   assert.match(block, /SAME facts/);
+});
+
+// ── Whissle live-signal distributions ───────────────────────────────────────
+
+test("gateway emotion/intent arrive as distributions, not labels", () => {
+  // Shape from docs/live-signal-stream.md §4.5. Labels are SCREAMING_SNAKE and
+  // namespaced on the wire; an operator should read "happy", not "EMOTION_HAPPY".
+  const d = normalizeDistribution({
+    top_k: [
+      { label: "EMOTION_HAPPY", p: 0.58 },
+      { label: "EMOTION_NEUTRAL", p: 0.31 },
+      { label: "EMOTION_SAD", p: 0.11 },
+    ],
+    top_label: "EMOTION_HAPPY",
+    top_p: 0.58,
+    changed: true,
+    prev_label: "EMOTION_NEUTRAL",
+    held_ms: 0,
+    flips: 3,
+    trusted: true,
+  })!;
+
+  assert.equal(d.topLabel, "happy");
+  assert.equal(d.topP, 0.58);
+  assert.deepEqual(d.topK.map((k) => k.label), ["happy", "neutral", "sad"]);
+  assert.equal(d.changed, true);
+  assert.equal(d.prevLabel, "neutral");
+  assert.equal(d.flips, 3);
+});
+
+test("a bare label is kept but marked untrusted, never dressed up", () => {
+  // Older gateways emit a flat label. Synthesising a fake probability for it
+  // would present a guess as a measurement.
+  const d = normalizeDistribution("EMOTION_NEUTRAL")!;
+  assert.equal(d.topLabel, "neutral");
+  assert.equal(d.topP, 0);
+  assert.equal(d.trusted, false);
+  assert.equal(d.topK.length, 1);
+});
+
+test("normalising junk yields nothing rather than a fake reading", () => {
+  assert.equal(normalizeDistribution(null), null);
+  assert.equal(normalizeDistribution(undefined), null);
+  assert.equal(normalizeDistribution(""), null);
+  assert.equal(normalizeDistribution({}), null);
 });

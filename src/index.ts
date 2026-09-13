@@ -22,6 +22,23 @@ async function main(): Promise<void> {
   // deployment behind a shared origin would tighten this.
   await app.register(cors, { origin: true });
 
+  // Tolerate an empty body on a request that declares JSON.
+  //
+  // Fastify's default parser rejects that as malformed, which 400s every
+  // bodyless command a browser sends with a default `content-type` header —
+  // regenerate, dismiss, approve, reject, rollback, detach. The console did
+  // exactly that and the buttons silently did nothing. The client is fixed too,
+  // but an API should not depend on every caller getting a header habit right.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    const raw = typeof body === "string" ? body.trim() : "";
+    if (!raw) return done(null, {});
+    try {
+      done(null, JSON.parse(raw));
+    } catch (e) {
+      done(e as Error, undefined);
+    }
+  });
+
   const ctx = await buildContext();
   await registerRoutes(app, ctx);
 

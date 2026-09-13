@@ -182,6 +182,37 @@ export interface Metrics {
   actionsRolledBack: number;
 }
 
+/**
+ * An acoustic distribution from Whissle's metadata head.
+ *
+ * Never a bare label. The gateway's own guidance is explicit — accuracy on
+ * low-arousal states tops out around 63%, so a single label presented as fact is
+ * a confident lie. Render the distribution, and render FLIPS (when the top read
+ * changed) rather than a needle that twitches.
+ */
+export interface SignalDistribution {
+  topLabel: string;
+  topP: number;
+  topK: { label: string; p: number }[];
+  /** The top label differs from the last one this stream reported. */
+  changed: boolean;
+  prevLabel: string | null;
+  /** How long the current top label has been on top. 0 on a flip. */
+  heldMs: number | null;
+  /** Running count of top-label changes this session. */
+  flips: number | null;
+  trusted: boolean;
+}
+
+export interface TranscriptSegment {
+  showId: string;
+  text: string;
+  emotion: SignalDistribution | null;
+  intent: SignalDistribution | null;
+  speechRate: number | null;
+  at: string;
+}
+
 export interface ShowContext {
   currentTopic: string;
   listingInFocus: string | null;

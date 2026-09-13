@@ -58,12 +58,35 @@ export interface WatcherOpts extends WatcherEvents {
   headless?: boolean;
 }
 
+/** No comment for this long, while the show is otherwise active, means the chat
+ *  socket is dead rather than the room being quiet. */
+const COMMENT_SILENCE_MS = 120_000;
+/** "Otherwise active" = a lot or viewer count moved within this window. */
+const ACTIVITY_WINDOW_MS = 90_000;
+/** Reloading forever would hammer eBay if the selector itself broke. */
+const MAX_RELOADS = 20;
+
 /** Shared browser across every watched show — one Chromium, N pages. */
 let shared: Browser | null = null;
 let refCount = 0;
 
 async function acquireBrowser(headless: boolean): Promise<Browser> {
-  if (!shared) shared = await chromium.launch({ headless });
+  if (!shared) {
+    shared = await chromium.launch({
+      headless,
+      // A headless page is a BACKGROUND page, and Chrome throttles background
+      // timers and lets renderers idle. eBay's chat socket stops delivering when
+      // the document looks hidden, which is why comments arrived for a minute
+      // and then stopped for good while lot updates kept flowing.
+      args: [
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-features=CalculateNativeWinOcclusion",
+        "--mute-audio",
+      ],
+    });
+  }
   refCount++;
   return shared;
 }
@@ -85,6 +108,13 @@ export class EbayLiveWatcher {
   private lastLotKey = "";
   private lastViewers = -1;
   private pollMs: number;
+
+  /** Watchdog state. A show that is clearly ALIVE (lots and viewers moving) but
+   *  has produced no comment for this long has a dead chat socket, not a quiet
+   *  room — so the page is reloaded rather than left silently broken. */
+  private lastCommentAt = Date.now();
+  private lastActivityAt = Date.now();
+  private reloads = 0;
 
   constructor(private o: WatcherOpts) {
     this.pollMs = o.pollMs ?? 1000;
@@ -112,6 +142,17 @@ export class EbayLiveWatcher {
     // callback throws `__name is not defined`. Define it as identity in the page.
     await ctx.addInitScript(() => {
       (globalThis as unknown as { __name: (f: unknown) => unknown }).__name = (f) => f;
+
+      // Present as a visible, focused tab. Web apps commonly pause realtime
+      // sockets on `visibilitychange`; a headless page reports itself hidden,
+      // so eBay's chat feed went quiet while everything else kept working.
+      try {
+        Object.defineProperty(document, "visibilityState", { get: () => "visible", configurable: true });
+        Object.defineProperty(document, "hidden", { get: () => false, configurable: true });
+        Object.defineProperty(document, "hasFocus", { value: () => true, configurable: true });
+      } catch {
+        /* a page that locks these down is no worse off than before */
+      }
     });
 
     this.page = await ctx.newPage();
@@ -151,6 +192,7 @@ export class EbayLiveWatcher {
         for (const c of s.comments) {
           if (this.seen.has(c.id)) continue;
           this.seen.add(c.id);
+          this.lastCommentAt = Date.now();
           this.o.onComment?.(c);
         }
         // The set only ever grows while a show runs; cap it.
@@ -158,8 +200,10 @@ export class EbayLiveWatcher {
         if (s.lot) this.emitLot(s.lot);
         if (s.viewers !== null && s.viewers !== this.lastViewers) {
           this.lastViewers = s.viewers;
+          this.lastActivityAt = Date.now();
           this.o.onViewers?.(s.viewers);
         }
+        await this.watchdog();
       } catch (e) {
         // A navigation, a deploy, or a closed show. Report and keep polling —
         // a transient DOM miss must not tear down the show.
@@ -167,6 +211,43 @@ export class EbayLiveWatcher {
       }
       this.tick();
     }, this.pollMs);
+  }
+
+  /**
+   * The show is moving but chat is not. Reload.
+   *
+   * Distinguishing "quiet room" from "dead socket" is the whole job here: a show
+   * with no viewers changing and no lots opening is simply quiet, and reloading
+   * it would be churn. A show whose lots keep opening while chat has said
+   * nothing for minutes has lost its feed.
+   */
+  private async watchdog(): Promise<void> {
+    const quietMs = Date.now() - this.lastCommentAt;
+    const activeMs = Date.now() - this.lastActivityAt;
+    if (quietMs < COMMENT_SILENCE_MS || activeMs > ACTIVITY_WINDOW_MS) return;
+    if (this.reloads >= MAX_RELOADS) return;
+
+    this.reloads++;
+    this.o.onStatus?.({
+      connected: false,
+      detail: `chat silent ${Math.round(quietMs / 1000)}s while the show is active — reloading the feed (${this.reloads}/${MAX_RELOADS})`,
+    });
+
+    try {
+      await this.page!.reload({ waitUntil: "domcontentloaded", timeout: 45_000 });
+      await this.page!.waitForFunction(
+        () => document.querySelectorAll('ul[class*="chatFeed"] li[data-id]').length > 0,
+        null,
+        { timeout: 30_000 },
+      );
+      // Everything on screen after a reload is history, not new traffic.
+      const backlog = await this.scrape();
+      for (const c of backlog.comments) this.seen.add(c.id);
+      this.lastCommentAt = Date.now();
+      this.o.onStatus?.({ connected: true, detail: `feed reloaded (${backlog.comments.length} backlog suppressed)` });
+    } catch (e) {
+      this.o.onStatus?.({ connected: false, detail: `reload failed: ${(e as Error).message.slice(0, 100)}` });
+    }
   }
 
   private emitLot(l: LiveLot): void {

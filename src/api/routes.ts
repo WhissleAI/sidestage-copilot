@@ -12,6 +12,7 @@ import { discoverLiveShows } from "../ingest/ebaylive/discovery.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
 import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
+import { normalizeDistribution } from "../ingest/signals.js";
 import type { AppContext } from "./context.js";
 
 export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
@@ -224,26 +225,21 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    */
   app.post<{
     Params: { showId: string };
-    Body: {
-      text?: string;
-      emotion?: { label: string; p?: number } | string;
-      intent?: { label: string; p?: number } | string;
-      speechRate?: number;
-      final?: boolean;
-    };
+    Body: { text?: string; emotion?: unknown; intent?: unknown; speechRate?: number; final?: boolean };
   }>("/api/shows/:showId/audio/transcript", async (req, reply) => {
     const text = (req.body?.text || "").trim();
     if (!text) return reply.code(400).send({ error: "text is required" });
     try {
       const target = rt(req.params.showId);
-      const norm = (v: { label: string; p?: number } | string | undefined) =>
-        typeof v === "string" ? { label: v } : v && v.label ? v : null;
 
+      // Distributions, not labels. The gateway's own note on this head says
+      // accuracy degrades sharply on low-arousal states, so collapsing it to one
+      // word would present a coin flip as a fact.
       const segment = {
         showId: target.showId,
         text,
-        emotion: norm(req.body?.emotion),
-        intent: norm(req.body?.intent),
+        emotion: normalizeDistribution(req.body?.emotion as never),
+        intent: normalizeDistribution(req.body?.intent as never),
         speechRate: typeof req.body?.speechRate === "number" ? req.body.speechRate : null,
         at: new Date().toISOString(),
       };

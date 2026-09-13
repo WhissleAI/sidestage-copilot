@@ -142,26 +142,48 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 
       room = new LivekitClient.Room({ adaptiveStream: false, dynacast: false });
 
-      // The live-signal stream: transcripts and voice metadata arrive on the
-      // data channel. Shapes vary by gateway version, so read defensively.
+      // RTVI frames. Two envelopes matter, and getting the second one wrong is
+      // why voice metadata never appeared: signals arrive as "server-message",
+      // NOT as a type containing the word "signal", so a naive match on
+      // msg.type never fired.
+      //
+      //   { type:"user-transcription", data:{ text, final } }
+      //   { type:"server-message", data:{ kind:"signal", type:"emotion",
+      //       data:{ top_k:[…], top_label, top_p, changed, prev_label, flips } } }
       room.on(LivekitClient.RoomEvent.DataReceived, function (payload) {
         var msg;
         try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch (e) { return; }
-        var type = msg.type || (msg.data && msg.data.type) || "";
-        var d = msg.data || msg;
-        if (/transcription|transcript/i.test(type)) {
+        var t = msg.type || "";
+        var d = msg.data || {};
+
+        if (/transcription|transcript/i.test(t)) {
           var text = d.text || (d.data && d.data.text) || "";
-          var final = d.final !== false;
-          if (text && final) { log("host: " + text); postTranscript(showId, text); }
-        } else if (/metadata|signal/i.test(type)) {
-          var m = d.metadata || d;
-          if (m.emotion) pending.emotion = m.emotion;
-          if (m.intent) pending.intent = m.intent;
-          if (typeof m.speech_rate === "number") pending.speechRate = m.speech_rate;
-          if (typeof m.speechRate === "number") pending.speechRate = m.speechRate;
-          log("signal: " + JSON.stringify(d).slice(0, 140));
+          if (text && d.final !== false) { log("host: " + text); postTranscript(showId, text); }
+          return;
+        }
+
+        if (t === "server-message" && d.kind === "signal") {
+          if (d.type === "emotion") { pending.emotion = d.data; note("emotion", d.data); }
+          else if (d.type === "intent") { pending.intent = d.data; note("intent", d.data); }
+          else if (d.data && typeof d.data.words_per_minute === "number") pending.speechRate = d.data.words_per_minute;
+          return;
+        }
+
+        // Older gateways emitted a flat metadata frame.
+        if (/metadata/i.test(t)) {
+          if (d.emotion) pending.emotion = d.emotion;
+          if (d.intent) pending.intent = d.intent;
+          if (typeof d.speech_rate === "number") pending.speechRate = d.speech_rate;
         }
       });
+
+      function note(kind, dist) {
+        if (!dist) return;
+        var top = dist.top_label || dist.label || "?";
+        var p = typeof dist.top_p === "number" ? " " + dist.top_p.toFixed(2) : "";
+        var flip = dist.changed ? "  FLIP from " + (dist.prev_label || "?") : "";
+        log(kind + ": " + top + p + flip);
+      }
 
       room.on(LivekitClient.RoomEvent.Disconnected, function () { status("disconnected", "err"); log("room disconnected"); });
 
