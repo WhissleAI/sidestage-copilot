@@ -38,7 +38,7 @@ mandatory list. They are the first things a reviewer will probe.
 
 ## 2. P0 — ships broken
 
-### F-01 · The audit chain is 99.5% ingestion noise
+### F-01 · The audit chain is 99.5% ingestion noise  — **FIXED**
 
 **Measured on one show:**
 
@@ -89,7 +89,7 @@ tests, the integration between them had zero. Fixed on both sides (client sends
 no header without a body; server tolerates an empty JSON body), but the
 underlying gap remains: see F-06.
 
-### F-03 · If Chromium dies, every watched show stops silently
+### F-03 · If Chromium dies, every watched show stops silently  — **FIXED**
 
 `src/ingest/ebaylive/watcher.ts` shares one browser across all shows and holds no
 handler for its death. If the process crashes or is OOM-killed, every `scrape()`
@@ -115,7 +115,7 @@ hello frame: 113,511 bytes
 A reviewer opening the console on a hotel network waits for 113 KB of mostly
 garbage. Fixing F-01 removes most of it; the rest is F-05.
 
-### F-05 · Sold-out observed lots are carried forever
+### F-05 · Sold-out observed lots are carried forever  — **FIXED**
 
 24 observed lots, 23 of them `qty: 0`, permanently. They appear in the `hello`
 payload, in the `catalog:lineup` fact the model reads, and in the knowledge-base
@@ -131,7 +131,7 @@ moved on; exclude ended lots from `hello`, the lineup fact and the KB. Keep them
 in the database — they are the show's history and the research service will want
 them.
 
-### F-06 · No test crosses the client/server boundary
+### F-06 · No test crosses the client/server boundary  — **FIXED**
 
 47 backend tests, 6 evaluations, and not one of them issues an HTTP request the
 way the console does. F-02 is the direct consequence. The guardrail and retrieval
@@ -155,7 +155,7 @@ section rather than leaving it to Known Limitations; (b) make the demo show's
 action rail the scripted part of the walkthrough; (c) if a seller account is ever
 available, wire the eBay Sell API behind the existing `MarketplaceAdapter` port.
 
-### F-08 · Product research is orphaned
+### F-08 · Product research is orphaned  — **FIXED**
 
 `ResearchService` is real, correct, fast (single-digit ms) and **never called by
 the reply path**. It is reachable only from `Cmd+K`. So a buyer asking "is that a
@@ -170,7 +170,7 @@ matters, the reply.
 `ResearchService` during retrieval and add the comps as evidence. It costs
 milliseconds and it is already grounded and guard-checkable.
 
-### F-09 · `comparison` intent has no handler
+### F-09 · `comparison` intent has no handler  — **FIXED**
 
 Classified, counted, then treated like any other question. Same root cause as
 F-08 and the same fix.
@@ -301,3 +301,47 @@ That is a familiar shape and worth stating plainly rather than defending: the
 interesting mechanisms got tests and evals, and the boring seams between them got
 neither. F-02 is the clearest example — 47 tests on the backend, zero across the
 boundary where it actually broke.
+
+
+---
+
+## 9. Fix log — 2026-09-13
+
+Written after the fixes, because a review that is never closed out is a list of
+complaints.
+
+| # | What changed | Where |
+|---|---|---|
+| F-01 | Observed lot movement no longer enters the hash chain. The audit records **agency** — what this copilot and this seller did — and a bid landing on someone else's auction is not that. The observation still reaches the console live and still bumps `listing.version`, which is what stale-price detection actually reads | `src/shows/runtime.ts` |
+| F-05 | A lot the host closes now becomes `state: "ended"` instead of `live` with `qty: 0`, so every existing `state !== "ended"` filter — lineup fact, KB document, `hello` — stops carrying it. `hello` fell from 113 KB to ~34 KB | `src/domain/repo.ts`, `src/shows/runtime.ts` |
+| F-03 | `browser.on("disconnected")` drops the shared handle; a new `recoverIfDead()` rebuilds the page on the next tick when the page or the browser under it has died | `src/ingest/ebaylive/watcher.ts` |
+| F-06 | `buildApp()` split out of the bootstrap so tests drive the real routing table; 15 contract tests over the REST routes, the SSE `hello` envelope, and the header the browser actually sends | `src/api/server.ts`, `test/contract.test.ts` |
+| F-08/09 | `researchEvidence()` calls `ResearchService` on the reply path for `comparison` and market-price questions, deduped against what retrieval already found. Deliberately narrow: comps in a shipping answer would dilute the evidence the guards check against | `src/pipeline/pipeline.ts` |
+
+**Two bugs the contract suite found on its first run** — which is the argument
+for it better than anything written above:
+
+1. **Malformed JSON answered 500, not 400.** The permissive parser added for
+   empty bodies handed Fastify a bare `Error`, so a caller with a typo in their
+   payload was told the *server* had failed, and would reasonably retry it.
+2. **An in-flight draft wrote to a closed database.** A draft is one gateway
+   round-trip long; a shutdown inside that window came back to a closed handle
+   and threw from a promise nobody awaited. `Pipeline.stop()` now drains, and
+   `ShowRuntime.stop()` awaits it before closing the database.
+
+Neither was reachable from any of the 53 tests that existed, because both live
+at the seam those tests stop above.
+
+### Cost visibility
+
+`GET /api/billing` and the console's `cost` panel, built on
+`/api/orgs/{org}/wallet` and `/usage/summary`. Two design choices worth stating:
+
+- **No token price is guessed.** There is no published per-token text rate on
+  this plan, so money comes from the wallet balance and nothing else. A show's
+  cost is reported as a **wallet delta**, labelled an upper bound — the wallet is
+  org-wide, so concurrent work in the same workspace lands inside it.
+- **Per-show attribution is ours, and says so.** The platform cannot do it
+  (W-8: `usage/sessions` returns `agent_id: null` for text), so SideStage counts
+  its own gateway calls. The panel carries that sentence rather than letting the
+  number imply it came from billing.

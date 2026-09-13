@@ -6,6 +6,7 @@ import { memoryDb, type DB } from "../src/db/index.js";
 import { seed } from "../src/db/seed.js";
 import { Repo } from "../src/domain/repo.js";
 import { Retriever } from "../src/retrieval/retriever.js";
+import { ResearchService } from "../src/research/research.js";
 import { AuditLog } from "../src/actions/audit.js";
 import { ActionExecutor } from "../src/actions/executor.js";
 import { ActionProposer } from "../src/actions/proposer.js";
@@ -74,6 +75,7 @@ export function buildBench(): Bench {
 
   const pipeline = new Pipeline({
     repo, llm, retriever, executor: exec, proposer, showContext, audit,
+    research: new ResearchService(repo),
     events: {
       onChat: () => {},
       onProposal: (p) => {

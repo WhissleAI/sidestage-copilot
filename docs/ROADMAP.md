@@ -136,7 +136,8 @@ From [`REVIEW.md`](REVIEW.md) §6, restated with status.
 
 | # | Ask | Status |
 |---|---|---|
-| **W-3** | Token streaming on `chat/turn` | **PR open** — [gateway #1101](https://github.com/WhissleAI/whissle_gateway_backend/pull/1101). The p95 answer |
+| **W-3** | Token streaming on `chat/turn` | **SHIPPED** — [gateway #1101](https://github.com/WhissleAI/whissle_gateway_backend/pull/1101) merged and deployed to AWS 2026-09-13. `POST /api/agents/{id}/chat/turn/stream` is live: `open` → (`delta`\|`tool`)* → `done`, where `done` carries the byte-identical body the JSON door returns. SideStage does not consume it yet — see §4 |
+| **W-8** | Attribute usage to an agent | **NEW.** `/api/orgs/{org}/usage/sessions` returns `agent_id: null` for every text session (checked across 100 sessions, 2026-09-13), and `/usage/events` carries no agent field at all. So the platform can bill an org but cannot answer "what did this agent cost", which is the question a seller asks. SideStage meters its own calls instead (`src/llm/meter.ts`) and says so on the panel rather than implying the number came from billing |
 | **W-1** | Per-agent KB namespacing | Worked around with one agent per catalog. Costs an agent per seller |
 | **W-2** | KB upsert by caller-supplied id | Replace-by-delete today; racy and slow as catalogs grow |
 | **W-4** | Conditional `content_guardrails` | Certificate-conditional rules stay app-side; documented asymmetry |
@@ -156,6 +157,29 @@ From [`REVIEW.md`](REVIEW.md) §6, restated with status.
 6. **Auth + guest accounts** — makes the audit log answer "who"
 7. **Analytics page** — now that the audit is clean and the session trace is wired
 8. **Settings** — last, because it is a UI over things that should be stable first
+
+### Done since this was written
+
+1–4 are complete: **F-01** (observations no longer enter the hash chain), **F-05**
+(a sold-out lot becomes `ended`, so every existing filter stops carrying it, and
+`hello` dropped from 113 KB to ~34 KB), **F-03** (Chromium death drops the shared
+handle and the next tick relaunches), **F-06** (a 15-case contract suite drives
+the real routing table — it found two bugs on its first run: malformed JSON
+answered 500 instead of 400, and an in-flight draft wrote to a database that
+shutdown had already closed), and **F-08/09** (comparison and "is that a good
+price" questions now pull comps into the evidence set on the reply path).
+
+**Cost visibility** landed alongside them: `GET /api/billing` and a `cost` panel
+in the console, built on the wallet and usage endpoints plus this app's own
+meter. That is the answer to "how are we paying for Whissle agents" — and W-8
+above is what it ran into.
+
+**Still to consume W-3.** The streaming door is live but SideStage still calls
+the JSON door. Guardrails must see a COMPLETE draft before anything is sendable,
+so streaming cannot shorten time-to-*send*; what it shortens is time-to-*first-
+token* in the operator's view, which is the p95 complaint. That is a pipeline +
+SSE-relay change, and it is the top of the next list rather than a line item
+here.
 
 Items 1–4 are days. Items 5–8 are the difference between a challenge submission
 and a product, and should not be started before the submission is in.

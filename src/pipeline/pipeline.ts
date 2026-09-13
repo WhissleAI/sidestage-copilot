@@ -30,6 +30,7 @@ import type { LlmPort } from "../llm/types.js";
 import { LlmError } from "../llm/types.js";
 import { Composer } from "../compose/composer.js";
 import { Retriever } from "../retrieval/retriever.js";
+import type { ResearchService } from "../research/research.js";
 import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
 import { admit, classify, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
@@ -54,6 +55,9 @@ export interface PipelineDeps {
   seller?: () => { handle: string; name: string; about: string; voice: string } | null;
   llm: LlmPort;
   retriever: Retriever;
+  /** Comps and market position. Called on the reply path for the questions that
+   *  are ABOUT the market — see `researchEvidence`. */
+  research: ResearchService;
   executor: ActionExecutor;
   proposer: ActionProposer;
   showContext: ShowContextEngine;
@@ -67,6 +71,13 @@ export class Pipeline {
   private latency: LatencyTracker;
   private rate: RateLimiter;
   private proposals = new Map<string, ReplyProposal>();
+  /** Set when the show is torn down. A draft in flight when that happens has
+   *  nowhere to land: its database is about to close, and persisting into a
+   *  closed handle throws from inside a promise nobody is awaiting. */
+  private stopped = false;
+  /** Every draft currently awaiting the gateway, so shutdown can wait for them
+   *  instead of racing them to the database handle. */
+  private pending = new Set<Promise<unknown>>();
   private seenActionKeys = new Set<string>();
   private queue: ChatMessage[] = [];
   private inflight = 0;
@@ -140,15 +151,60 @@ export class Pipeline {
     while (this.inflight < config.replyConcurrency && this.queue.length) {
       const msg = this.queue.shift()!;
       this.inflight++;
-      this.draft(msg).finally(() => {
+      const p = this.draft(msg).finally(() => {
         this.inflight--;
+        this.pending.delete(p);
         this.pump();
       });
+      this.pending.add(p);
     }
   }
 
+  /**
+   * Stop accepting work and let what is in flight finish.
+   *
+   * A draft is one gateway round-trip long. If the show is torn down inside
+   * that window the draft comes back to a closed database and throws from a
+   * promise nobody awaits — an unhandled rejection on every shutdown that
+   * happened to land mid-reply.
+   */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.queue.length = 0;
+    await Promise.allSettled([...this.pending]);
+  }
+
   // ── the reply path ────────────────────────────────────────────────────────
+  /**
+   * Market evidence for the questions that are actually about the market.
+   *
+   * Deliberately narrow. Comps belong in a reply that compares or prices, and
+   * nowhere else: adding them to "does it ship to Canada" would dilute the
+   * evidence set the guards check a claim against, and every extra fact is
+   * budget spent in the compose prompt.
+   *
+   * Dedupes against what retrieval already found, so a listing's price is not
+   * cited twice under two ids.
+   */
+  private researchEvidence(
+    msg: ChatMessage,
+    already: Evidence[],
+    pinnedId: string | null,
+  ): Evidence[] {
+    const wants =
+      msg.intent === "comparison" ||
+      /\b(good (?:price|deal)|worth it|going for|market value|overpriced|fair price|too much)\b/i.test(msg.text);
+    if (!wants) return [];
+
+    const card = this.d.research.run(msg.text, pinnedId);
+    const seen = new Set(already.map((e) => e.factId));
+    return card.evidence.filter((e) => !seen.has(e.factId));
+  }
+
   private async draft(msg: ChatMessage, attempt = 0, previous?: string): Promise<void> {
+    // The show is going away. Nothing this draft produces has anywhere to be
+    // written or anyone to render it.
+    if (this.stopped) return;
     const timer = new SpanTimer();
     const show = this.d.repo.show();
 
@@ -170,6 +226,14 @@ export class Pipeline {
 
     // 1. retrieve (local, no network)
     const r = this.d.retriever.retrieve(msg.text, { pinnedId: show.pinnedListingId });
+    // "Is that a good price?" and "how does it compare to the other one?" are
+    // market questions, and the comps that answer them were already on disk —
+    // the reply path just never asked. Research is a local query costing
+    // single-digit milliseconds and it returns Evidence in the same shape as
+    // everything else, so a reply built on it stays guard-checkable.
+    for (const e of this.researchEvidence(msg, r.evidence, show.pinnedListingId)) {
+      r.evidence.push(e);
+    }
     timer.mark("retrieve");
 
     // 2. cache, keyed on the versions of every listing the grounding touched.

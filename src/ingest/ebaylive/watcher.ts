@@ -86,6 +86,17 @@ async function acquireBrowser(headless: boolean): Promise<Browser> {
         "--mute-audio",
       ],
     });
+    // Chromium can die under us — OOM-killed, crashed, or closed by hand — and
+    // without this the stale handle is handed to every watcher forever: each
+    // scrape() throws, the console keeps rendering a show that looks alive, and
+    // nothing ever recovers. Dropping the handle is the whole fix; the next
+    // acquire relaunches, which is exactly what the per-show reconnect loop
+    // already retries into.
+    shared.on("disconnected", () => {
+      shared = null;
+      refCount = 0;
+      console.warn("  ebaylive: Chromium disconnected — relaunching on the next tick");
+    });
   }
   refCount++;
   return shared;
@@ -125,6 +136,25 @@ export class EbayLiveWatcher {
   }
 
   async start(): Promise<void> {
+    await this.openPage();
+
+    // The first scrape is a BACKLOG, not new traffic: mark everything already on
+    // screen as seen so a freshly attached show does not replay an hour of chat
+    // through the reply pipeline.
+    const pageTitle = (await this.page!.title()).replace(/\s*\|\s*eBay Live.*$/i, "").trim();
+    if (pageTitle) this.o.onTitle?.(pageTitle);
+
+    const backlog = await this.scrape();
+    for (const c of backlog.comments) this.seen.add(c.id);
+    if (backlog.lot) this.emitLot(backlog.lot);
+    this.o.onStatus?.({ connected: true, detail: `attached to ${this.o.eventId} (${backlog.comments.length} backlog)` });
+
+    this.tick();
+  }
+
+  /** Build a fresh context + page on the shared browser. Called on start and
+   *  again whenever the page or the browser underneath it has died. */
+  private async openPage(): Promise<void> {
     const browser = await acquireBrowser(this.o.headless ?? true);
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: UA });
 
@@ -170,18 +200,6 @@ export class EbayLiveWatcher {
       { timeout: 30_000 },
     );
 
-    // The first scrape is a BACKLOG, not new traffic: mark everything already on
-    // screen as seen so a freshly attached show does not replay an hour of chat
-    // through the reply pipeline.
-    const pageTitle = (await this.page.title()).replace(/\s*\|\s*eBay Live.*$/i, "").trim();
-    if (pageTitle) this.o.onTitle?.(pageTitle);
-
-    const backlog = await this.scrape();
-    for (const c of backlog.comments) this.seen.add(c.id);
-    if (backlog.lot) this.emitLot(backlog.lot);
-    this.o.onStatus?.({ connected: true, detail: `attached to ${this.o.eventId} (${backlog.comments.length} backlog)` });
-
-    this.tick();
   }
 
   private tick(): void {
@@ -208,9 +226,40 @@ export class EbayLiveWatcher {
         // A navigation, a deploy, or a closed show. Report and keep polling —
         // a transient DOM miss must not tear down the show.
         this.o.onStatus?.({ connected: false, detail: (e as Error).message.slice(0, 120) });
+        // Unless the page itself is gone. A dead page never heals by polling
+        // it again, so every subsequent tick would report the same failure
+        // forever while the console kept showing a show that looked alive.
+        await this.recoverIfDead();
       }
       this.tick();
     }, this.pollMs);
+  }
+
+  /**
+   * Rebuild the page when it, or the browser under it, has died.
+   *
+   * Distinct from the chat watchdog below: that one reloads a page that is
+   * alive but whose socket stopped delivering. This one handles the case where
+   * there is nothing left to reload — Chromium was OOM-killed or crashed, and
+   * `acquireBrowser` has already dropped the shared handle, so asking for a
+   * page again relaunches it.
+   */
+  private async recoverIfDead(): Promise<void> {
+    if (this.stopped) return;
+    const dead = !this.page || this.page.isClosed() || !this.page.context().browser()?.isConnected();
+    if (!dead) return;
+    try {
+      this.page = null;
+      await this.openPage();
+      // Everything on screen after a relaunch is history, not new traffic.
+      const backlog = await this.scrape();
+      for (const c of backlog.comments) this.seen.add(c.id);
+      this.lastCommentAt = Date.now();
+      this.o.onStatus?.({ connected: true, detail: "browser recovered — feed reattached" });
+    } catch (e) {
+      // Still down. The next tick tries again; there is no state to corrupt.
+      this.o.onStatus?.({ connected: false, detail: `recovery failed: ${(e as Error).message.slice(0, 100)}` });
+    }
   }
 
   /**

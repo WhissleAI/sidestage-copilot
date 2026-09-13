@@ -84,6 +84,10 @@ export class ShowRuntime {
       agentId: config.whissle.agentId,
       baseUrl: config.whissle.base,
       timeoutMs: Math.max(4000, config.latencyBudgetMs * 3),
+      // Tags every gateway call this show makes, which is the only per-show
+      // cost attribution available — the platform's own usage rows carry no
+      // agent_id for text (see llm/meter.ts).
+      showId: o.showId,
     });
 
     const path = o.dbPath ?? join(config.showsDir, `${o.showId}.db`);
@@ -150,6 +154,7 @@ export class ShowRuntime {
       seller: () => this.seller,
       llm: this.llm,
       retriever: this.retriever,
+      research: this.research,
       executor: this.executor,
       proposer: this.proposer,
       showContext: this.showContext,
@@ -179,13 +184,26 @@ export class ShowRuntime {
     return this.llm.agentId;
   }
 
+  /**
+   * What a console gets when it connects.
+   *
+   * Deliberately not "everything in the database". A three-hour show ends with
+   * hundreds of closed lots, and a reviewer opening the console on hotel wifi
+   * should not wait for them: an ended lot cannot be sold, cannot be pinned and
+   * cannot be the subject of a reply. The pinned lot is always included even if
+   * it just closed, so the rail never blanks out mid-render.
+   */
   snapshot(): Record<string, unknown> {
+    const show = this.repo.show();
+    const listings = this.repo.listings().filter(
+      (l) => l.state !== "ended" || l.id === show.pinnedListingId,
+    );
     return {
       seller: this.seller,
       catalogId: this.catalogId,
       agentId: this.llm.agentId,
-      show: this.repo.show(),
-      listings: this.repo.listings(),
+      show,
+      listings,
       proposals: this.pipeline.list(),
       actions: this.executor.list(),
       audit: this.audit.list(200),
@@ -258,13 +276,18 @@ export class ShowRuntime {
             const prev = this.repo.listing(prevPinned);
             if (prev) emit("listing", prev);
           }
-          this.audit.append(
-            "action_committed",
-            "system",
-            created ? `lot opened: ${lot.title}` : `lot updated: ${lot.title}`,
-            { source: "ebaylive", eventId, priceCents: lot.priceCents, soldOut: lot.soldOut, highBidder: lot.highBidder },
-          );
-          emit("audit", this.audit.list(1)[0]);
+          // Deliberately NOT audited.
+          //
+          // The hash chain is the record of AGENCY — what this copilot and this
+          // seller did, so that "who changed the price" has an answer and every
+          // write can be undone. A bid landing on someone else's auction is not
+          // something we did; writing it as `action_committed` by `system` made
+          // the vocabulary lie and buried the one entry that mattered (a reply
+          // sent to a buyer) under 199 identical lines.
+          //
+          // The observation is not lost: `emit("listing", …)` above carries it
+          // live, and the listing row keeps `version` + `observedAt`, which is
+          // what stale-price detection actually reads.
         }
       },
 
@@ -278,6 +301,9 @@ export class ShowRuntime {
   }
 
   async stop(): Promise<void> {
+    // Drain the reply path FIRST. A draft still waiting on the gateway will
+    // come back to a database this method is about to close.
+    await this.pipeline.stop();
     this.showContext.stop();
     this.simSource?.stop();
     this.hostAudio?.stop();

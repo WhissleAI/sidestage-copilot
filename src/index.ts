@@ -7,40 +7,11 @@
 // The operator console (the separate frontend repo) points at this with
 // VITE_API_BASE=http://localhost:8790 and VITE_USE_MOCKS=false.
 
-import Fastify from "fastify";
-import cors from "@fastify/cors";
 import { config } from "./config.js";
-import { buildContext } from "./api/context.js";
-import { registerRoutes } from "./api/routes.js";
+import { buildApp } from "./api/server.js";
 
 async function main(): Promise<void> {
-  const app = Fastify({ logger: false });
-
-  // The console is served from a different origin in development. Commands are
-  // idempotent-by-key or explicitly confirmed, and there is no cookie auth to
-  // abuse, so a permissive policy is correct for a local operator tool. A
-  // deployment behind a shared origin would tighten this.
-  await app.register(cors, { origin: true });
-
-  // Tolerate an empty body on a request that declares JSON.
-  //
-  // Fastify's default parser rejects that as malformed, which 400s every
-  // bodyless command a browser sends with a default `content-type` header —
-  // regenerate, dismiss, approve, reject, rollback, detach. The console did
-  // exactly that and the buttons silently did nothing. The client is fixed too,
-  // but an API should not depend on every caller getting a header habit right.
-  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
-    const raw = typeof body === "string" ? body.trim() : "";
-    if (!raw) return done(null, {});
-    try {
-      done(null, JSON.parse(raw));
-    } catch (e) {
-      done(e as Error, undefined);
-    }
-  });
-
-  const ctx = await buildContext();
-  await registerRoutes(app, ctx);
+  const { app, ctx } = await buildApp();
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
   await ctx.start();

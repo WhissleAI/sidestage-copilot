@@ -13,6 +13,9 @@ import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catal
 import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
+import { meter } from "../llm/meter.js";
+import { WhissleBilling, spendWindow } from "../llm/billing.js";
+import { config } from "../config.js";
 import type { AppContext } from "./context.js";
 
 export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
@@ -53,6 +56,54 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   // ── catalogs ──────────────────────────────────────────────────────────────
   // What the operator picks first: which of my inventories am I selling tonight.
+  // ── what this is costing ──────────────────────────────────────────────────
+  //
+  // Two sources that must not be conflated, and one honest gap between them.
+  //
+  //   wallet   dollars, from the platform. The seller's real balance.
+  //   usage    tokens/seconds/characters consumed, ORG-wide.
+  //   meter    OUR calls, per show — the only per-show attribution that exists,
+  //            because /usage/sessions returns agent_id: null for text turns.
+  //
+  // The wallet delta is reported as an upper bound, never as an invoice: it is
+  // org-wide, so concurrent work in the same workspace lands inside it.
+  const billing = new WhissleBilling(config.whissle.apiKey, config.whissle.base);
+
+  app.get<{ Querystring: { days?: string } }>("/api/billing", async (req) => {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+    // Both reads in flight together — this panel is polled, and two sequential
+    // round-trips to the gateway is a visibly slower page for no reason.
+    const [walletR, usageR] = await Promise.all([billing.wallet(), billing.usage(days)]);
+
+    const wallet = walletR.ok ? walletR.value : null;
+    if (wallet) {
+      // The process window opens on the first successful read, so "spent since
+      // the server started" is available without a separate bootstrap step.
+      spendWindow.open("process", wallet.balanceUsd);
+      for (const s of shows.list()) spendWindow.open(s.showId, wallet.balanceUsd);
+    }
+
+    return {
+      // A failed read reports WHY. A missing scope and a zero balance are
+      // different facts and must never render the same.
+      wallet: walletR.ok ? walletR.value : null,
+      walletError: walletR.ok ? null : walletR.error,
+      usage: usageR.ok ? usageR.value : null,
+      usageError: usageR.ok ? null : usageR.error,
+      meter: meter.snapshot(),
+      spend: wallet ? spendWindow.since(wallet.balanceUsd) : {},
+      attribution: {
+        perShow: "app-metered",
+        // Said in the payload, not only in the docs, so any client that renders
+        // this cannot accidentally present the bound as an exact cost.
+        note:
+          "Wallet deltas are org-wide upper bounds. Per-show call counts come from " +
+          "this app's own meter because the platform's usage rows carry no agent_id " +
+          "for text turns.",
+      },
+    };
+  });
+
   app.get("/api/catalogs", async () => listCatalogs());
 
   app.post("/api/catalogs/reload", async () => {

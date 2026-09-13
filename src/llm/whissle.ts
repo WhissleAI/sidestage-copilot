@@ -22,6 +22,7 @@
 
 import { config } from "../config.js";
 import { LlmError, type LlmPort } from "./types.js";
+import { meter, type GatewayDoor } from "./meter.js";
 
 export interface WhissleOpts {
   apiKey: string;
@@ -29,6 +30,9 @@ export interface WhissleOpts {
   baseUrl?: string;
   /** Abort a turn that blows the latency budget rather than letting it hang. */
   timeoutMs?: number;
+  /** Which show this client serves, so the meter can attribute the spend.
+   *  The platform cannot: /usage/sessions returns agent_id: null for text. */
+  showId?: string;
 }
 
 export class WhissleClient implements LlmPort {
@@ -65,7 +69,10 @@ export class WhissleClient implements LlmPort {
       source: "api",
       ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
     };
-    const d = await this.post<{ reply?: string }>(`/api/agents/${this.o.agentId}/chat/turn`, body);
+    const d = await this.post<{ reply?: string }>(
+      `/api/agents/${this.o.agentId}/chat/turn`, body,
+      { door: "chat_turn", contextChars: message.length + context.length },
+    );
     return (d.reply || "").trim();
   }
 
@@ -75,7 +82,7 @@ export class WhissleClient implements LlmPort {
       system,
       messages: [{ role: "user", content: user }],
       max_tokens: opts.maxTokens ?? 500,
-    });
+    }, { door: "utility_turn", contextChars: system.length + user.length });
     return (d.reply || "").trim();
   }
 
@@ -91,7 +98,7 @@ export class WhissleClient implements LlmPort {
       agent_id: this.o.agentId,
       listen_only: true,
       metadata: true,
-    });
+    }, { door: "voice_start" });
     if (!d.url || !d.token) throw new LlmError(502, `unexpected voice/start response: ${JSON.stringify(d).slice(0, 200)}`);
     return { url: d.url, token: d.token, room: d.room || "" };
   }
@@ -100,17 +107,34 @@ export class WhissleClient implements LlmPort {
   async uploadKb(filename: string, content: string, mime = "text/markdown"): Promise<void> {
     const form = new FormData();
     form.append("file", new Blob([content], { type: mime }), filename);
+    const t0 = performance.now();
     const r = await fetch(`${this.base}/api/agents/${this.o.agentId}/kb/upload`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.o.apiKey}` },
       body: form,
     });
+    meter.record({
+      door: "kb_upload", ms: performance.now() - t0, ok: r.ok, status: r.status,
+      showId: this.o.showId, contextChars: content.length,
+    });
     if (!r.ok) throw new LlmError(r.status, await safeText(r));
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(
+    path: string,
+    body: unknown,
+    m: { door: GatewayDoor; contextChars?: number } = { door: "chat_turn" },
+  ): Promise<T> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.o.timeoutMs ?? 12_000);
+    const t0 = performance.now();
+    // Every call that leaves this process is counted, including the ones that
+    // fail — a turn that 402s still tells the seller something about the bill.
+    const done = (ok: boolean, status?: number, error?: string) =>
+      meter.record({
+        door: m.door, ms: performance.now() - t0, ok, status, error,
+        showId: this.o.showId, contextChars: m.contextChars,
+      });
     try {
       const r = await fetch(`${this.base}${path}`, {
         method: "POST",
@@ -118,11 +142,21 @@ export class WhissleClient implements LlmPort {
         body: JSON.stringify(body),
         signal: ctl.signal,
       });
-      if (!r.ok) throw new LlmError(r.status, await safeText(r));
-      return (await r.json()) as T;
+      if (!r.ok) {
+        const text = await safeText(r);
+        done(false, r.status, text.slice(0, 200));
+        throw new LlmError(r.status, text);
+      }
+      const parsed = (await r.json()) as T;
+      done(true, r.status);
+      return parsed;
     } catch (e) {
       if (e instanceof LlmError) throw e;
-      if ((e as Error).name === "AbortError") throw new LlmError(504, "gateway timeout");
+      if ((e as Error).name === "AbortError") {
+        done(false, 504, "gateway timeout");
+        throw new LlmError(504, "gateway timeout");
+      }
+      done(false, 0, (e as Error).message);
       throw new LlmError(0, (e as Error).message);
     } finally {
       clearTimeout(t);

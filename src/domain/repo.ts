@@ -173,7 +173,17 @@ export class Repo {
       return { listing: this.listing(id)!, changed: true, created: true };
     }
 
-    const changed = existing.price_cents !== lot.priceCents || existing.qty !== qty || existing.pinned !== 1;
+    // A lot the host has closed is HISTORY, not inventory with zero stock.
+    // Leaving it `live` meant every `state !== "ended"` filter in the system —
+    // the lineup fact, the knowledge-base document, the hello payload — kept
+    // carrying it, so a three-hour show accumulated hundreds of dead lots and
+    // offered them to the model as things it could sell.
+    const state: Listing["state"] = lot.soldOut ? "ended" : "live";
+    const changed =
+      existing.price_cents !== lot.priceCents ||
+      existing.qty !== qty ||
+      existing.state !== state ||
+      (state === "live" && existing.pinned !== 1);
     if (!changed) {
       this.d.prepare("UPDATE listings SET observed_at = ? WHERE id = ?").run(now, existing.id);
       return { listing: this.listing(existing.id)!, changed: false, created: false };
@@ -183,8 +193,10 @@ export class Repo {
     // floor to read, and pretending one exists would let a markdown look legal.
     this.d.prepare("UPDATE listings SET floor_price_cents = ?, observed_at = ? WHERE id = ?")
       .run(lot.priceCents, now, existing.id);
-    this.mutateListing(existing.id, { priceCents: lot.priceCents, qty });
-    if (existing.pinned !== 1) this.setPinned(existing.id);
+    this.mutateListing(existing.id, { priceCents: lot.priceCents, qty, state });
+    // Only a lot still being sold takes the pin. Pinning one that just ended
+    // would leave the console showing a closed lot as the item on screen.
+    if (state === "live" && existing.pinned !== 1) this.setPinned(existing.id);
     return { listing: this.listing(existing.id)!, changed: true, created: false };
   }
 
