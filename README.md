@@ -22,6 +22,20 @@ Two repositories:
 copilot-to-automation ladder with its promotion criteria, a 3–5 seller pilot design, and the
 GMV and operator-load metrics.
 
+## Guardrails
+
+**[`docs/GUARDRAILS.md`](docs/GUARDRAILS.md)** — what each of the six guards
+checks, what it deliberately lets through, the two-layer split with the Whissle
+agent, and the measured precision/recall. Read this to understand the pills on
+every proposal card.
+
+## Roadmap
+
+**[`docs/ROADMAP.md`](docs/ROADMAP.md)** — what is missing and in what order,
+including the Whissle platform asks and one finding worth the click: the audio
+bridge already captures the show's video and discards it, while Whissle's hybrid
+visual intelligence is sitting right there.
+
 ## Self-audit
 
 **[`docs/REVIEW.md`](docs/REVIEW.md)** — an adversarial review of this system
