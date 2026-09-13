@@ -175,8 +175,7 @@ export class Pipeline {
     // 2. cache, keyed on the versions of every listing the grounding touched.
     //    A regenerate deliberately skips it: the seller is asking for something
     //    OTHER than the answer we already have.
-    const versions = listingVersions(r.evidence);
-    const key = cacheKey({ question: msg.text, versions });
+    const key = cacheKey({ question: msg.text, facts: r.evidence });
     const hit = previous ? null : this.cache.get(key);
     if (hit) {
       proposal = this.finish(proposal, {
@@ -410,16 +409,6 @@ export class Pipeline {
     this.d.retriever.rebuild();
     this.d.events.onListingChanged(listingId);
   }
-}
-
-function listingVersions(evidence: Evidence[]): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const e of evidence) {
-    if (e.listingVersion === undefined) continue;
-    const id = e.factId.startsWith("listing:") ? e.factId.slice(8).split("#")[0] : null;
-    if (id) out[id] = e.listingVersion;
-  }
-  return out;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

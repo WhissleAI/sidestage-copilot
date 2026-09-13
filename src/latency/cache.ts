@@ -4,11 +4,22 @@
 // first one in 1.4 s and the next twenty in under a millisecond is what moves
 // p95 rather than p50.
 //
-// The correctness question is invalidation, and this is where the listing
-// `version` earns its keep a second time: the cache key includes the version of
-// every listing the answer was grounded in, so a markdown does not just expire
-// the entry — it makes the old key unreachable. There is no TTL race to lose.
+// The correctness question is invalidation, and the first design got it exactly
+// backwards in a way that only showed up on a live auction.
+//
+// Keying on the VERSION of every listing in evidence is safe but useless: a
+// question like "what's the return policy" retrieves policy facts plus a handful
+// of listing facts, so the key pinned on four listings' versions. On eBay Live a
+// lot's version bumps on every bid — one watch reached v19 — so the key changed
+// every few seconds and the hit rate sat at exactly 0%, forever.
+//
+// Key on the CONTENT the model was actually shown instead. The cached answer is
+// valid for as long as the facts behind it read the same, whatever their version
+// numbers did. A price moves, the price fact's text changes, the key changes, the
+// entry becomes unreachable — the property that mattered is kept. An unrelated
+// lot takes a bid and nothing changes, because nothing the answer depends on did.
 
+import { createHash } from "node:crypto";
 import { terms } from "../retrieval/text.js";
 import type { Claim, Evidence, GuardResult, Verdict } from "../domain/types.js";
 
@@ -29,8 +40,8 @@ interface Entry {
 
 export interface CacheKeyParts {
   question: string;
-  /** listingId -> version, for every listing the answer touched. */
-  versions: Record<string, number>;
+  /** The evidence the model was shown, verbatim. Content, not version numbers. */
+  facts: { factId: string; text: string }[];
 }
 
 /**
@@ -41,8 +52,14 @@ export interface CacheKeyParts {
  */
 export function cacheKey(parts: CacheKeyParts): string {
   const q = [...new Set(terms(parts.question))].sort().join(" ");
-  const v = Object.keys(parts.versions).sort().map((k) => `${k}@${parts.versions[k]}`).join(",");
-  return `${q}|${v}`;
+  // Order-independent: retrieval may rank the same facts differently between two
+  // otherwise identical turns, and that is not a reason to miss.
+  const evidence = parts.facts
+    .map((f) => `${f.factId}\u0000${f.text}`)
+    .sort()
+    .join("\u0001");
+  const digest = createHash("sha1").update(evidence).digest("hex").slice(0, 16);
+  return `${q}|${digest}`;
 }
 
 export class ReplyCache {

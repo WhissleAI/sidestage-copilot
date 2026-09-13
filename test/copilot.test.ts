@@ -120,21 +120,33 @@ test("fenced JSON is handled", () => {
 // ── cache ───────────────────────────────────────────────────────────────────
 
 test("the cache key normalises wording but not meaning", () => {
-  const v = { [PINNED]: 3 };
+  const facts = [{ factId: "listing:x#price", text: "It is $412.00." }];
   assert.equal(
-    cacheKey({ question: "how much for the pandas", versions: v }),
-    cacheKey({ question: "the pandas, how much?", versions: v }),
+    cacheKey({ question: "how much for the pandas", facts }),
+    cacheKey({ question: "the pandas, how much?", facts }),
   );
   assert.notEqual(
-    cacheKey({ question: "how much for the pandas", versions: v }),
-    cacheKey({ question: "how much for the dunks", versions: v }),
+    cacheKey({ question: "how much for the pandas", facts }),
+    cacheKey({ question: "how much for the dunks", facts }),
   );
 });
 
-test("a listing version bump makes the old cache key unreachable", () => {
+test("the cache key ignores the ORDER retrieval happened to rank facts in", () => {
+  const a = [
+    { factId: "policy:returns", text: "30-day returns." },
+    { factId: "listing:x#price", text: "It is $412.00." },
+  ];
+  const b = [...a].reverse();
+  assert.equal(cacheKey({ question: "whats the return policy", facts: a }),
+               cacheKey({ question: "whats the return policy", facts: b }));
+});
+
+test("a changed FACT makes the old entry unreachable", () => {
   const q = "how much for the chicagos";
-  const k1 = cacheKey({ question: q, versions: { [PINNED]: 3 } });
-  const k2 = cacheKey({ question: q, versions: { [PINNED]: 4 } });
+  const before = [{ factId: "listing:x#price", text: "It is $412.00." }];
+  const after = [{ factId: "listing:x#price", text: "It is $370.00." }];
+  const k1 = cacheKey({ question: q, facts: before });
+  const k2 = cacheKey({ question: q, facts: after });
   assert.notEqual(k1, k2);
 
   const c = new ReplyCache();
@@ -142,6 +154,22 @@ test("a listing version bump makes the old cache key unreachable", () => {
   c.set(k1, entry);
   assert.ok(c.get(k1));
   assert.equal(c.get(k2), null, "the post-markdown key must miss");
+});
+
+test("an unrelated lot taking a bid does NOT invalidate the answer", () => {
+  // The whole reason the hit rate sat at 0% on a live auction: keying on every
+  // listing's VERSION meant one bid on a lot the answer never mentioned changed
+  // the key. A return-policy answer does not depend on what the Chicagos sold for.
+  const q = "whats the return policy";
+  const facts = [
+    { factId: "policy:pol_returns", text: "30-day returns on unworn items." },
+    { factId: "listing:lst_aj1#identity", text: "Air Jordan 1, size 10, DS." },
+  ];
+  const sameAfterABid = [
+    { factId: "policy:pol_returns", text: "30-day returns on unworn items." },
+    { factId: "listing:lst_aj1#identity", text: "Air Jordan 1, size 10, DS." },
+  ];
+  assert.equal(cacheKey({ question: q, facts }), cacheKey({ question: q, facts: sameAfterABid }));
 });
 
 test("a reply that failed a guardrail is never cached", () => {
