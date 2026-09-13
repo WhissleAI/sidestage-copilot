@@ -1,0 +1,140 @@
+// Fact extraction: turn the structured catalog + policy corpus into a set of
+// small, individually addressable facts.
+//
+// This is the load-bearing idea of the whole grounding design. The copilot is
+// never handed "the catalog" as prose — it is handed a numbered list of facts,
+// each with a stable `factId`, and is required to cite one per claim. That makes
+// three things possible downstream that free-text RAG cannot do:
+//   • a guard can check a claim against the exact fact it cites,
+//   • a listing fact carries the `version` it was read at, so a stale read is
+//     provable rather than suspected,
+//   • the operator UI can show provenance chips a human can actually verify.
+
+import type { EvidenceSource } from "../domain/types.js";
+import type { Repo, ListingWithDescription } from "../domain/repo.js";
+import { formatMoney } from "../domain/money.js";
+import { ngramVector, terms, type SparseVec } from "./text.js";
+
+export type FactField =
+  | "price" | "availability" | "condition" | "sizing" | "authenticity"
+  | "shipping" | "returns" | "discount" | "description" | "identity" | "market" | "qa" | "tone" | "prohibited";
+
+export interface Fact {
+  factId: string;
+  source: EvidenceSource;
+  label: string;
+  text: string;
+  field: FactField;
+  listingId?: string;
+  listingVersion?: number;
+  /** For price facts: the exact cents the text asserts. Guards compare against this. */
+  numericCents?: number;
+  /** For availability facts: the exact quantity the text asserts. */
+  qty?: number;
+  policyTopic?: string;
+  /** Precomputed at index build. */
+  tokens: string[];
+  vector: SparseVec;
+}
+
+function mk(f: Omit<Fact, "tokens" | "vector">): Fact {
+  const indexable = `${f.label} ${f.text}`;
+  return { ...f, tokens: terms(indexable), vector: ngramVector(indexable) };
+}
+
+export function listingFacts(l: ListingWithDescription): Fact[] {
+  const name = `${l.title} size ${l.size}`;
+  // The chip label has to say WHICH listing, or a reply grounded across several
+  // lots renders as five identical "Listing - shipping" chips and the operator
+  // cannot verify any of them.
+  const short = `${l.shortName} ${l.size}`;
+  const out: Fact[] = [
+    mk({
+      factId: `listing:${l.id}#identity`, source: "listing", label: `${short} · item`,
+      field: "identity", listingId: l.id, listingVersion: l.version,
+      text: `${l.title} — ${l.brand} ${l.model}, colorway ${l.colorway}, size ${l.size}, condition ${l.condition}.`,
+    }),
+    mk({
+      factId: `listing:${l.id}#price`, source: "listing", label: `${short} · price`,
+      field: "price", listingId: l.id, listingVersion: l.version, numericCents: l.priceCents,
+      text: `${name} is listed at ${formatMoney(l.priceCents)}.`,
+    }),
+    mk({
+      factId: `listing:${l.id}#availability`, source: "listing", label: `${short} · stock`,
+      field: "availability", listingId: l.id, listingVersion: l.version, qty: l.qty,
+      text: l.qty > 0
+        ? `${name} has ${l.qty} available${l.qty === 1 ? " — it is the last one" : ""}.`
+        : `${name} is sold out; there are 0 left.`,
+    }),
+    mk({
+      factId: `listing:${l.id}#condition`, source: "listing", label: `${short} · condition`,
+      field: "condition", listingId: l.id, listingVersion: l.version,
+      text: `${name} is graded ${l.condition}. ${l.description}`,
+    }),
+    mk({
+      factId: `listing:${l.id}#sizing`, source: "listing", label: `${short} · size`,
+      field: "sizing", listingId: l.id, listingVersion: l.version,
+      text: `This ${l.model} is a size ${l.size}. Only that size is available in this listing.`,
+    }),
+    mk({
+      factId: `listing:${l.id}#authenticity`, source: "listing", label: `${short} · authentication`,
+      field: "authenticity", listingId: l.id, listingVersion: l.version,
+      text: l.authenticated && l.certId
+        ? `${name} is authenticated by CheckCheck, certificate ${l.certId}, and ships with the certificate card.`
+        : `${name} is a general-release pair and is NOT third-party authenticated. It carries the standard 30-day return.`,
+    }),
+    mk({
+      factId: `listing:${l.id}#shipping`, source: "listing", label: `${short} · shipping`,
+      field: "shipping", listingId: l.id, listingVersion: l.version,
+      text: l.shippingProfile === "us-free-2day"
+        ? `${name} ships free within the US on 2-day service.`
+        : `${name} ships USPS Ground Advantage at a flat $9.95 within the US.`,
+    }),
+  ];
+  return out;
+}
+
+export function buildFacts(repo: Repo): Fact[] {
+  const facts: Fact[] = [];
+
+  for (const l of repo.listings()) facts.push(...listingFacts(l));
+
+  for (const p of repo.policies()) {
+    facts.push(mk({
+      factId: `policy:${p.id}`, source: "policy",
+      label: `Policy · ${p.topic}`, field: p.topic as FactField, policyTopic: p.topic,
+      text: `${p.title}: ${p.body}`,
+    }));
+  }
+
+  for (const q of repo.qa()) {
+    facts.push(mk({
+      factId: `qa:${q.id}`, source: "qa", label: "Past answer", field: "qa",
+      text: `${q.question}? ${q.answer}`,
+    }));
+  }
+
+  // One market fact per SKU, carrying the 30-day median of comparable sales.
+  const bySku = new Map<string, number[]>();
+  for (const l of repo.listings()) {
+    const prices = repo.comps(l.sku).map((c) => c.soldPriceCents);
+    if (prices.length) bySku.set(l.sku, prices);
+  }
+  for (const [sku, prices] of bySku) {
+    const med = median(prices);
+    facts.push(mk({
+      factId: `market:${sku}#median`, source: "market", label: "Market · comps",
+      field: "market", numericCents: med,
+      text: `Recent comparable sales for ${sku} median ${formatMoney(med)} across ${prices.length} sales.`,
+    }));
+  }
+
+  return facts;
+}
+
+export function median(xs: number[]): number {
+  if (!xs.length) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
