@@ -85,8 +85,11 @@ export async function buildContext(): Promise<AppContext> {
       const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
       let activatedResume = false;
       try {
-        const rows = await pool.query<{ id: string; external_id: string | null; started_at: string; catalog_id: string | null }>(
-          "SELECT id, external_id, started_at, catalog_id FROM shows WHERE status = 'live' AND source = 'ebaylive'",
+        const rows = await pool.query<{
+          id: string; external_id: string | null; started_at: string;
+          catalog_id: string | null; agent_id: string | null;
+        }>(
+          "SELECT id, external_id, started_at, catalog_id, agent_id FROM shows WHERE status = 'live' AND source = 'ebaylive'",
         );
         for (const row of rows.rows) {
           const age = Date.now() - new Date(row.started_at).getTime();
@@ -96,6 +99,10 @@ export async function buildContext(): Promise<AppContext> {
           }
           try {
             const rt = await shows.attachEbayLive(row.external_id);
+            // Back onto the agent this show OWNS, with its own corpus. Falling
+            // back to the shared one would put a resumed show's lots into a
+            // knowledge base other shows read.
+            if (row.agent_id) rt.useAgent(row.agent_id);
             // Re-apply the catalog the session was started with, or the copilot
             // resumes grounded in nothing and abstains on every question.
             if (row.catalog_id) {

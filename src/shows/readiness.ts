@@ -157,6 +157,10 @@ export async function checkReadiness(catalog: Catalog): Promise<Readiness> {
 
   // Stale show corpora from OTHER shows are worse than a missing one: the agent
   // retrieves a lot that sold two days ago and answers about it confidently.
+  //
+  // Monitored shows now get their OWN agent, so this can only be non-empty on a
+  // catalog agent that ran sessions before that change — but it stays, because
+  // the failure it catches is silent and the check costs one request.
   const showDocs = names.filter((n) => n.startsWith("sidestage-show-"));
   checks.push({
     name: "No stale show corpora",

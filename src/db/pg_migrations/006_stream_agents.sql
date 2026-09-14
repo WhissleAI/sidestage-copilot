@@ -1,0 +1,21 @@
+-- One agent per STREAM, not one per catalog.
+--
+-- A catalog's agent was the right unit while a catalog was the inventory: it
+-- carried the seller's persona, guardrails and knowledge base, and two sellers
+-- could never retrieve each other's stock.
+--
+-- Monitoring broke that. Every stream has a DIFFERENT lineup — the lots it puts
+-- on screen — so several shows sharing one catalog agent meant several shows
+-- writing their lots into one knowledge base. The symptom was five dead show
+-- corpora on one agent, each retrievable and answerable with total confidence
+-- about lots that sold days ago, and the fix was a purge that had to be right.
+--
+-- A per-stream agent makes it impossible instead of merely handled: one show,
+-- one corpus, nothing to purge and nothing to leak.
+--
+-- The cost is that agents accumulate, so the show now OWNS its agent and
+-- deleting the session deletes it.
+ALTER TABLE shows ADD COLUMN IF NOT EXISTS agent_id TEXT;
+-- Only an agent this app created for this show is ours to delete. A catalog's
+-- long-lived agent is shared and must survive the session that borrowed it.
+ALTER TABLE shows ADD COLUMN IF NOT EXISTS agent_owned BOOLEAN NOT NULL DEFAULT FALSE;

@@ -337,6 +337,37 @@ describe("analytics", () => {
   });
 });
 
+describe("deleting a session", () => {
+  test("the demo show cannot be deleted", async () => {
+    // It is the only show where the write path, the rollback spike and the
+    // stale-price walkthrough can be exercised. Losing it to a stray click
+    // would take the submission's whole demonstrable core with it.
+    const r = await app.inject({
+      method: "DELETE", url: "/api/shows/show_ep42", headers: { ...BODYLESS_JSON, ...auth },
+    });
+    assert.equal(r.statusCode, 400);
+    assert.match(r.json().error, /demo show cannot be deleted/);
+  });
+
+  test("an unknown show is a 404, not a silent success", async () => {
+    const r = await app.inject({
+      method: "DELETE", url: "/api/shows/ebay_nope", headers: { ...BODYLESS_JSON, ...auth },
+    });
+    assert.equal(r.statusCode, 404);
+  });
+
+  test("a guest cannot delete a session", async () => {
+    // Deleting a session destroys its agent, its corpus and its whole record.
+    // That is the most destructive thing in the app and it is a seller's call.
+    const guest = (await app.inject({ method: "POST", url: "/api/auth/guest" })).json();
+    const r = await app.inject({
+      method: "DELETE", url: "/api/shows/anything",
+      headers: { authorization: `Bearer ${guest.token}`, ...BODYLESS_JSON },
+    });
+    assert.equal(r.statusCode, 403);
+  });
+});
+
 describe("the SSE envelope", () => {
   test("the stream opens with a hello frame the console can seed state from", async () => {
     // The console REPLACES its state from `hello`, so a missing key there

@@ -12,6 +12,8 @@ import { discoverLiveShows } from "../ingest/ebaylive/discovery.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
 import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
 import { catalogFit, checkReadiness } from "../shows/readiness.js";
+import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
+import { DEMO_SHOW_ID } from "../shows/registry.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
 import { prdMetrics } from "../shows/prdMetrics.js";
 import { promotionReadiness } from "../autonomy/promotion.js";
@@ -426,6 +428,48 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return { ...(r.rows[0].report as object), generatedAt: r.rows[0].generated_at };
   });
 
+  /**
+   * Delete a past session — and the agent it owned.
+   *
+   * An agent per stream means agents accumulate, so a session the operator is
+   * finished with has to be able to take its agent with it. Only an agent THIS
+   * app created for THIS show is removed: a catalog's long-lived agent is
+   * shared and must survive a session that merely borrowed it.
+   *
+   * The row goes whether or not the gateway agreed to delete the agent. A
+   * session the operator asked to remove should disappear from their list, and
+   * an agent we failed to delete is a thing to report rather than a reason to
+   * keep the session.
+   */
+  app.delete<{ Params: { showId: string } }>("/api/shows/:showId", async (req, reply) => {
+    if (!mustWrite(req as object, reply)) return;
+    const showId = req.params.showId;
+    if (showId === DEMO_SHOW_ID) {
+      return reply.code(400).send({ error: "the demo show cannot be deleted" });
+    }
+
+    const row = (
+      await pgPool().query<{ agent_id: string | null; agent_owned: boolean }>(
+        "SELECT agent_id, agent_owned FROM shows WHERE id = $1", [showId],
+      )
+    ).rows[0];
+    if (!row) return reply.code(404).send({ error: `no show ${showId}` });
+
+    // Stop watching before deleting: a live watcher would keep writing lots
+    // into rows that are on their way out.
+    kb.cancel(showId);
+    await shows.detach(showId).catch(() => null);
+
+    const agent = row.agent_id && row.agent_owned
+      ? await deleteStreamAgent(row.agent_id)
+      : { ok: true, detail: row.agent_id ? "agent is shared — left in place" : "no agent" };
+
+    // Everything else cascades: listings, chat, proposals, audit, sales, report.
+    await pgPool().query("DELETE FROM shows WHERE id = $1", [showId]);
+    hub.emit("shows", await shows.list());
+    return { ok: true, showId, agent };
+  });
+
   /** Every show that has a report — the "past shows" list. */
   app.get("/api/reports", async () => {
     const r = await pgPool().query<{ show_id: string; generated_at: Date; report: ShowReport }>(
@@ -495,13 +539,47 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       try {
         const target = await shows.attachEbayLive(input, { title: req.body?.title, host: req.body?.host });
 
+        // ── this show's own agent ──────────────────────────────────────
+        //
+        // Created per STREAM, not per catalog. Every stream has a different
+        // lineup, and several shows sharing one agent meant several shows
+        // writing their lots into one knowledge base — which is exactly how
+        // five dead show corpora ended up on one agent, each answerable with
+        // total confidence about lots that sold days ago.
+        //
+        // The config is the same config; what is tweaked is the part that is
+        // genuinely per-show. The show OWNS this agent and deleting the session
+        // deletes it.
+        try {
+          const show = await target.show();
+          const agentId = await createStreamAgent({
+            showId: target.showId,
+            showTitle: show.title,
+            host: show.sellerHandle,
+            seller: catalog?.seller,
+            monitored: show.readOnly,
+          });
+          target.useAgent(agentId);
+          await pgPool().query(
+            "UPDATE shows SET agent_id = $2, agent_owned = TRUE WHERE id = $1",
+            [target.showId, agentId],
+          );
+        } catch (e) {
+          // A show that cannot get its own agent falls back to the shared one
+          // rather than refusing to start — degraded, and said so in readiness.
+          console.warn(`  ${target.showId}: own agent not created (${(e as Error).message})`);
+        }
+
         let applied = null;
         if (catalog) {
           applied = applyCatalog(target.repo, catalog);
           target.seller = catalog.seller;
           target.catalogId = catalog.id;
           // Answer as THIS seller's agent, with THIS seller's knowledge base.
-          if (catalog.agentId) target.useAgent(catalog.agentId);
+          // NOTE: the catalog's own agent is deliberately NOT adopted here.
+          // The stream agent created above already carries this seller's
+          // persona and guardrails, and pointing at the shared catalog agent
+          // would put this show's lots back into a corpus other shows read.
           await target.retriever.rebuild();
           for (const l of await target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
         }
