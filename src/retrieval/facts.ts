@@ -132,6 +132,7 @@ export function listingFacts(l: ListingWithDescription): Fact[] {
 }
 
 export async function buildFacts(repo: Repo): Promise<Fact[]> {
+  const show = await repo.show();
   const facts: Fact[] = [];
   const listings = await repo.listings();
 
@@ -149,15 +150,41 @@ export async function buildFacts(repo: Repo): Promise<Fact[]> {
   // it is already represented by the pinned-lot facts.
   const inventory = listings.filter((l) => !l.externalRef);
   const sellable = (inventory.length ? inventory : listings).filter((l) => l.state !== "ended" && l.qty > 0);
+
+  // WHOSE inventory is this?
+  //
+  // On the seller's own show the catalog IS the lineup, and saying "anything not
+  // on this list is not in tonight's show" is true and useful — it is what stops
+  // the model inventing stock.
+  //
+  // On a MONITORED show it is false, and dangerously so. The catalog belongs to
+  // us; the show belongs to someone else. Watching a fragrance auction with a
+  // baseball-card catalog loaded, that sentence made the copilot tell a real
+  // buyer that a bottle the host was holding up "isn't part of tonight's
+  // lineup" — a confident denial about someone else's stock, which no guard can
+  // catch because the catalog genuinely does not contain it.
+  //
+  // So the exclusivity claim is made only where it holds, and the wording says
+  // whose list it is.
+  const monitored = show.readOnly;
   facts.push(mk({
-    factId: "catalog:lineup", source: "catalog", label: "Catalog · tonight's lineup",
+    factId: "catalog:lineup", source: "catalog",
+    label: monitored ? "Catalog · the seller's own stock" : "Catalog · tonight's lineup",
     field: "identity",
-    text: sellable.length
-      ? `Tonight's lineup, and the ONLY items available: ${sellable
-          .map((l) => `${l.title} (${l.size?.trim() ? `size ${l.size.trim()}, ` : ""}${formatMoney(l.priceCents)})`)
-          .join("; ")}.` +
-        " Anything not on this list is not in tonight's show."
-      : "Nothing is currently available in tonight's lineup.",
+    text: !sellable.length
+      ? (monitored
+          ? "The seller's own catalog is empty."
+          : "Nothing is currently available in tonight's lineup.")
+      : monitored
+        ? `Items in the seller's OWN catalog: ${sellable
+            .map((l) => `${l.title} (${l.size?.trim() ? `size ${l.size.trim()}, ` : ""}${formatMoney(l.priceCents)})`)
+            .join("; ")}.` +
+          " This show is run by someone else, so this list is NOT the show's lineup." +
+          " If an item is not on it, say you do not have that one to hand — never that the show does not have it."
+        : `Tonight's lineup, and the ONLY items available: ${sellable
+            .map((l) => `${l.title} (${l.size?.trim() ? `size ${l.size.trim()}, ` : ""}${formatMoney(l.priceCents)})`)
+            .join("; ")}.` +
+          " Anything not on this list is not in tonight's show.",
   }));
 
   for (const p of await repo.policies()) {

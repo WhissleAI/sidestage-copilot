@@ -42,6 +42,55 @@ async function api<T>(path: string): Promise<T | null> {
   }
 }
 
+/**
+ * Does this catalog have anything to do with what the show is selling?
+ *
+ * The failure it catches is silent and expensive. Point a baseball-card catalog
+ * at a fragrance auction and nothing errors — retrieval simply grounds nothing,
+ * every answer abstains, and the queue fills with "the host will cover that
+ * shortly" while the operator wonders why the copilot has stopped working. The
+ * catalog is not broken and the copilot is not broken; they are about different
+ * things, and only a human can see that.
+ *
+ * Vocabulary overlap, deliberately crude: exact word matching between catalog
+ * titles and observed lot titles. It does not need to be clever to separate
+ * "cards vs cards" from "cards vs cologne", and anything cleverer would invite
+ * trust it has not earned.
+ */
+export function catalogFit(
+  catalogTitles: string[],
+  observedTitles: string[],
+): { overlap: number; sampled: number; verdict: "match" | "weak" | "mismatch" } {
+  const words = (xs: string[]) =>
+    new Set(
+      xs
+        .join(" ")
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 3 && !STOP.has(w)),
+    );
+  const cat = words(catalogTitles);
+  const obs = words(observedTitles);
+  if (!obs.size || !cat.size) return { overlap: 0, sampled: observedTitles.length, verdict: "weak" };
+  let hit = 0;
+  for (const w of obs) if (cat.has(w)) hit++;
+  const overlap = hit / obs.size;
+  return {
+    overlap: Number(overlap.toFixed(3)),
+    sampled: observedTitles.length,
+    verdict: overlap >= 0.15 ? "match" : overlap > 0.04 ? "weak" : "mismatch",
+  };
+}
+
+/** Words every live-selling title carries, which would otherwise manufacture
+ *  overlap between two catalogs that have nothing in common. */
+const STOP = new Set([
+  "item", "items", "live", "ebay", "show", "shown", "screen", "lot", "part",
+  "starts", "start", "sold", "used", "with", "from", "this", "that", "your",
+  "auction", "bid", "bids", "free", "ship", "shipping", "sale",
+]);
+
 export async function checkReadiness(catalog: Catalog): Promise<Readiness> {
   const checks: ReadinessCheck[] = [];
   const agentId = catalog.agentId ?? null;

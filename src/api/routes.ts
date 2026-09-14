@@ -11,7 +11,7 @@ import { LADDER } from "../autonomy/ladder.js";
 import { discoverLiveShows } from "../ingest/ebaylive/discovery.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
 import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
-import { checkReadiness } from "../shows/readiness.js";
+import { catalogFit, checkReadiness } from "../shows/readiness.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
@@ -133,6 +133,31 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // attribution actually lives: which provider and model answered, whether it
   // failed over, the latency and the tokens, per hop.
   const sessionsApi = new WhissleSessions(config.whissle.base, config.whissle.apiKey);
+
+  /**
+   * Is the loaded catalog actually about what this show is selling?
+   *
+   * Polled by the console once a show has observed a few lots. A mismatch is
+   * silent otherwise: nothing errors, retrieval just grounds nothing and every
+   * answer abstains.
+   */
+  app.get<{ Querystring: { showId?: string } }>("/api/show/fit", async (req, reply) => {
+    let target;
+    try {
+      target = rt(req.query.showId);
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+    const listings = await target.repo.listings();
+    const observed = listings.filter((l) => l.externalRef).map((l) => l.title);
+    const own = listings.filter((l) => !l.externalRef).map((l) => l.title);
+    // Too few observed lots to judge — saying "mismatch" off two titles would
+    // cry wolf in the first minute of every show.
+    if (observed.length < 3 || own.length === 0) {
+      return { verdict: "unknown", overlap: 0, sampled: observed.length, catalogId: target.catalogId };
+    }
+    return { ...catalogFit(own, observed), catalogId: target.catalogId };
+  });
 
   app.get<{ Querystring: { showId?: string; days?: string } }>("/api/analytics", async (req, reply) => {
     let target;
@@ -320,6 +345,20 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // org-wide, so concurrent work in the same workspace lands inside it.
   const billing = new WhissleBilling(config.whissle.apiKey, config.whissle.base);
 
+  /**
+   * Anchor a show's spend window when the SESSION starts.
+   *
+   * It used to open on the first `/api/billing` read, which is whenever the
+   * operator happened to open the cost rail — so "wallet moved" measured from
+   * the moment they looked, reported ≤ $0.0000, and was useless as a session
+   * cost. One wallet read at attach is the price of the number meaning what it
+   * says.
+   */
+  const anchorSpend = async (showId: string): Promise<void> => {
+    const w = await billing.wallet();
+    if (w.ok) spendWindow.open(showId, w.value.balanceUsd);
+  };
+
   app.get<{ Querystring: { days?: string } }>("/api/billing", async (req) => {
     const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
     // Both reads in flight together — this panel is polled, and two sequential
@@ -450,6 +489,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // Seed the agent's knowledge base in the background — the reply path is
         // grounded per-turn regardless.
         void kb.syncShow(target).catch(() => {});
+        // And anchor the cost window here, at the start of the session, not
+        // whenever someone first opens the cost rail.
+        void anchorSpend(target.showId).catch(() => {});
         return {
           showId: target.showId, show: await target.show(),
           catalog: applied, snapshot: await target.snapshot(),

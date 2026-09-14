@@ -3,6 +3,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { catalogFit } from "../src/shows/readiness.js";
 import { readingText } from "../src/api/routes.js";
 import { ShowContextEngine } from "../src/ingest/showContext.js";
 import { buildContextBlock } from "../src/compose/prompts.js";
@@ -682,4 +683,49 @@ test("the drop reason names which axis refused it", async () => {
   // tells them something; "no recognised intent" told them nothing.
   assert.match(admit("hey everyone", classify("hey everyone"), true).reason!, /greeting/);
   assert.match(admit("Offer from Lesbie", classify("Offer from Lesbie"), true).reason!, /statement/);
+});
+
+// ── whose lineup is it ──────────────────────────────────────────────────────
+
+test("a monitored show never claims the catalog IS the lineup", async () => {
+  // Observed live: a fragrance auction watched with a baseball-card catalog
+  // loaded. The lineup fact asserted "anything not on this list is not in
+  // tonight's show", so the copilot told a real buyer that a bottle the host was
+  // holding up was not part of the show — a confident denial about someone
+  // else's stock, which no guard can catch because the catalog genuinely does
+  // not contain it.
+  const r = await rig();
+  await r.repo.updateShow({ status: "live" });
+  await r.d.query("UPDATE shows SET read_only = TRUE WHERE id = $1", [r.showId]);
+  await r.retriever.rebuild();
+
+  const lineup = r.retriever.fact("catalog:lineup")!;
+  assert.doesNotMatch(lineup.text, /not in tonight's show/i);
+  assert.match(lineup.text, /run by someone else/i);
+  assert.match(lineup.text, /never that the show does not have it/i);
+});
+
+test("the seller's OWN show still claims exclusivity", async () => {
+  // The claim is what stops the model inventing stock, so it has to survive
+  // where it is actually true.
+  const r = await rig();
+  await r.d.query("UPDATE shows SET read_only = FALSE WHERE id = $1", [r.showId]);
+  await r.retriever.rebuild();
+  assert.match(r.retriever.fact("catalog:lineup")!.text, /not in tonight's show/i);
+});
+
+test("catalogFit separates a matching catalog from a wrong one", async () => {
+  const cards = ["Derek Jeter 1996 Topps Chrome #114", "Ken Griffey Jr 1989 Upper Deck RC"];
+  const cardLots = ["#034 Mantle Topps vintage single", "#035 Griffey Upper Deck rookie slab"];
+  const fragranceLots = ["#219 Dunhill Icon cologne 100ml", "#245 Dior Fahrenheit eau de toilette"];
+
+  assert.equal(catalogFit(cards, cardLots).verdict, "match");
+  assert.equal(catalogFit(cards, fragranceLots).verdict, "mismatch");
+  // A title made ENTIRELY of the boilerplate every live listing carries is not
+  // evidence of a mismatch — it is no evidence at all, and saying "weak" rather
+  // than "mismatch" is the difference between "I cannot tell" and a false alarm
+  // that trains the operator to ignore the warning.
+  const boilerplate = catalogFit(cards, ["Item shown on screen live - USED - $1 starts"]);
+  assert.equal(boilerplate.verdict, "weak");
+  assert.equal(boilerplate.overlap, 0);
 });
