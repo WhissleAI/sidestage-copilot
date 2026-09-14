@@ -10,6 +10,10 @@
 
 import type { Pool } from "../db/pg.js";
 import type { ChatMessage, ReplyProposal } from "../domain/types.js";
+import { prdMetrics, type PrdMetrics } from "./prdMetrics.js";
+
+/** Statuses that mean the seller acted on it. */
+const DECIDED = new Set(["sent", "dismissed"]);
 
 export class SessionRecord {
   constructor(private d: Pool, private showId: string) {}
@@ -34,17 +38,26 @@ export class SessionRecord {
       .query(
         `INSERT INTO reply_proposals (show_id, id, message_id, author, question, draft, sent_text,
            status, verdict, confidence, repaired, abstained, latency_ms, cache_hit, guards, evidence, intent, at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18,$19,$20)
          ON CONFLICT (show_id, id) DO UPDATE SET
            draft = EXCLUDED.draft, sent_text = EXCLUDED.sent_text, status = EXCLUDED.status,
            verdict = EXCLUDED.verdict, confidence = EXCLUDED.confidence,
-           guards = EXCLUDED.guards, evidence = EXCLUDED.evidence`,
+           guards = EXCLUDED.guards, evidence = EXCLUDED.evidence,
+           -- Stamped the first time the seller acts and never moved after, so a
+           -- later status change cannot rewrite how long they took to decide.
+           decided_at = COALESCE(reply_proposals.decided_at, EXCLUDED.decided_at),
+           edited = reply_proposals.edited OR EXCLUDED.edited`,
         [
           this.showId, p.id, p.message.id, p.message.author, p.message.text,
           p.draft ?? "", p.sentText ?? null, p.status, p.verdict, p.confidence,
           p.repaired, p.evidence.length === 0, p.spans?.totalMs ?? 0, p.spans?.cacheHit ?? false,
           JSON.stringify(p.guards ?? []), JSON.stringify(p.evidence ?? []),
           p.message.intent ?? null, p.message.at,
+          // A seller has DECIDED when they send or dismiss. Anything else is
+          // still sitting in the queue, and counting it as a slow decision
+          // would make an ignored proposal look like a considered one.
+          DECIDED.has(p.status) ? new Date().toISOString() : null,
+          Boolean(p.sentText && p.sentText.trim() !== (p.draft ?? "").trim()),
         ],
       )
       .catch(() => {});
@@ -102,6 +115,9 @@ export interface ShowReport {
     unanswered: { question: string; asked: number; reason: string }[];
     droppedByGate: Record<string, number>;
   };
+  /** Every number docs/PRD.md §4 promises, computed. Carried on the report so a
+   *  reviewer can diff the document against a real show rather than the code. */
+  prd: PrdMetrics;
 }
 
 export async function buildReport(
@@ -239,5 +255,6 @@ export async function buildReport(
       failed: actCount("failed"),
     },
     gaps: { unanswered, droppedByGate },
+    prd: await prdMetrics(d, showId),
   };
 }

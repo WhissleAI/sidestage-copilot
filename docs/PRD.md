@@ -99,31 +99,42 @@ Two requirements that fall out of this and shape everything downstream:
 
 Measured per show, compared against the same seller's own baseline shows.
 
+> **Implementation status.** Every metric below is computed in
+> [`src/shows/prdMetrics.ts`](../src/shows/prdMetrics.ts), served live at
+> `GET /api/show/prd`, and carried on the post-session report — with one
+> exception, marked ✗, which is named here rather than faked.
+>
+> GMV is derived from recorded SALES, not inferred from listing state: an
+> observed lot that goes `live → ended` is a lot the host just hammered, and the
+> price it carried at that moment is written to the `sales` table. The listing
+> row keeps moving afterwards, so a sum over current state would answer a
+> different question every time it was asked.
+
 **GMV**
 
 | Metric | Baseline | Target | Why it is the right measure |
 |---|---|---|---|
-| Answered-question rate | ~35% | **> 85%** | The direct mechanism. An unanswered question is a buyer who was close. |
-| Time-to-answer, p95 | 90 s+ | **< 10 s** | Past roughly a minute the buyer has scrolled; the answer no longer converts. |
-| GMV per show hour | baseline | **+15%** | The outcome the seller actually cares about. |
-| Sell-through on lots with ≥1 answered question | baseline | **+20%** | Isolates the effect from general show variance. |
+| Answered-question rate | ~35% | **> 85%** | ✓ The direct mechanism. An unanswered question is a buyer who was close. |
+| Time-to-answer, p95 | 90 s+ | **< 10 s** | ✓ Past roughly a minute the buyer has scrolled; the answer no longer converts. |
+| GMV per show hour | baseline | **+15%** | ✓ The outcome the seller actually cares about. Null below 15 minutes of show — a rate extrapolated from four minutes is noise wearing a decimal point. |
+| Sell-through on lots with ≥1 answered question | baseline | **+20%** | ✓ Isolates the effect from general show variance. Joined through the evidence on a SENT reply, which names the listing it was grounded in. |
 
 **Operator load**
 
-| Metric | Baseline | Target |
-|---|---|---|
-| Seller chat interactions per show | 60–120 | **< 25** |
-| Median seller decision time per proposal | — | **< 2 s** |
-| Operational edits per show (markdowns, stock fixes, swaps) | 2–4, late | **8–12, within 60 s of the signal** |
+| Metric | Baseline | Target | |
+|---|---|---|---|
+| Seller chat interactions per show | 60–120 | **< 25** | ✓ |
+| Median seller decision time per proposal | — | **< 2 s** | ✓ Stamped when the seller first sends or dismisses; a proposal nobody touched is not a slow decision and is excluded. |
+| Operational edits per show (markdowns, stock fixes, swaps) | 2–4, late | **8–12, within 60 s of the signal** | ~ Count is computed; "within 60 s of the signal" is not. |
 
 **Trust** — the leading indicator for whether she climbs the ladder:
 
-| Metric | Target |
-|---|---|
-| Guardrail block rate | **< 5%** of drafts (higher means the grounding is bad, not that the guards are good) |
-| Wrong replies reaching a buyer | **0** |
-| Seller edit rate on sent drafts | **< 20%** |
-| Actions rolled back | **< 10%** (higher means preflight is too permissive) |
+| Metric | Target | |
+|---|---|---|
+| Guardrail block rate | **< 5%** of drafts (higher means the grounding is bad, not that the guards are good) | ✓ |
+| Wrong replies reaching a buyer | **0** | **✗ not self-measurable.** A reply this system judged correct is exactly the reply it cannot mark wrong. It needs a human reading sent replies against the catalog — which is what the pilot's weekly review is for. The nearest machine proxy, `sentThenContradicted` (a sent reply whose grounding listing later changed version), IS computed and is **not** the same thing. |
+| Seller edit rate on sent drafts | **< 20%** | ✓ |
+| Actions rolled back | **< 10%** (higher means preflight is too permissive) | ✓ |
 
 **The anti-metric:** reply volume. A system optimising for replies sent would answer the hype,
 and the admission gate exists to refuse exactly that. ~55% of live chat is reaction.

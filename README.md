@@ -74,6 +74,33 @@ npm run demo:ebaylive -- <eventId|showUrl>    # attach + import catalog + ask re
 See **[`docs/EBAY_LIVE.md`](docs/EBAY_LIVE.md)** for how that works, what is real, and
 what its limits are.
 
+### One thing to know before you test the write path
+
+**Listing and inventory actions run against `MockMarketplace`, never a real
+marketplace.** All five kinds are implemented, two-phase committed, hash-chain
+audited and rollback-proven — against a simulator that injects latency, apply
+failures and optimistic-concurrency conflicts so the rollback path is genuinely
+exercised rather than theoretical.
+
+They cannot run against a real one here for a structural reason, not an
+unfinished one: a show you do not own is monitored **read-only**, because we
+hold no seller credentials for someone else's stream. Preflight refuses every
+write on such a show. So if you attach to a live eBay show and watch the ACTIONS
+rail, you will correctly see *"0 pending · no action proposals"* — that is the
+safety boundary working, not a broken feature.
+
+**To exercise writes, use the seeded demo show** (`Friday Night Grails — Ep. 42`,
+listed under "Open a show"). There the copilot owns the listings and will
+propose markdowns, stock fixes and pinned-lot swaps, each with a preflight
+checklist, an audit entry and one-keystroke undo:
+
+```bash
+npm run demo:stale-price   # the failure path: a markdown lands mid-draft and PriceGuard blocks the stale quote
+```
+
+The eBay Sell API adapter is a documented shape behind the existing
+`MarketplaceAdapter` port, not a live integration.
+
 ```bash
 # ── backend ──────────────────────────────────────────────────────────────────
 git clone https://github.com/WhissleAI/sidestage-copilot && cd sidestage-copilot

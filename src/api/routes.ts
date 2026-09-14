@@ -13,6 +13,8 @@ import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catal
 import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
 import { catalogFit, checkReadiness } from "../shows/readiness.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
+import { prdMetrics } from "../shows/prdMetrics.js";
+import { promotionReadiness } from "../autonomy/promotion.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
 import { extractJsonObject } from "../compose/composer.js";
@@ -157,6 +159,27 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       return { verdict: "unknown", overlap: 0, sampled: observed.length, catalogId: target.catalogId };
     }
     return { ...catalogFit(own, observed), catalogId: target.catalogId };
+  });
+
+  /** The PRD's success metrics for a show, live. */
+  app.get<{ Querystring: { showId?: string } }>("/api/show/prd", async (req, reply) => {
+    try {
+      const target = rt(req.query.showId);
+      return await prdMetrics(pgPool(), target.showId);
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+  });
+
+  /** Has this seller earned the next rung? Computed, not asserted. */
+  app.get<{ Querystring: { showId?: string } }>("/api/autonomy/readiness", async (req, reply) => {
+    try {
+      const target = rt(req.query.showId);
+      const show = await target.show();
+      return await promotionReadiness(pgPool(), show.autonomyLevel);
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
   });
 
   app.get<{ Querystring: { showId?: string; days?: string } }>("/api/analytics", async (req, reply) => {

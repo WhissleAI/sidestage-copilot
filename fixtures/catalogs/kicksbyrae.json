@@ -1,209 +1,467 @@
 {
- "id": "kicksbyrae",
- "name": "Sneakers & Streetwear — Friday Night Grails",
- "seller": {
-  "handle": "@kicksbyrae",
-  "name": "Kicks by Rae",
-  "about": "Solo reseller of sneakers and streetwear. Every pair over $200 is authenticated by CheckCheck before it is listed.",
-  "voice": "Warm and fast. Answer the actual question first, then at most one detail."
- },
- "policies": [
-  {
-   "id": "pol_ship_domestic",
-   "topic": "shipping",
-   "title": "Domestic shipping",
-   "body": "US orders ship free via 2-day service on any item priced at $150 or more. Items under $150 ship USPS Ground Advantage at a flat $9.95. Handling time is 1 business day."
+  "id": "kicksbyrae",
+  "name": "Sneakers & Streetwear — Friday Night Grails",
+  "seller": {
+    "handle": "@kicksbyrae",
+    "name": "Kicks by Rae",
+    "about": "Solo reseller of sneakers and streetwear. Every pair over $200 is authenticated by CheckCheck before it is listed.",
+    "voice": "Warm and fast. Answer the actual question first, then at most one detail."
   },
-  {
-   "id": "pol_ship_intl",
-   "topic": "shipping",
-   "title": "International shipping",
-   "body": "We ship to Canada, the UK and the EU via DHL Express, calculated at checkout. Import duties and VAT are the buyer's responsibility. We do not ship to Australia, Brazil or Russia."
-  },
-  {
-   "id": "pol_returns",
-   "topic": "returns",
-   "title": "Returns",
-   "body": "30-day returns on unworn items in original packaging. The buyer pays return shipping unless the item arrived not as described. Deadstock items must be returned deadstock."
-  },
-  {
-   "id": "pol_auth",
-   "topic": "authenticity",
-   "title": "Authentication",
-   "body": "Every item priced over $200 is authenticated by CheckCheck before listing and ships with its certificate number. General-release pairs under $200 are not third-party authenticated."
-  },
-  {
-   "id": "pol_discount",
-   "topic": "discount",
-   "title": "Discounts on air",
-   "body": "Live-show discounts cap at 15% off the listed price and may never go below the item's floor price. Bundle two or more items for an additional 5%."
-  },
-  {
-   "id": "pol_tone",
-   "topic": "tone",
-   "title": "Voice and tone",
-   "body": "Warm, fast and specific. One or two sentences. Never hype an item beyond what the condition notes support."
-  },
-  {
-   "id": "pol_prohibited",
-   "topic": "prohibited",
-   "title": "Claims we never make",
-   "body": "Never describe an item as an investment or promise it will appreciate. Never say 'guaranteed authentic' without a certificate number. Never promise a delivery date we do not control."
-  }
- ],
- "items": [
-  {
-   "sku": "AJ1-CHI-REIMAGINED",
-   "title": "Air Jordan 1 Retro High OG \"Chicago Reimagined\"",
-   "shortName": "AJ1 Chicago",
-   "brand": "Jordan",
-   "model": "Air Jordan 1 Retro High OG",
-   "colorway": "Chicago Reimagined / Lost & Found",
-   "size": "10",
-   "condition": "DS",
-   "priceCents": 41200,
-   "floorPriceCents": 35500,
-   "costCents": 31000,
-   "qty": 1,
-   "state": "live",
-   "shippingProfile": "us-free-2day",
-   "authenticated": true,
-   "certId": "CHK-88213-A",
-   "description": "2022 Lost & Found release, deadstock with the original box and the special-edition aged-paper lid. Cracked-leather finish is factory-intended, not wear. Includes the extra laces and the hangtag. Authenticated by CheckCheck, cert CHK-88213-A."
-  },
-  {
-   "sku": "NB-990V6-GREY",
-   "title": "New Balance 990v6 Grey",
-   "shortName": "NB 990v6 Grey",
-   "brand": "New Balance",
-   "model": "990v6",
-   "colorway": "Grey / MR990GL6",
-   "size": "9.5",
-   "condition": "VNDS",
-   "priceCents": 21800,
-   "floorPriceCents": 19000,
-   "costCents": 16500,
-   "qty": 1,
-   "state": "queued",
-   "shippingProfile": "us-free-2day",
-   "authenticated": true,
-   "certId": "CHK-77120-B",
-   "description": "Worn twice indoors. Midsole is clean, no creasing on the toe box, original box included. Made in USA. Pigskin suede and mesh upper, FuelCell midsole."
-  },
-  {
-   "sku": "SUP-BOGO-FW22-BLK",
-   "title": "Supreme Box Logo Hoodie FW22 Black",
-   "shortName": "Supreme Box Logo",
-   "brand": "Supreme",
-   "model": "Box Logo Hooded Sweatshirt",
-   "colorway": "Black",
-   "size": "L",
-   "condition": "DS",
-   "priceCents": 56500,
-   "floorPriceCents": 49000,
-   "costCents": 44000,
-   "qty": 1,
-   "state": "queued",
-   "shippingProfile": "us-free-2day",
-   "authenticated": true,
-   "certId": "CHK-90441-C",
-   "description": "FW22 box logo, deadstock with tags attached. Heavyweight cotton fleece, chenille box logo applique. Kanagawa-style FW22 interior tag. Runs true to size."
-  },
-  {
-   "sku": "NK-DUNK-PANDA",
-   "title": "Nike Dunk Low Retro White/Black Panda",
-   "shortName": "Dunk Panda",
-   "brand": "Nike",
-   "model": "Dunk Low Retro",
-   "colorway": "White / Black (Panda)",
-   "size": "11",
-   "condition": "DS",
-   "priceCents": 12800,
-   "floorPriceCents": 11000,
-   "costCents": 9500,
-   "qty": 3,
-   "state": "queued",
-   "shippingProfile": "us-standard",
-   "authenticated": false,
-   "certId": null,
-   "description": "Deadstock general release, original box. Leather upper, rubber cupsole. General release pair, not authenticated — priced accordingly."
-  },
-  {
-   "sku": "YZ-SLIDE-BONE",
-   "title": "Yeezy Slide Bone",
-   "shortName": "Yeezy Slide Bone",
-   "brand": "adidas",
-   "model": "Yeezy Slide",
-   "colorway": "Bone",
-   "size": "10",
-   "condition": "DS",
-   "priceCents": 9200,
-   "floorPriceCents": 8000,
-   "costCents": 7000,
-   "qty": 2,
-   "state": "queued",
-   "shippingProfile": "us-standard",
-   "authenticated": false,
-   "certId": null,
-   "description": "Deadstock, no box (Yeezy Slides ship in a poly bag from adidas). EVA foam, runs large — size down."
-  },
-  {
-   "sku": "NK-SB-DUNK-CHUNKY",
-   "title": "Nike SB Dunk Low \"Chunky Dunky\"",
-   "shortName": "SB Chunky Dunky",
-   "brand": "Nike",
-   "model": "SB Dunk Low",
-   "colorway": "Ben & Jerry's / Chunky Dunky",
-   "size": "9",
-   "condition": "USED",
-   "priceCents": 92500,
-   "floorPriceCents": 82000,
-   "costCents": 74000,
-   "qty": 1,
-   "state": "queued",
-   "shippingProfile": "us-free-2day",
-   "authenticated": true,
-   "certId": "CHK-61027-D",
-   "description": "2020 Ben & Jerry's collab. Worn roughly 5 times — light creasing on both toe boxes, cow-print upper intact, no separation. Original box has shelf wear. Authenticated, cert CHK-61027-D."
-  },
-  {
-   "sku": "TNF-NUPTSE-BLK-M",
-   "title": "The North Face Nuptse 1996 Jacket Black",
-   "shortName": "TNF Nuptse",
-   "brand": "The North Face",
-   "model": "Nuptse 1996 Retro",
-   "colorway": "TNF Black",
-   "size": "M",
-   "condition": "VNDS",
-   "priceCents": 24500,
-   "floorPriceCents": 21000,
-   "costCents": 18000,
-   "qty": 1,
-   "state": "queued",
-   "shippingProfile": "us-free-2day",
-   "authenticated": false,
-   "certId": null,
-   "description": "700-fill goose down, worn one season, no rips or down leakage. Original hangtag included."
-  },
-  {
-   "sku": "AJ1-TRAVIS-LOW",
-   "title": "Air Jordan 1 Low OG Travis Scott Reverse Mocha",
-   "shortName": "AJ1 Travis Mocha",
-   "brand": "Jordan",
-   "model": "Air Jordan 1 Low OG SP",
-   "colorway": "Reverse Mocha",
-   "size": "9",
-   "condition": "DS",
-   "priceCents": 118000,
-   "floorPriceCents": 104000,
-   "costCents": 96000,
-   "qty": 1,
-   "state": "draft",
-   "shippingProfile": "us-free-2day",
-   "authenticated": true,
-   "certId": "CHK-55908-E",
-   "description": "Deadstock with box and all accessories. Reversed swoosh, Cactus Jack branding on the heel. Authenticated by CheckCheck, cert CHK-55908-E."
-  }
- ],
- "agentId": "6c18eb5d-99d8-440f-80af-589a837f45b1"
+  "policies": [
+    {
+      "id": "pol_ship_domestic",
+      "topic": "shipping",
+      "title": "Domestic shipping",
+      "body": "US orders ship free via 2-day service on any item priced at $150 or more. Items under $150 ship USPS Ground Advantage at a flat $9.95. Handling time is 1 business day."
+    },
+    {
+      "id": "pol_ship_intl",
+      "topic": "shipping",
+      "title": "International shipping",
+      "body": "We ship to Canada, the UK and the EU via DHL Express, calculated at checkout. Import duties and VAT are the buyer's responsibility. We do not ship to Australia, Brazil or Russia."
+    },
+    {
+      "id": "pol_returns",
+      "topic": "returns",
+      "title": "Returns",
+      "body": "30-day returns on unworn items in original packaging. The buyer pays return shipping unless the item arrived not as described. Deadstock items must be returned deadstock."
+    },
+    {
+      "id": "pol_auth",
+      "topic": "authenticity",
+      "title": "Authentication",
+      "body": "Every item priced over $200 is authenticated by CheckCheck before listing and ships with its certificate number. General-release pairs under $200 are not third-party authenticated."
+    },
+    {
+      "id": "pol_discount",
+      "topic": "discount",
+      "title": "Discounts on air",
+      "body": "Live-show discounts cap at 15% off the listed price and may never go below the item's floor price. Bundle two or more items for an additional 5%."
+    },
+    {
+      "id": "pol_tone",
+      "topic": "tone",
+      "title": "Voice and tone",
+      "body": "Warm, fast and specific. One or two sentences. Never hype an item beyond what the condition notes support."
+    },
+    {
+      "id": "pol_prohibited",
+      "topic": "prohibited",
+      "title": "Claims we never make",
+      "body": "Never describe an item as an investment or promise it will appreciate. Never say 'guaranteed authentic' without a certificate number. Never promise a delivery date we do not control."
+    }
+  ],
+  "items": [
+    {
+      "sku": "AJ1-CHI-REIMAGINED",
+      "title": "Air Jordan 1 Retro High OG \"Chicago Reimagined\"",
+      "shortName": "AJ1 Chicago",
+      "brand": "Jordan",
+      "model": "Air Jordan 1 Retro High OG",
+      "colorway": "Chicago Reimagined / Lost & Found",
+      "size": "10",
+      "condition": "DS",
+      "priceCents": 41200,
+      "floorPriceCents": 35500,
+      "costCents": 31000,
+      "qty": 1,
+      "state": "live",
+      "shippingProfile": "us-free-2day",
+      "authenticated": true,
+      "certId": "CHK-88213-A",
+      "description": "2022 Lost & Found release, deadstock with the original box and the special-edition aged-paper lid. Cracked-leather finish is factory-intended, not wear. Includes the extra laces and the hangtag. Authenticated by CheckCheck, cert CHK-88213-A."
+    },
+    {
+      "sku": "NB-990V6-GREY",
+      "title": "New Balance 990v6 Grey",
+      "shortName": "NB 990v6 Grey",
+      "brand": "New Balance",
+      "model": "990v6",
+      "colorway": "Grey / MR990GL6",
+      "size": "9.5",
+      "condition": "VNDS",
+      "priceCents": 21800,
+      "floorPriceCents": 19000,
+      "costCents": 16500,
+      "qty": 1,
+      "state": "queued",
+      "shippingProfile": "us-free-2day",
+      "authenticated": true,
+      "certId": "CHK-77120-B",
+      "description": "Worn twice indoors. Midsole is clean, no creasing on the toe box, original box included. Made in USA. Pigskin suede and mesh upper, FuelCell midsole."
+    },
+    {
+      "sku": "SUP-BOGO-FW22-BLK",
+      "title": "Supreme Box Logo Hoodie FW22 Black",
+      "shortName": "Supreme Box Logo",
+      "brand": "Supreme",
+      "model": "Box Logo Hooded Sweatshirt",
+      "colorway": "Black",
+      "size": "L",
+      "condition": "DS",
+      "priceCents": 56500,
+      "floorPriceCents": 49000,
+      "costCents": 44000,
+      "qty": 1,
+      "state": "queued",
+      "shippingProfile": "us-free-2day",
+      "authenticated": true,
+      "certId": "CHK-90441-C",
+      "description": "FW22 box logo, deadstock with tags attached. Heavyweight cotton fleece, chenille box logo applique. Kanagawa-style FW22 interior tag. Runs true to size."
+    },
+    {
+      "sku": "NK-DUNK-PANDA",
+      "title": "Nike Dunk Low Retro White/Black Panda",
+      "shortName": "Dunk Panda",
+      "brand": "Nike",
+      "model": "Dunk Low Retro",
+      "colorway": "White / Black (Panda)",
+      "size": "11",
+      "condition": "DS",
+      "priceCents": 12800,
+      "floorPriceCents": 11000,
+      "costCents": 9500,
+      "qty": 3,
+      "state": "queued",
+      "shippingProfile": "us-standard",
+      "authenticated": false,
+      "certId": null,
+      "description": "Deadstock general release, original box. Leather upper, rubber cupsole. General release pair, not authenticated — priced accordingly."
+    },
+    {
+      "sku": "YZ-SLIDE-BONE",
+      "title": "Yeezy Slide Bone",
+      "shortName": "Yeezy Slide Bone",
+      "brand": "adidas",
+      "model": "Yeezy Slide",
+      "colorway": "Bone",
+      "size": "10",
+      "condition": "DS",
+      "priceCents": 9200,
+      "floorPriceCents": 8000,
+      "costCents": 7000,
+      "qty": 2,
+      "state": "queued",
+      "shippingProfile": "us-standard",
+      "authenticated": false,
+      "certId": null,
+      "description": "Deadstock, no box (Yeezy Slides ship in a poly bag from adidas). EVA foam, runs large — size down."
+    },
+    {
+      "sku": "NK-SB-DUNK-CHUNKY",
+      "title": "Nike SB Dunk Low \"Chunky Dunky\"",
+      "shortName": "SB Chunky Dunky",
+      "brand": "Nike",
+      "model": "SB Dunk Low",
+      "colorway": "Ben & Jerry's / Chunky Dunky",
+      "size": "9",
+      "condition": "USED",
+      "priceCents": 92500,
+      "floorPriceCents": 82000,
+      "costCents": 74000,
+      "qty": 1,
+      "state": "queued",
+      "shippingProfile": "us-free-2day",
+      "authenticated": true,
+      "certId": "CHK-61027-D",
+      "description": "2020 Ben & Jerry's collab. Worn roughly 5 times — light creasing on both toe boxes, cow-print upper intact, no separation. Original box has shelf wear. Authenticated, cert CHK-61027-D."
+    },
+    {
+      "sku": "TNF-NUPTSE-BLK-M",
+      "title": "The North Face Nuptse 1996 Jacket Black",
+      "shortName": "TNF Nuptse",
+      "brand": "The North Face",
+      "model": "Nuptse 1996 Retro",
+      "colorway": "TNF Black",
+      "size": "M",
+      "condition": "VNDS",
+      "priceCents": 24500,
+      "floorPriceCents": 21000,
+      "costCents": 18000,
+      "qty": 1,
+      "state": "queued",
+      "shippingProfile": "us-free-2day",
+      "authenticated": false,
+      "certId": null,
+      "description": "700-fill goose down, worn one season, no rips or down leakage. Original hangtag included."
+    },
+    {
+      "sku": "AJ1-TRAVIS-LOW",
+      "title": "Air Jordan 1 Low OG Travis Scott Reverse Mocha",
+      "shortName": "AJ1 Travis Mocha",
+      "brand": "Jordan",
+      "model": "Air Jordan 1 Low OG SP",
+      "colorway": "Reverse Mocha",
+      "size": "9",
+      "condition": "DS",
+      "priceCents": 118000,
+      "floorPriceCents": 104000,
+      "costCents": 96000,
+      "qty": 1,
+      "state": "draft",
+      "shippingProfile": "us-free-2day",
+      "authenticated": true,
+      "certId": "CHK-55908-E",
+      "description": "Deadstock with box and all accessories. Reversed swoosh, Cactus Jack branding on the heel. Authenticated by CheckCheck, cert CHK-55908-E."
+    }
+  ],
+  "agentId": "6c18eb5d-99d8-440f-80af-589a837f45b1",
+  "comps": [
+    {
+      "sku": "AJ1-CHI-REIMAGINED",
+      "title": "Air Jordan 1 Retro High OG \"Chicago Reimagined\"",
+      "soldPriceCents": 40481,
+      "soldAt": "2026-08-28T03:25:03.442226+00:00",
+      "condition": "DS",
+      "size": "10"
+    },
+    {
+      "sku": "AJ1-CHI-REIMAGINED",
+      "title": "Air Jordan 1 Retro High OG \"Chicago Reimagined\"",
+      "soldPriceCents": 43774,
+      "soldAt": "2026-08-07T03:25:03.442232+00:00",
+      "condition": "USED",
+      "size": "10"
+    },
+    {
+      "sku": "AJ1-CHI-REIMAGINED",
+      "title": "Air Jordan 1 Retro High OG \"Chicago Reimagined\"",
+      "soldPriceCents": 32627,
+      "soldAt": "2026-09-07T03:25:03.442234+00:00",
+      "condition": "DS",
+      "size": "10"
+    },
+    {
+      "sku": "AJ1-CHI-REIMAGINED",
+      "title": "Air Jordan 1 Retro High OG \"Chicago Reimagined\"",
+      "soldPriceCents": 39350,
+      "soldAt": "2026-08-10T03:25:03.442236+00:00",
+      "condition": "DS",
+      "size": "10"
+    },
+    {
+      "sku": "NB-990V6-GREY",
+      "title": "New Balance 990v6 Grey",
+      "soldPriceCents": 18709,
+      "soldAt": "2026-08-01T03:25:03.442238+00:00",
+      "condition": "VNDS",
+      "size": "9.5"
+    },
+    {
+      "sku": "NB-990V6-GREY",
+      "title": "New Balance 990v6 Grey",
+      "soldPriceCents": 18565,
+      "soldAt": "2026-08-18T03:25:03.442240+00:00",
+      "condition": "USED",
+      "size": "9.5"
+    },
+    {
+      "sku": "NB-990V6-GREY",
+      "title": "New Balance 990v6 Grey",
+      "soldPriceCents": 18965,
+      "soldAt": "2026-08-23T03:25:03.442250+00:00",
+      "condition": "VNDS",
+      "size": "9.5"
+    },
+    {
+      "sku": "NB-990V6-GREY",
+      "title": "New Balance 990v6 Grey",
+      "soldPriceCents": 23123,
+      "soldAt": "2026-09-12T03:25:03.442252+00:00",
+      "condition": "VNDS",
+      "size": "9.5"
+    },
+    {
+      "sku": "SUP-BOGO-FW22-BLK",
+      "title": "Supreme Box Logo Hoodie FW22 Black",
+      "soldPriceCents": 60993,
+      "soldAt": "2026-09-06T03:25:03.442254+00:00",
+      "condition": "DS",
+      "size": "L"
+    },
+    {
+      "sku": "SUP-BOGO-FW22-BLK",
+      "title": "Supreme Box Logo Hoodie FW22 Black",
+      "soldPriceCents": 52644,
+      "soldAt": "2026-09-04T03:25:03.442256+00:00",
+      "condition": "DS",
+      "size": "L"
+    },
+    {
+      "sku": "SUP-BOGO-FW22-BLK",
+      "title": "Supreme Box Logo Hoodie FW22 Black",
+      "soldPriceCents": 59000,
+      "soldAt": "2026-08-28T03:25:03.442258+00:00",
+      "condition": "DS",
+      "size": "L"
+    },
+    {
+      "sku": "SUP-BOGO-FW22-BLK",
+      "title": "Supreme Box Logo Hoodie FW22 Black",
+      "soldPriceCents": 46743,
+      "soldAt": "2026-08-09T03:25:03.442260+00:00",
+      "condition": "DS",
+      "size": "L"
+    },
+    {
+      "sku": "NK-DUNK-PANDA",
+      "title": "Nike Dunk Low Retro White/Black Panda",
+      "soldPriceCents": 12332,
+      "soldAt": "2026-08-02T03:25:03.442262+00:00",
+      "condition": "DS",
+      "size": "11"
+    },
+    {
+      "sku": "NK-DUNK-PANDA",
+      "title": "Nike Dunk Low Retro White/Black Panda",
+      "soldPriceCents": 12548,
+      "soldAt": "2026-08-08T03:25:03.442264+00:00",
+      "condition": "USED",
+      "size": "11"
+    },
+    {
+      "sku": "NK-DUNK-PANDA",
+      "title": "Nike Dunk Low Retro White/Black Panda",
+      "soldPriceCents": 10381,
+      "soldAt": "2026-09-04T03:25:03.442266+00:00",
+      "condition": "DS",
+      "size": "11"
+    },
+    {
+      "sku": "NK-DUNK-PANDA",
+      "title": "Nike Dunk Low Retro White/Black Panda",
+      "soldPriceCents": 12834,
+      "soldAt": "2026-09-03T03:25:03.442268+00:00",
+      "condition": "USED",
+      "size": "11"
+    },
+    {
+      "sku": "YZ-SLIDE-BONE",
+      "title": "Yeezy Slide Bone",
+      "soldPriceCents": 7757,
+      "soldAt": "2026-08-22T03:25:03.442270+00:00",
+      "condition": "USED",
+      "size": "10"
+    },
+    {
+      "sku": "YZ-SLIDE-BONE",
+      "title": "Yeezy Slide Bone",
+      "soldPriceCents": 9530,
+      "soldAt": "2026-08-11T03:25:03.442272+00:00",
+      "condition": "DS",
+      "size": "10"
+    },
+    {
+      "sku": "YZ-SLIDE-BONE",
+      "title": "Yeezy Slide Bone",
+      "soldPriceCents": 9674,
+      "soldAt": "2026-09-09T03:25:03.442283+00:00",
+      "condition": "VNDS",
+      "size": "10"
+    },
+    {
+      "sku": "YZ-SLIDE-BONE",
+      "title": "Yeezy Slide Bone",
+      "soldPriceCents": 9465,
+      "soldAt": "2026-09-10T03:25:03.442285+00:00",
+      "condition": "DS",
+      "size": "10"
+    },
+    {
+      "sku": "NK-SB-DUNK-CHUNKY",
+      "title": "Nike SB Dunk Low \"Chunky Dunky\"",
+      "soldPriceCents": 89829,
+      "soldAt": "2026-08-27T03:25:03.442287+00:00",
+      "condition": "VNDS",
+      "size": "9"
+    },
+    {
+      "sku": "NK-SB-DUNK-CHUNKY",
+      "title": "Nike SB Dunk Low \"Chunky Dunky\"",
+      "soldPriceCents": 87459,
+      "soldAt": "2026-08-16T03:25:03.442288+00:00",
+      "condition": "USED",
+      "size": "9"
+    },
+    {
+      "sku": "NK-SB-DUNK-CHUNKY",
+      "title": "Nike SB Dunk Low \"Chunky Dunky\"",
+      "soldPriceCents": 75254,
+      "soldAt": "2026-09-03T03:25:03.442290+00:00",
+      "condition": "USED",
+      "size": "9"
+    },
+    {
+      "sku": "NK-SB-DUNK-CHUNKY",
+      "title": "Nike SB Dunk Low \"Chunky Dunky\"",
+      "soldPriceCents": 95310,
+      "soldAt": "2026-08-06T03:25:03.442292+00:00",
+      "condition": "USED",
+      "size": "9"
+    },
+    {
+      "sku": "TNF-NUPTSE-BLK-M",
+      "title": "The North Face Nuptse 1996 Jacket Black",
+      "soldPriceCents": 22268,
+      "soldAt": "2026-09-10T03:25:03.442294+00:00",
+      "condition": "VNDS",
+      "size": "M"
+    },
+    {
+      "sku": "TNF-NUPTSE-BLK-M",
+      "title": "The North Face Nuptse 1996 Jacket Black",
+      "soldPriceCents": 25717,
+      "soldAt": "2026-09-10T03:25:03.442296+00:00",
+      "condition": "VNDS",
+      "size": "M"
+    },
+    {
+      "sku": "TNF-NUPTSE-BLK-M",
+      "title": "The North Face Nuptse 1996 Jacket Black",
+      "soldPriceCents": 20654,
+      "soldAt": "2026-08-28T03:25:03.442298+00:00",
+      "condition": "VNDS",
+      "size": "M"
+    },
+    {
+      "sku": "TNF-NUPTSE-BLK-M",
+      "title": "The North Face Nuptse 1996 Jacket Black",
+      "soldPriceCents": 21709,
+      "soldAt": "2026-08-08T03:25:03.442299+00:00",
+      "condition": "VNDS",
+      "size": "M"
+    },
+    {
+      "sku": "AJ1-TRAVIS-LOW",
+      "title": "Air Jordan 1 Low OG Travis Scott Reverse Mocha",
+      "soldPriceCents": 106425,
+      "soldAt": "2026-08-04T03:25:03.442301+00:00",
+      "condition": "DS",
+      "size": "9"
+    },
+    {
+      "sku": "AJ1-TRAVIS-LOW",
+      "title": "Air Jordan 1 Low OG Travis Scott Reverse Mocha",
+      "soldPriceCents": 124812,
+      "soldAt": "2026-08-28T03:25:03.442303+00:00",
+      "condition": "DS",
+      "size": "9"
+    },
+    {
+      "sku": "AJ1-TRAVIS-LOW",
+      "title": "Air Jordan 1 Low OG Travis Scott Reverse Mocha",
+      "soldPriceCents": 126597,
+      "soldAt": "2026-09-01T03:25:03.442305+00:00",
+      "condition": "DS",
+      "size": "9"
+    },
+    {
+      "sku": "AJ1-TRAVIS-LOW",
+      "title": "Air Jordan 1 Low OG Travis Scott Reverse Mocha",
+      "soldPriceCents": 92917,
+      "soldAt": "2026-08-22T03:25:03.442306+00:00",
+      "condition": "DS",
+      "size": "9"
+    }
+  ]
 }

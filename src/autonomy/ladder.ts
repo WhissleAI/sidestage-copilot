@@ -3,8 +3,13 @@
 // The product thesis (docs/PRD.md §5) is that a seller does not adopt automation
 // by being told it is safe — they adopt it one rung at a time, after watching the
 // rung below behave. So autonomy is not a boolean: it is five explicit levels,
-// each with a stated promotion criterion the seller can check against their own
+// each with a promotion criterion the seller can check against their own
 // numbers before climbing.
+//
+// Those criteria used to live only in this comment, which meant the ladder's
+// central claim — that autonomy is EARNED against your own numbers rather than
+// toggled — was a claim about a document. They are computed now, from finished
+// shows, in `promotion.ts` and served at `GET /api/autonomy/readiness`.
 //
 //   L0 OBSERVE     classify chat, propose nothing. The baseline for measuring
 //                  how much a show actually asks.

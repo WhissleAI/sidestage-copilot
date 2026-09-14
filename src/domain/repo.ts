@@ -245,11 +245,35 @@ export class Repo {
       "UPDATE listings SET floor_price_cents = $3, observed_at = $4 WHERE show_id = $1 AND id = $2",
       [this.showId, existing.id, lot.priceCents, now],
     );
+    // A lot that just went from live to ended is a lot the host hammered, and
+    // the price it carried at that moment is what it sold for. This is the only
+    // moment that information exists — the row keeps moving afterwards.
+    if (state === "ended" && existing.state !== "ended") {
+      await this.recordSale({
+        listingId: existing.id, title: lot.title, priceCents: lot.priceCents, source: "observed",
+      });
+    }
     await this.mutateListing(existing.id, { priceCents: lot.priceCents, qty, state });
     // Only a lot still being sold takes the pin. Pinning one that just ended
     // would leave the console showing a closed lot as the item on screen.
     if (state === "live" && !existing.pinned) await this.setPinned(existing.id);
     return { listing: (await this.listing(existing.id))!, changed: true, created: false };
+  }
+
+  /**
+   * Book a sale.
+   *
+   * Idempotent on (show, listing, at): a watcher that re-observes an already
+   * closed lot must not book it twice, and it re-observes constantly.
+   */
+  async recordSale(s: {
+    listingId: string; title: string; priceCents: number; qty?: number; source: "observed" | "action";
+  }): Promise<void> {
+    await this.q(
+      `INSERT INTO sales (show_id, listing_id, title, price_cents, qty, at, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (show_id, listing_id, at) DO NOTHING`,
+      [this.showId, s.listingId, s.title, s.priceCents, s.qty ?? 1, new Date().toISOString(), s.source],
+    );
   }
 
   // ── policies / comps / qa ─────────────────────────────────────────────────

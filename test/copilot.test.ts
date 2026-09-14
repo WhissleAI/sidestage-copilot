@@ -3,6 +3,9 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { prdMetrics } from "../src/shows/prdMetrics.js";
+import { promotionReadiness } from "../src/autonomy/promotion.js";
+import { db as rigPool } from "../src/db/pg.js";
 import { catalogFit } from "../src/shows/readiness.js";
 import { readingText } from "../src/api/routes.js";
 import { ShowContextEngine } from "../src/ingest/showContext.js";
@@ -728,4 +731,64 @@ test("catalogFit separates a matching catalog from a wrong one", async () => {
   const boilerplate = catalogFit(cards, ["Item shown on screen live - USED - $1 starts"]);
   assert.equal(boilerplate.verdict, "weak");
   assert.equal(boilerplate.overlap, 0);
+});
+
+// ── the PRD's numbers ───────────────────────────────────────────────────────
+
+test("a per-hour GMV rate is withheld on a show too short to have one", async () => {
+  // A rate extrapolated from four minutes is noise wearing a decimal point.
+  // Reporting null is the honest answer; reporting a large number is not.
+  // (The seeded demo show starts 72 minutes in the past, so this sets the clock
+  // explicitly rather than relying on the fixture's age.)
+  const r = await rig();
+  await r.d.query("UPDATE shows SET started_at = $2 WHERE id = $1", [
+    r.showId, new Date(Date.now() - 4 * 60_000).toISOString(),
+  ]);
+  await r.repo.recordSale({ listingId: PINNED, title: "AJ1", priceCents: 41200, source: "observed" });
+
+  const young = await prdMetrics(r.d, r.showId);
+  assert.equal(young.gmv.perShowHourCents, null, "4 minutes is not an hourly rate");
+  assert.equal(young.gmv.grossCents, 41200, "the sale itself is still counted");
+
+  // Past the threshold the rate appears.
+  await r.d.query("UPDATE shows SET started_at = $2 WHERE id = $1", [
+    r.showId, new Date(Date.now() - 60 * 60_000).toISOString(),
+  ]);
+  const grown = await prdMetrics(r.d, r.showId);
+  assert.ok(grown.gmv.perShowHourCents !== null && grown.gmv.perShowHourCents > 0);
+});
+
+test("GMV counts what sold, not what is listed", async () => {
+  // The distinction the `sales` table exists for: listing state keeps moving, so
+  // a sum over it answers a different question every time it is asked.
+  const r = await rig();
+  await r.repo.recordSale({ listingId: PINNED, title: "AJ1 Chicago", priceCents: 41200, source: "observed" });
+  const m = await prdMetrics(r.d, r.showId);
+  assert.equal(m.gmv.grossCents, 41200);
+  assert.equal(m.gmv.lotsSold, 1);
+
+  // Marking the listing down afterwards must not restate what it sold for.
+  await r.repo.mutateListing(PINNED, { priceCents: 20000 });
+  assert.equal((await prdMetrics(r.d, r.showId)).gmv.grossCents, 41200);
+});
+
+test("the unmeasurable metric is named, not faked", async () => {
+  // "Wrong replies reaching a buyer" cannot be self-measured: a reply this
+  // system judged correct is exactly the reply it cannot mark wrong.
+  const r = await rig();
+  const m = await prdMetrics(r.d, r.showId);
+  assert.equal(m.notMeasured.length, 1);
+  assert.match(m.notMeasured[0]!.metric, /Wrong replies/);
+  assert.match(m.notMeasured[0]!.why, /cannot be self-measured/i);
+  // The proxy exists and is separate, so nobody reads one as the other.
+  assert.equal(typeof m.trust.sentThenContradicted, "number");
+});
+
+test("promotion is never granted on too little evidence", async () => {
+  // The failure that matters: telling a seller they earned autonomy on the
+  // strength of two quiet shows.
+  const ready = await promotionReadiness(rigPool(), "L2_ONE_TAP");
+  assert.equal(ready.next, "L3_AUTO_REPLY");
+  assert.equal(ready.ready, false);
+  assert.ok(ready.criteria.every((c) => c.state !== "met" || c.showsSeen >= c.showsRequired));
 });
