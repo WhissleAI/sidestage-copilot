@@ -37,14 +37,14 @@ export class KbSync {
       return { uploaded: false, lots: 0, reason: "no Whissle credentials" };
     }
 
-    const listings = rt.repo.listings();
+    const listings = await rt.repo.listings();
     const signature = listings.map((l) => l.id).sort().join(",");
     if (this.lastSignature.get(rt.showId) === signature) {
       return { uploaded: false, lots: listings.length, reason: "lineup unchanged" };
     }
 
     const title = `sidestage-show-${rt.showId}`;
-    const doc = this.render(rt);
+    const doc = await this.render(rt);
 
     // Replace rather than accumulate: an agent that collects six stale copies of
     // the same lineup will retrieve the wrong one.
@@ -97,9 +97,9 @@ export class KbSync {
     }
   }
 
-  private render(rt: ShowRuntime): string {
-    const show = rt.repo.show();
-    const listings = rt.repo.listings();
+  private async render(rt: ShowRuntime): Promise<string> {
+    const show = await rt.repo.show();
+    const listings = await rt.repo.listings();
     const out: string[] = [
       `# ${show.title}`,
       "",
@@ -129,13 +129,13 @@ export class KbSync {
       out.push("");
     }
 
-    const policies = rt.repo.policies();
+    const policies = await rt.repo.policies();
     if (policies.length) {
       out.push("## Store policies", "");
       for (const p of policies) out.push(`### ${p.title} (${p.topic})`, "", p.body, "");
     }
 
-    const qa = rt.repo.qa();
+    const qa = await rt.repo.qa();
     if (qa.length) {
       out.push("## Frequently asked in chat", "");
       for (const q of qa) out.push(`**${q.question}?** ${q.answer}`, "");

@@ -54,8 +54,12 @@ export interface ImportResult {
  * or quantity change goes through `mutateListing`, so the version bumps and the
  * staleness guard treats an imported price change exactly like a live one.
  */
-export function importCatalog(repo: Repo, items: CatalogItem[]): ImportResult {
+export async function importCatalog(repo: Repo, items: CatalogItem[]): Promise<ImportResult> {
   const result: ImportResult = { created: 0, updated: 0, total: 0, errors: [] };
+
+  // One read for the whole import rather than one per item: a 200-item catalog
+  // was doing 200 full-table reads to answer the same question.
+  const bySku = new Map((await repo.listings()).map((l) => [l.sku, l]));
 
   for (const [i, raw] of items.entries()) {
     const item = normalize(raw);
@@ -64,14 +68,15 @@ export function importCatalog(repo: Repo, items: CatalogItem[]): ImportResult {
       continue;
     }
     try {
-      const existing = repo.listings().find((l) => l.sku === item.sku);
+      const existing = bySku.get(item.sku);
       if (existing) {
         if (existing.priceCents !== item.priceCents || existing.qty !== item.qty) {
-          repo.mutateListing(existing.id, { priceCents: item.priceCents, qty: item.qty });
+          await repo.mutateListing(existing.id, { priceCents: item.priceCents, qty: item.qty });
         }
         result.updated++;
       } else {
-        repo.insertListing(item);
+        const created = await repo.insertListing(item);
+        bySku.set(created.sku, created);
         result.created++;
       }
       result.total++;

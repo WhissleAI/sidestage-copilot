@@ -131,9 +131,9 @@ export function listingFacts(l: ListingWithDescription): Fact[] {
   return out;
 }
 
-export function buildFacts(repo: Repo): Fact[] {
+export async function buildFacts(repo: Repo): Promise<Fact[]> {
   const facts: Fact[] = [];
-  const listings = repo.listings();
+  const listings = await repo.listings();
 
   for (const l of listings) facts.push(...listingFacts(l));
 
@@ -160,7 +160,7 @@ export function buildFacts(repo: Repo): Fact[] {
       : "Nothing is currently available in tonight's lineup.",
   }));
 
-  for (const p of repo.policies()) {
+  for (const p of await repo.policies()) {
     facts.push(mk({
       factId: `policy:${p.id}`, source: "policy",
       label: `Policy · ${p.topic}`, field: p.topic as FactField, policyTopic: p.topic,
@@ -168,7 +168,7 @@ export function buildFacts(repo: Repo): Fact[] {
     }));
   }
 
-  for (const q of repo.qa()) {
+  for (const q of await repo.qa()) {
     facts.push(mk({
       factId: `qa:${q.id}`, source: "qa", label: "Past answer", field: "qa",
       text: `${q.question}? ${q.answer}`,
@@ -177,8 +177,8 @@ export function buildFacts(repo: Repo): Fact[] {
 
   // One market fact per SKU, carrying the 30-day median of comparable sales.
   const bySku = new Map<string, number[]>();
-  for (const l of repo.listings()) {
-    const prices = repo.comps(l.sku).map((c) => c.soldPriceCents);
+  for (const l of listings) {
+    const prices = (await repo.comps(l.sku)).map((c) => c.soldPriceCents);
     if (prices.length) bySku.set(l.sku, prices);
   }
   for (const [sku, prices] of bySku) {

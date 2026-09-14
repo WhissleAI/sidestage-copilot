@@ -62,31 +62,36 @@ export class ActionProposer {
 
   /** Evaluate every rule against the current window. Returns zero or more
    *  proposals; the caller de-duplicates on `dedupeKey`. */
-  evaluate(): ProposedAction[] {
+  async evaluate(): Promise<ProposedAction[]> {
     const recent = this.signals.filter((s) => s.at >= Date.now() - this.windowMs);
     const out: ProposedAction[] = [];
 
-    out.push(...this.markdownRule(recent));
-    out.push(...this.soldOutRule(recent));
-    out.push(...this.swapRule(recent));
-    out.push(...this.pushNextRule());
+    // The rules are independent reads, so they run together rather than in a
+    // chain of four round trips inside the reply budget.
+    const rules = await Promise.all([
+      this.markdownRule(recent),
+      this.soldOutRule(recent),
+      this.swapRule(recent),
+      this.pushNextRule(),
+    ]);
+    for (const r of rules) out.push(...r);
 
     return out;
   }
 
   /** Sustained discount pressure on one lot. */
-  private markdownRule(recent: Signal[]): ProposedAction[] {
+  private async markdownRule(recent: Signal[]): Promise<ProposedAction[]> {
     const byListing = groupDistinctAuthors(recent.filter((s) => s.intent === "discount_request"));
     const out: ProposedAction[] = [];
 
     for (const [listingId, askers] of byListing) {
       if (askers.size < this.discountThreshold) continue;
-      const l = this.repo.listing(listingId);
+      const l = await this.repo.listing(listingId);
       if (!l || l.state === "ended" || l.qty === 0) continue;
 
       // Target the market median when there is one, but never below the floor,
       // and never more than the policy cap off the current price.
-      const comps = this.repo.comps(l.sku).map((c) => c.soldPriceCents);
+      const comps = (await this.repo.comps(l.sku)).map((c) => c.soldPriceCents);
       const med = median(comps);
       const capFloor = Math.ceil(l.priceCents * (1 - policy().maxDiscountPct / 100));
       const target = Math.max(l.floorPriceCents, capFloor, med || 0);
@@ -109,12 +114,12 @@ export class ActionProposer {
   }
 
   /** Chat still asking for a lot that has no stock. */
-  private soldOutRule(recent: Signal[]): ProposedAction[] {
+  private async soldOutRule(recent: Signal[]): Promise<ProposedAction[]> {
     const byListing = groupDistinctAuthors(recent.filter((s) => s.intent === "availability"));
     const out: ProposedAction[] = [];
 
     for (const [listingId, askers] of byListing) {
-      const l = this.repo.listing(listingId);
+      const l = await this.repo.listing(listingId);
       if (!l || l.qty > 0 || l.state === "ended") continue;
       if (askers.size < 2) continue;
 
@@ -131,8 +136,8 @@ export class ActionProposer {
   }
 
   /** Interest has moved to a lot that is not on screen. */
-  private swapRule(recent: Signal[]): ProposedAction[] {
-    const pinned = this.repo.pinned();
+  private async swapRule(recent: Signal[]): Promise<ProposedAction[]> {
+    const pinned = await this.repo.pinned();
     const interest = groupDistinctAuthors(
       recent.filter((s) => s.intent !== "hype" && s.listingId && s.listingId !== pinned?.id),
     );
@@ -140,7 +145,7 @@ export class ActionProposer {
 
     for (const [listingId, askers] of interest) {
       if (askers.size < this.swapThreshold) continue;
-      const l = this.repo.listing(listingId);
+      const l = await this.repo.listing(listingId);
       if (!l || l.pinned || l.state === "ended" || l.qty === 0) continue;
 
       out.push({
@@ -156,12 +161,12 @@ export class ActionProposer {
   }
 
   /** The pinned lot is done; the queue is not. */
-  private pushNextRule(): ProposedAction[] {
-    const pinned = this.repo.pinned();
+  private async pushNextRule(): Promise<ProposedAction[]> {
+    const pinned = await this.repo.pinned();
     if (pinned && pinned.qty > 0 && pinned.state !== "ended") return [];
 
-    const next = this.repo.show().lotQueue
-      .map((id) => this.repo.listing(id))
+    const queue = (await this.repo.show()).lotQueue;
+    const next = (await Promise.all(queue.map((id) => this.repo.listing(id))))
       .find((l) => l && l.state === "queued" && l.qty > 0);
     if (!next) return [];
 

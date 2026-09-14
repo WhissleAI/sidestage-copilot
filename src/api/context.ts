@@ -7,6 +7,8 @@ import { WhissleClient } from "../llm/whissle.js";
 import { EventHub } from "./hub.js";
 import { ShowRegistry, DEMO_SHOW_ID } from "../shows/registry.js";
 import { KbSync } from "../llm/kbSync.js";
+import { db as pgPool, migrate, closeDb } from "../db/pg.js";
+import { seed, DEMO_SHOW_ID as SEED_SHOW } from "../db/seed.js";
 
 export interface AppContext {
   hub: EventHub;
@@ -20,6 +22,20 @@ export interface AppContext {
 
 export async function buildContext(): Promise<AppContext> {
   const hub = new EventHub();
+
+  // Schema first: the app cannot answer a single question without it, so a
+  // migration failure should stop the boot rather than surface as a confusing
+  // "relation does not exist" on the first buyer message.
+  const pool = pgPool();
+  await migrate(pool);
+
+  // The demo show is provisioned on an empty database so a fresh clone has
+  // something real to open — the walkthrough, the stale-price failure path and
+  // the whole write/rollback spike all run on it.
+  const seeded = await pool.query<{ c: number }>(
+    "SELECT COUNT(*)::int AS c FROM listings WHERE show_id = $1", [SEED_SHOW],
+  );
+  if ((seeded.rows[0]?.c ?? 0) === 0) await seed(pool);
 
   if (!hasWhissleCreds()) {
     console.warn(
@@ -75,6 +91,9 @@ export async function buildContext(): Promise<AppContext> {
     async stop() {
       if (heartbeat) clearInterval(heartbeat);
       await shows.stopAll();
+      // The pool is process-wide; leaving it open holds the event loop and makes
+      // a finished test suite look like it hung.
+      await closeDb();
     },
   };
 }

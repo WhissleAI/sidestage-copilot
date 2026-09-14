@@ -2,7 +2,7 @@
 // Whissle agent behind it. Deliberately NOT the HTTP server — the benchmark
 // measures the copilot, not fastify.
 
-import { memoryDb, type DB } from "../src/db/index.js";
+import { db as pgPool, migrate, type Pool } from "../src/db/pg.js";
 import { seed } from "../src/db/seed.js";
 import { Repo } from "../src/domain/repo.js";
 import { Retriever } from "../src/retrieval/retriever.js";
@@ -19,7 +19,8 @@ import { config, hasWhissleCreds } from "../src/config.js";
 import type { ReplyProposal } from "../src/domain/types.js";
 
 export interface Bench {
-  d: DB;
+  d: Pool;
+  showId: string;
   repo: Repo;
   retriever: Retriever;
   audit: AuditLog;
@@ -33,7 +34,7 @@ export interface Bench {
 
 const TERMINAL = new Set(["ready", "needs_review", "blocked", "sent", "auto_sent", "dismissed"]);
 
-export function buildBench(): Bench {
+export async function buildBench(): Promise<Bench> {
   if (!hasWhissleCreds()) {
     console.error(
       "This benchmark measures the real reply path, so it needs Whissle credentials.\n" +
@@ -42,13 +43,18 @@ export function buildBench(): Bench {
     process.exit(2);
   }
 
-  const d = memoryDb();
-  seed(d);
-  const repo = new Repo(d);
+  // A throwaway show in the real database, so the bench measures the SQL that
+  // ships rather than an in-memory stand-in for it.
+  const d = pgPool();
+  await migrate(d);
+  const showId = `bench_${Date.now().toString(36)}`;
+  await seed(d, showId);
+  const repo = new Repo(d, showId);
   const retriever = new Retriever(repo);
-  const audit = new AuditLog(d);
+  await retriever.rebuild();
+  const audit = new AuditLog(d, showId);
 
-  const remote: RemoteListing[] = repo.listings().map((l) => ({
+  const remote: RemoteListing[] = (await repo.listings()).map((l) => ({
     id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
   }));
   const market = new MockMarketplace(remote, { latencyMs: 0 });
@@ -60,17 +66,18 @@ export function buildBench(): Bench {
     timeoutMs: 20_000,
   });
 
+  const lots = (await repo.listings()).map((l) => ({ id: l.id, title: l.title }));
   const settled = new Map<string, ReplyProposal>();
   let notify: (() => void) | null = null;
 
   const exec = new ActionExecutor(d, repo, market, audit, {
     undoWindowS: 90,
-    onListingWrite: () => retriever.rebuild(),
+    onListingWrite: () => void retriever.rebuild(),
   });
   const proposer = new ActionProposer(repo);
   const showContext = new ShowContextEngine({
     llm,
-    lotTitles: () => repo.listings().map((l) => ({ id: l.id, title: l.title })),
+    lotTitles: () => lots,
   });
 
   const pipeline = new Pipeline({
@@ -90,7 +97,7 @@ export function buildBench(): Bench {
   });
 
   return {
-    d, repo, retriever, audit, exec, pipeline, market, settled,
+    d, showId, repo, retriever, audit, exec, pipeline, market, settled,
     waitFor(count, timeoutMs = 180_000) {
       return new Promise<void>((resolve, reject) => {
         const t0 = Date.now();

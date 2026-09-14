@@ -24,14 +24,14 @@ const line = (s = "") => console.log(s);
 const rule = () => line("  " + "─".repeat(72));
 
 async function main(): Promise<void> {
-  const b = buildBench();
+  const b = await buildBench();
   const llm = new WhissleClient({
     apiKey: config.whissle.apiKey, agentId: config.whissle.agentId,
     baseUrl: config.whissle.base, timeoutMs: 20_000,
   });
   const composer = new Composer(llm);
 
-  const show = b.repo.show();
+  const show = await b.repo.show();
   const question = "how much for the chicagos?";
   const author = "mia_k";
 
@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   rule();
 
   // ── t0: a buyer asks. We ground the answer against the catalog as it is now.
-  const before = b.repo.pinned()!;
+  const before = (await b.repo.pinned())!;
   line(`  t+0.0s  ${before.title}`);
   line(`          listed ${formatMoney(before.priceCents)}, listing version ${before.version}`);
   line(`  t+0.1s  buyer @${author}: "${question}"`);
@@ -59,26 +59,29 @@ async function main(): Promise<void> {
 
   // ── t+1.4s: the seller marks the item down. A real, audited write.
   rule();
-  const action = b.exec.propose(
+  const action = await b.exec.propose(
     "markdown_price", before.id, { newPriceCents: 37000 },
     `Mark down ${before.title} — ${formatMoney(before.priceCents)} to ${formatMoney(37000)}`,
     "Four buyers asked for a discount in the last three minutes.",
   );
   await b.exec.approve(action.id, "seller");
-  const after = b.repo.listing(before.id)!;
+  const after = (await b.repo.listing(before.id))!;
   line(`  t+1.4s  SELLER MARKS DOWN — ${formatMoney(before.priceCents)} to ${formatMoney(after.priceCents)}`);
   line(`          listing is now version ${after.version}; the draft above is grounded on v${priceFact.listingVersion}`);
 
   // ── t+1.5s: the draft is about to be sent. Guards run against CURRENT state.
   rule();
+  // Read CURRENT state once, after the markdown landed — that gap is the point
+  // of the whole demonstration.
+  const [nowListings, nowPolicies] = await Promise.all([b.repo.listings(), b.repo.policies()]);
   const guardInput = (d: typeof draft) => ({
     draft: d,
     question,
     facts: grounded.facts,
     factById: new Map(grounded.facts.map((f) => [f.factId, f])),
-    currentListings: new Map(b.repo.listings().map((l) => [l.id, l])),
+    currentListings: new Map(nowListings.map((l) => [l.id, l])),
     slots: grounded.slots,
-    policies: b.repo.policies(),
+    policies: nowPolicies,
   });
 
   const verdict = runChain(guardInput(draft), { evidenceQuality: grounded.evidence[0]?.score ?? 0 });
@@ -99,7 +102,7 @@ async function main(): Promise<void> {
 
   // ── repair: re-ground against the listing as it is NOW.
   rule();
-  b.retriever.rebuild();
+  await b.retriever.rebuild();
   const fresh = b.retriever.retrieve(question, { pinnedId: show.pinnedListingId });
   const freshFact = fresh.facts.find((f) => f.factId === `listing:${before.id}#price`)!;
   line(`  t+1.6s  re-grounding: ${freshFact.factId} @ v${freshFact.listingVersion} — "${freshFact.text}"`);
@@ -123,10 +126,10 @@ async function main(): Promise<void> {
   // ── the audit trail
   rule();
   line("  audit log");
-  for (const e of b.audit.list()) {
+  for (const e of await b.audit.list()) {
     line(`    #${e.seq}  ${e.kind.padEnd(20)} ${e.actorType.padEnd(8)} ${e.summary}`);
   }
-  const v = b.audit.verify();
+  const v = await b.audit.verify();
   line(`    chain ${v.ok ? "intact" : `BROKEN at #${v.brokenAt}`} (${v.height} entries)`);
 
   rule();

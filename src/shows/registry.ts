@@ -61,9 +61,9 @@ export class ShowRegistry {
       sellerHandle: "@kicksbyrae",
       source: "simulated",
       events: this.events,
-      dbPath: config.dbPath,
     });
     this.runtimes.set(DEMO_SHOW_ID, rt);
+    await rt.init();
     await rt.start();
     return rt;
   }
@@ -97,14 +97,15 @@ export class ShowRegistry {
     this.runtimes.set(showId, rt);
 
     try {
-      await rt.start();
+      await rt.init();
+    await rt.start();
     } catch (e) {
       this.runtimes.delete(showId);
       await rt.close().catch(() => {});
       throw e;
     }
 
-    this.hub.emit("shows", this.list());
+    this.hub.emit("shows", await this.list());
     return rt;
   }
 
@@ -115,18 +116,19 @@ export class ShowRegistry {
     this.runtimes.delete(showId);
     if (this.activeShowId === showId) this.activeShowId = DEMO_SHOW_ID;
     await rt.close().catch(() => {});
-    this.hub.emit("shows", this.list());
+    this.hub.emit("shows", await this.list());
   }
 
   get active(): string {
     return this.runtimes.has(this.activeShowId) ? this.activeShowId : DEMO_SHOW_ID;
   }
 
-  activate(showId: string): ShowSummary {
+  async activate(showId: string): Promise<ShowSummary> {
     if (!this.runtimes.has(showId)) throw new Error(`show ${showId} is not being watched`);
     this.activeShowId = showId;
-    this.hub.emit("shows", this.list());
-    return this.list().find((s) => s.showId === showId)!;
+    const shows = await this.list();
+    this.hub.emit("shows", shows);
+    return shows.find((s) => s.showId === showId)!;
   }
 
   get(showId?: string | null): ShowRuntime {
@@ -139,9 +141,9 @@ export class ShowRegistry {
     return this.runtimes.has(showId);
   }
 
-  list(): ShowSummary[] {
-    return [...this.runtimes.values()].map((rt) => {
-      const s = rt.show;
+  async list(): Promise<ShowSummary[]> {
+    return Promise.all([...this.runtimes.values()].map(async (rt) => {
+      const [s, listings] = await Promise.all([rt.show(), rt.repo.listings()]);
       return {
         showId: rt.showId,
         agentId: rt.agentId,
@@ -153,10 +155,10 @@ export class ShowRegistry {
         readOnly: s.readOnly,
         status: s.status,
         viewers: s.viewers,
-        listings: rt.repo.listings().length,
+        listings: listings.length,
         proposals: rt.pipeline.list().length,
       };
-    });
+    }));
   }
 
   async stopAll(): Promise<void> {

@@ -13,8 +13,8 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.js";
-import { openDb, type DB } from "../db/index.js";
-import { Repo } from "../domain/repo.js";
+import { db as pgPool, type Pool } from "../db/pg.js";
+import { Repo, type ListingWithDescription } from "../domain/repo.js";
 import { Retriever } from "../retrieval/retriever.js";
 import { AuditLog } from "../actions/audit.js";
 import { ActionExecutor } from "../actions/executor.js";
@@ -47,7 +47,7 @@ export interface ShowRuntimeOpts {
 
 export class ShowRuntime {
   readonly showId: string;
-  readonly db: DB;
+  readonly db: Pool;
   readonly repo: Repo;
   readonly retriever: Retriever;
   readonly audit: AuditLog;
@@ -90,53 +90,31 @@ export class ShowRuntime {
       showId: o.showId,
     });
 
-    const path = o.dbPath ?? join(config.showsDir, `${o.showId}.db`);
-    mkdirSync(config.showsDir, { recursive: true });
-    this.db = openDb(path);
-    this.repo = new Repo(this.db);
-
-    // A per-show database starts empty; the demo show arrives pre-seeded.
-    let show: ShowState;
-    try {
-      show = this.repo.show();
-    } catch {
-      show = this.repo.createShow({
-        id: o.showId,
-        title: o.title,
-        sellerHandle: o.sellerHandle,
-        source: o.source,
-        externalId: o.externalId ?? null,
-        readOnly: o.readOnly ?? false,
-        autonomyLevel: config.autonomyDefault,
-        undoWindowS: config.undoWindowS,
-      });
-    }
-
+    this.db = pgPool();
+    this.repo = new Repo(this.db, o.showId);
     this.retriever = new Retriever(this.repo);
-    this.audit = new AuditLog(this.db);
-
-    const remote: RemoteListing[] = this.repo.listings().map((l) => ({
-      id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
-    }));
-    this.market = new MockMarketplace(remote);
+    this.audit = new AuditLog(this.db, o.showId);
+    this.market = new MockMarketplace([]);
 
     const emit = (event: string, data: unknown) => o.events.emit(this.showId, event, data);
 
     this.executor = new ActionExecutor(this.db, this.repo, this.market, this.audit, {
-      undoWindowS: show.undoWindowS,
+      undoWindowS: config.undoWindowS,
       onChange: (a) => {
         emit("action", a);
-        emit("audit", this.audit.list(1)[0]);
+        void this.audit.list(1).then((rows) => { if (rows[0]) emit("audit", rows[0]); });
       },
       onListingWrite: (id) => {
-        this.retriever.rebuild();
-        // Emit the listing that changed, plus whatever is pinned (a swap moves
-        // the pin off another row). Re-emitting the whole catalog on every write
-        // put 315 listing frames on the wire in 30 seconds against a live show.
-        const changed = this.repo.listing(id);
-        if (changed) emit("listing", changed);
-        const pinned = this.repo.pinned();
-        if (pinned && pinned.id !== id) emit("listing", pinned);
+        void (async () => {
+          await this.refreshIndex();
+          // Emit the listing that changed, plus whatever is pinned (a swap moves
+          // the pin off another row). Re-emitting the whole catalog on every write
+          // put 315 listing frames on the wire in 30 seconds against a live show.
+          const changed = await this.repo.listing(id);
+          if (changed) emit("listing", changed);
+          const pinned = await this.repo.pinned();
+          if (pinned && pinned.id !== id) emit("listing", pinned);
+        })();
       },
     });
 
@@ -145,7 +123,9 @@ export class ShowRuntime {
 
     this.showContext = new ShowContextEngine({
       llm: this.llm,
-      lotTitles: () => this.repo.listings().map((l) => ({ id: l.id, title: `${l.title} size ${l.size}` })),
+      // Served from the snapshot the retriever last indexed, so the context
+      // engine and the grounding facts always describe the same lineup.
+      lotTitles: () => this.lots,
       onUpdate: (c) => emit("context", c),
     });
 
@@ -164,14 +144,55 @@ export class ShowRuntime {
         onProposal: (p) => emit("proposal", p),
         onMetrics: (m) => emit("metrics", m),
         onListingChanged: (id) => {
-          const l = this.repo.listing(id);
-          if (l) emit("listing", l);
+          void this.repo.listing(id).then((l) => { if (l) emit("listing", l); });
         },
       },
     });
   }
 
-  get show(): ShowState {
+  /** Lot titles for the context engine, refreshed with the retriever's index. */
+  private lots: { id: string; title: string }[] = [];
+
+  /**
+   * Everything the constructor cannot do because it needs the database.
+   *
+   * Split out rather than hidden behind lazy getters: a show that failed to
+   * provision should fail loudly at creation, not on the first buyer question.
+   */
+  async init(): Promise<void> {
+    // A show row may not exist yet; the demo show arrives pre-seeded.
+    try {
+      await this.repo.show();
+    } catch {
+      await this.repo.createShow({
+        id: this.o.showId,
+        title: this.o.title,
+        sellerHandle: this.o.sellerHandle,
+        source: this.o.source,
+        externalId: this.o.externalId ?? null,
+        readOnly: this.o.readOnly ?? false,
+        autonomyLevel: config.autonomyDefault,
+        undoWindowS: config.undoWindowS,
+      });
+    }
+
+    await this.refreshIndex();
+    const remote: RemoteListing[] = this.lotRows.map((l) => ({
+      id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
+    }));
+    this.market.reset(remote);
+  }
+
+  private lotRows: ListingWithDescription[] = [];
+
+  /** Rebuild the retrieval index and the caches derived from the same snapshot. */
+  private async refreshIndex(): Promise<void> {
+    await this.retriever.rebuild();
+    this.lotRows = await this.repo.listings();
+    this.lots = this.lotRows.map((l) => ({ id: l.id, title: `${l.title} size ${l.size}` }));
+  }
+
+  show(): Promise<ShowState> {
     return this.repo.show();
   }
 
@@ -193,11 +214,14 @@ export class ShowRuntime {
    * cannot be the subject of a reply. The pinned lot is always included even if
    * it just closed, so the rail never blanks out mid-render.
    */
-  snapshot(): Record<string, unknown> {
-    const show = this.repo.show();
-    const listings = this.repo.listings().filter(
-      (l) => l.state !== "ended" || l.id === show.pinnedListingId,
-    );
+  async snapshot(): Promise<Record<string, unknown>> {
+    // One round of reads, in parallel: a console connecting should not wait on
+    // five sequential queries.
+    const [show, all, actions, audit, metrics] = await Promise.all([
+      this.repo.show(), this.repo.listings(), this.executor.list(),
+      this.audit.list(200), this.pipeline.metrics(),
+    ]);
+    const listings = all.filter((l) => l.state !== "ended" || l.id === show.pinnedListingId);
     return {
       seller: this.seller,
       catalogId: this.catalogId,
@@ -205,15 +229,15 @@ export class ShowRuntime {
       show,
       listings,
       proposals: this.pipeline.list(),
-      actions: this.executor.list(),
-      audit: this.audit.list(200),
-      metrics: this.pipeline.metrics(),
+      actions,
+      audit,
+      metrics,
       context: this.showContext.current(),
     };
   }
 
-  setAutonomy(level: AutonomyLevel): ShowState {
-    this.pipeline.setAutonomy(level);
+  async setAutonomy(level: AutonomyLevel): Promise<ShowState> {
+    await this.pipeline.setAutonomy(level);
     return this.repo.show();
   }
 
@@ -244,36 +268,36 @@ export class ShowRuntime {
       onTitle: (title) => {
         // Attaching by id alone gives the show a placeholder name; the page knows
         // what it is actually called.
-        this.db.prepare("UPDATE show SET title = ? WHERE id = ?").run(title, this.showId);
-        emit("show", this.repo.show());
+        void this.repo.updateShow({ title }).then((next) => emit("show", next));
       },
 
       onComment: (c) => {
         // Straight into the same pipeline the simulated source feeds. eBay's own
         // per-comment UUID becomes the message id, so a re-attach cannot replay
         // a comment that was already answered.
-        this.pipeline.ingest({ author: c.author, text: c.text, externalId: c.id });
+        void this.pipeline.ingest({ author: c.author, text: c.text, externalId: c.id });
       },
 
       onLot: (lot) => {
         if (!lot.title) return;
+        void (async () => {
         // The live lot becomes a versioned listing. When the price moves, the
         // version bumps — which is exactly the input the staleness guard and the
         // version-keyed reply cache were built for, now driven by a real auction
         // rather than a scripted markdown.
-        const { listing, changed, created } = this.repo.upsertObservedLot({
+        const { listing, changed } = await this.repo.upsertObservedLot({
           title: lot.title,
           priceCents: lot.priceCents,
           soldOut: lot.soldOut,
           highBidder: lot.highBidder,
         });
         if (changed) {
-          this.retriever.rebuild();
-          const prevPinned = this.repo.show().pinnedListingId;
-          this.repo.updateShow({ pinnedListingId: listing.id });
+          await this.refreshIndex();
+          const prevPinned = (await this.repo.show()).pinnedListingId;
+          await this.repo.updateShow({ pinnedListingId: listing.id });
           emit("listing", listing);
           if (prevPinned && prevPinned !== listing.id) {
-            const prev = this.repo.listing(prevPinned);
+            const prev = await this.repo.listing(prevPinned);
             if (prev) emit("listing", prev);
           }
           // Deliberately NOT audited.
@@ -289,11 +313,11 @@ export class ShowRuntime {
           // live, and the listing row keeps `version` + `observedAt`, which is
           // what stale-price detection actually reads.
         }
+        })();
       },
 
       onViewers: (n) => {
-        this.repo.updateShow({ viewers: n });
-        emit("show", this.repo.show());
+        void this.repo.updateShow({ viewers: n }).then((next) => emit("show", next));
       },
     });
 
@@ -312,8 +336,9 @@ export class ShowRuntime {
     this.started = false;
   }
 
+  /** The pool is process-wide now, not a file this show owns, so closing a
+   *  show releases its watchers and nothing else. */
   async close(): Promise<void> {
     await this.stop();
-    this.db.close();
   }
 }

@@ -93,8 +93,8 @@ interface Score {
   r1: number; r3: number; r5: number; mrr: number; abstained: number; n: number;
 }
 
-function evaluate(mode: RetrievalMode): Score {
-  const r = rig();
+async function evaluate(mode: RetrievalMode): Promise<Score> {
+  const r = await rig();
   const s: Score = { r1: 0, r3: 0, r5: 0, mrr: 0, abstained: 0, n: LABELLED.length };
 
   for (const c of LABELLED) {
@@ -115,8 +115,10 @@ function evaluate(mode: RetrievalMode): Score {
   return s;
 }
 
-test("retrieval: ablation over the labelled question set", () => {
-  const rows: [RetrievalMode, Score][] = MODES.map((m) => [m, evaluate(m)]);
+test("retrieval: ablation over the labelled question set", async () => {
+  const rows: [RetrievalMode, Score][] = await Promise.all(
+    MODES.map(async (m) => [m, await evaluate(m)] as [RetrievalMode, Score]),
+  );
 
   console.log(`\n  retrieval over ${LABELLED.length} labelled buyer questions`);
   console.log(`    ${"mode".padEnd(17)} ${"R@1".padEnd(7)} ${"R@3".padEnd(7)} ${"R@5".padEnd(7)} MRR`);
@@ -160,8 +162,8 @@ function typo(s: string, seed: number): string {
     .join(" ");
 }
 
-function evaluateTypos(mode: RetrievalMode, seed: number): Score {
-  const r = rig();
+async function evaluateTypos(mode: RetrievalMode, seed: number): Promise<Score> {
+  const r = await rig();
   const s: Score = { r1: 0, r3: 0, r5: 0, mrr: 0, abstained: 0, n: LABELLED.length };
   for (const c of LABELLED) {
     const res = r.retriever.retrieve(typo(c.q, seed), { pinnedId: PINNED, mode, maxFacts: 8 });
@@ -176,20 +178,23 @@ function evaluateTypos(mode: RetrievalMode, seed: number): Score {
   return s;
 }
 
-test("retrieval: the ngram leg earns its place on MISSPELLED questions, not clean ones", () => {
+test("retrieval: the ngram leg earns its place on MISSPELLED questions, not clean ones", async () => {
   // On the clean set, fusing the ngram leg into BM25 does NOT help — it costs a
   // little MRR, because BM25 alone already ranks well-spelled questions well.
-  const cleanLex = evaluate("lexical");
-  const cleanFused = evaluate("fused");
+  const cleanLex = await evaluate("lexical");
+  const cleanFused = await evaluate("fused");
 
   // The leg exists for the case the clean set under-represents. Average over
   // several perturbation seeds so the comparison is not one lucky draw.
   const seeds = [1, 7, 13, 29, 101];
-  const avg = (mode: RetrievalMode) =>
-    seeds.reduce((acc, sd) => acc + evaluateTypos(mode, sd).mrr, 0) / (seeds.length * LABELLED.length);
+  const avg = async (mode: RetrievalMode) => {
+    let acc = 0;
+    for (const sd of seeds) acc += (await evaluateTypos(mode, sd)).mrr;
+    return acc / (seeds.length * LABELLED.length);
+  };
 
-  const typoLex = avg("lexical");
-  const typoFused = avg("fused");
+  const typoLex = await avg("lexical");
+  const typoFused = await avg("fused");
 
   console.log(`\n  ngram-leg ablation (MRR)`);
   console.log(`    clean questions      lexical ${(cleanLex.mrr / cleanLex.n).toFixed(3)}   fused ${(cleanFused.mrr / cleanFused.n).toFixed(3)}`);
@@ -203,8 +208,8 @@ test("retrieval: the ngram leg earns its place on MISSPELLED questions, not clea
   );
 });
 
-test("retrieval: abstains on questions the catalog genuinely cannot answer", () => {
-  const r = rig();
+test("retrieval: abstains on questions the catalog genuinely cannot answer", async () => {
+  const r = await rig();
   // These have no grounding: a size we do not stock, a future drop, a favour.
   // The right behaviour is to retrieve nothing confident rather than to surface
   // a loosely-related fact the composer would then answer from.
@@ -212,15 +217,15 @@ test("retrieval: abstains on questions the catalog genuinely cannot answer", () 
   assert.equal(res.abstain, true, "a question with no grounding must abstain");
 });
 
-test("retrieval: a markdown is visible to the very next question", () => {
-  const r = rig();
+test("retrieval: a markdown is visible to the very next question", async () => {
+  const r = await rig();
   const before = r.retriever.retrieve("how much for the chicagos", { pinnedId: PINNED });
   const priceFact = before.facts.find((f) => f.factId === `listing:${PINNED}#price`)!;
   assert.equal(priceFact.numericCents, 41200);
   assert.equal(priceFact.listingVersion, 1);
 
-  r.repo.mutateListing(PINNED, { priceCents: 37000 });
-  r.retriever.rebuild();
+  await r.repo.mutateListing(PINNED, { priceCents: 37000 });
+  await r.retriever.rebuild();
 
   const after = r.retriever.retrieve("how much for the chicagos", { pinnedId: PINNED });
   const updated = after.facts.find((f) => f.factId === `listing:${PINNED}#price`)!;

@@ -21,7 +21,8 @@
 // the `before` snapshot captured at preflight, restores locally in a
 // transaction, and appends a NEW audit entry. Nothing is ever erased.
 
-import type { DB } from "../db/index.js";
+import type { Pool, Queryable } from "../db/pg.js";
+import { tx } from "../db/pg.js";
 import type { ActionKind, ActionProposal, ActionStatus } from "../domain/types.js";
 import type { Repo } from "../domain/repo.js";
 import type { AuditLog } from "./audit.js";
@@ -33,17 +34,20 @@ import { idempotencyKey, preflight, showBudgetContext, type PreflightResult } fr
 
 interface ActionRow {
   id: string; kind: string; listing_id: string; listing_title: string; summary: string;
-  rationale: string; params: string; before_state: string; status: string; preflight: string;
+  rationale: string; status: string;
+  /** jsonb columns — already parsed by the driver. */
+  params: Record<string, unknown>; before_state: Record<string, unknown>;
+  preflight: ActionProposal["preflight"];
   idempotency_key: string; undoable_until: string | null; error: string | null; created_at: string;
 }
 
 const toAction = (r: ActionRow): ActionProposal => ({
   id: r.id, kind: r.kind as ActionKind, listingId: r.listing_id, listingTitle: r.listing_title,
   summary: r.summary, rationale: r.rationale,
-  params: JSON.parse(r.params) as Record<string, unknown>,
-  before: JSON.parse(r.before_state) as Record<string, unknown>,
+  params: r.params,
+  before: r.before_state,
   status: r.status as ActionStatus,
-  preflight: JSON.parse(r.preflight) as ActionProposal["preflight"],
+  preflight: r.preflight,
   idempotencyKey: r.idempotency_key,
   undoableUntil: r.undoable_until,
   ...(r.error ? { error: r.error } : {}),
@@ -51,63 +55,92 @@ const toAction = (r: ActionRow): ActionProposal => ({
 });
 
 export class ActionStore {
-  constructor(private d: DB) {}
+  constructor(private d: Pool, private showId: string) {}
 
-  insert(a: ActionProposal): void {
-    this.d.prepare(`
-      INSERT INTO actions (id, kind, listing_id, listing_title, summary, rationale, params,
+  /** The store bound to a transaction client, so a commit's listing mutation
+   *  and its ledger row land together. */
+  private on(c: Queryable): ActionStore {
+    const s = new ActionStore(this.d, this.showId);
+    (s as unknown as { d: Queryable }).d = c;
+    return s;
+  }
+
+  async insert(a: ActionProposal): Promise<void> {
+    await this.d.query(`
+      INSERT INTO actions (show_id, id, kind, listing_id, listing_title, summary, rationale, params,
         before_state, status, preflight, idempotency_key, undoable_until, error, created_at)
-      VALUES (@id,@kind,@listingId,@listingTitle,@summary,@rationale,@params,
-        @before,@status,@preflight,@idem,@undoable,@error,@createdAt)
-    `).run({
-      id: a.id, kind: a.kind, listingId: a.listingId, listingTitle: a.listingTitle,
-      summary: a.summary, rationale: a.rationale, params: JSON.stringify(a.params),
-      before: JSON.stringify(a.before), status: a.status, preflight: JSON.stringify(a.preflight),
-      idem: a.idempotencyKey, undoable: a.undoableUntil, error: a.error ?? null, createdAt: a.createdAt,
-    });
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15)`,
+      [this.showId, a.id, a.kind, a.listingId, a.listingTitle, a.summary, a.rationale,
+       JSON.stringify(a.params), JSON.stringify(a.before), a.status, JSON.stringify(a.preflight),
+       a.idempotencyKey, a.undoableUntil, a.error ?? null, a.createdAt],
+    );
   }
 
-  get(id: string): ActionProposal | null {
-    const r = this.d.prepare("SELECT * FROM actions WHERE id = ?").get(id) as ActionRow | undefined;
-    return r ? toAction(r) : null;
+  async get(id: string): Promise<ActionProposal | null> {
+    const r = await this.d.query<ActionRow>(
+      "SELECT * FROM actions WHERE show_id = $1 AND id = $2", [this.showId, id],
+    );
+    return r.rows[0] ? toAction(r.rows[0]) : null;
   }
 
-  list(limit = 100): ActionProposal[] {
-    return (this.d.prepare("SELECT * FROM actions ORDER BY created_at DESC LIMIT ?").all(limit) as ActionRow[]).map(toAction);
+  async list(limit = 100): Promise<ActionProposal[]> {
+    const r = await this.d.query<ActionRow>(
+      "SELECT * FROM actions WHERE show_id = $1 ORDER BY created_at DESC LIMIT $2", [this.showId, limit],
+    );
+    return r.rows.map(toAction);
   }
 
-  patch(id: string, p: { status?: ActionStatus; undoableUntil?: string | null; error?: string | null }): ActionProposal {
+  async patch(
+    id: string,
+    p: { status?: ActionStatus; undoableUntil?: string | null; error?: string | null },
+  ): Promise<ActionProposal> {
     const sets: string[] = [];
-    const args: unknown[] = [];
-    if (p.status !== undefined) { sets.push("status = ?"); args.push(p.status); }
-    if (p.undoableUntil !== undefined) { sets.push("undoable_until = ?"); args.push(p.undoableUntil); }
-    if (p.error !== undefined) { sets.push("error = ?"); args.push(p.error); }
+    const args: unknown[] = [this.showId, id];
+    const put = (col: string, v: unknown) => { args.push(v); sets.push(`${col} = $${args.length}`); };
+    if (p.status !== undefined) put("status", p.status);
+    if (p.undoableUntil !== undefined) put("undoable_until", p.undoableUntil);
+    if (p.error !== undefined) put("error", p.error);
     if (sets.length) {
-      args.push(id);
-      this.d.prepare(`UPDATE actions SET ${sets.join(", ")} WHERE id = ?`).run(...args as never[]);
+      const r = await this.d.query<ActionRow>(
+        `UPDATE actions SET ${sets.join(", ")} WHERE show_id = $1 AND id = $2 RETURNING *`, args,
+      );
+      if (r.rows[0]) return toAction(r.rows[0]);
     }
-    return this.get(id)!;
+    return (await this.get(id))!;
   }
 
   /** The action carrying this idempotency key, if one already exists. */
-  byIdempotencyKey(key: string): ActionProposal | null {
-    const r = this.d.prepare("SELECT * FROM actions WHERE idempotency_key = ?").get(key) as ActionRow | undefined;
-    return r ? toAction(r) : null;
+  async byIdempotencyKey(key: string): Promise<ActionProposal | null> {
+    const r = await this.d.query<ActionRow>(
+      "SELECT * FROM actions WHERE show_id = $1 AND idempotency_key = $2", [this.showId, key],
+    );
+    return r.rows[0] ? toAction(r.rows[0]) : null;
   }
 
   /** Has this exact intent already been committed? */
-  commitFor(idemKey: string): { action_id: string; committed_at: string; result: string } | null {
-    return (this.d.prepare("SELECT action_id, committed_at, result FROM action_commits WHERE idempotency_key = ?")
-      .get(idemKey) as { action_id: string; committed_at: string; result: string } | undefined) ?? null;
+  async commitFor(idemKey: string): Promise<{ action_id: string; committed_at: string; result: unknown } | null> {
+    const r = await this.d.query<{ action_id: string; committed_at: string; result: unknown }>(
+      "SELECT action_id, committed_at, result FROM action_commits WHERE show_id = $1 AND idempotency_key = $2",
+      [this.showId, idemKey],
+    );
+    return r.rows[0] ?? null;
   }
 
-  committedThisShow(): number {
-    return (this.d.prepare("SELECT COUNT(*) AS c FROM actions WHERE status IN ('committed','rolled_back')").get() as { c: number }).c;
+  async committedThisShow(): Promise<number> {
+    const r = await this.d.query<{ c: number }>(
+      "SELECT COUNT(*)::int AS c FROM actions WHERE show_id = $1 AND status IN ('committed','rolled_back')",
+      [this.showId],
+    );
+    return r.rows[0]?.c ?? 0;
   }
 
-  committedLastMinute(): number {
+  async committedLastMinute(): Promise<number> {
     const since = new Date(Date.now() - 60_000).toISOString();
-    return (this.d.prepare("SELECT COUNT(*) AS c FROM action_commits WHERE committed_at >= ?").get(since) as { c: number }).c;
+    const r = await this.d.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM action_commits ac
+       WHERE ac.show_id = $1 AND ac.committed_at >= $2`, [this.showId, since],
+    );
+    return r.rows[0]?.c ?? 0;
   }
 }
 
@@ -122,31 +155,31 @@ export class ActionExecutor {
   private store: ActionStore;
 
   constructor(
-    private d: DB,
+    private d: Pool,
     private repo: Repo,
     private adapter: MarketplaceAdapter,
     private audit: AuditLog,
     private opts: ExecutorOpts,
   ) {
-    this.store = new ActionStore(d);
+    this.store = new ActionStore(d, repo.showId);
   }
 
-  list(limit?: number): ActionProposal[] {
+  list(limit?: number): Promise<ActionProposal[]> {
     return this.store.list(limit);
   }
 
-  get(id: string): ActionProposal | null {
+  get(id: string): Promise<ActionProposal | null> {
     return this.store.get(id);
   }
 
   /** Create a proposal: run preflight, capture `before`, persist, audit. */
-  propose(kind: ActionKind, listingId: string, params: Record<string, unknown>, summary: string, rationale: string): ActionProposal {
-    const listing = this.repo.listing(listingId);
+  async propose(kind: ActionKind, listingId: string, params: Record<string, unknown>, summary: string, rationale: string): Promise<ActionProposal> {
+    const listing = await this.repo.listing(listingId);
     const pre: PreflightResult = preflight(
-      kind, listing, params, this.repo,
-      showBudgetContext(this.repo, {
-        committedThisShow: this.store.committedThisShow(),
-        committedLastMinute: this.store.committedLastMinute(),
+      kind, listing, params,
+      await showBudgetContext(this.repo, {
+        committedThisShow: await this.store.committedThisShow(),
+        committedLastMinute: await this.store.committedLastMinute(),
       }),
     );
 
@@ -155,7 +188,7 @@ export class ActionExecutor {
     // row keeps a restarted process (whose in-memory dedupe set is empty) from
     // colliding with actions already on disk.
     const key = idempotencyKey(kind, listingId, Number(pre.before.version ?? 0), params);
-    const prior = this.store.byIdempotencyKey(key);
+    const prior = await this.store.byIdempotencyKey(key);
     if (prior) return prior;
 
     const action: ActionProposal = {
@@ -174,8 +207,8 @@ export class ActionExecutor {
       createdAt: new Date().toISOString(),
     };
 
-    this.store.insert(action);
-    this.audit.append(
+    await this.store.insert(action);
+    await this.audit.append(
       pre.ok ? "action_proposed" : "action_preflight_failed",
       "copilot",
       pre.ok ? summary : `blocked before approval: ${summary}`,
@@ -185,16 +218,16 @@ export class ActionExecutor {
     return action;
   }
 
-  reject(id: string, actor: "seller" | "system" = "seller"): ActionProposal {
-    const a = this.store.patch(id, { status: "rejected" });
-    this.audit.append("action_proposed", actor, `rejected: ${a.summary}`, { actionId: id, outcome: "rejected" });
+  async reject(id: string, actor: "seller" | "system" = "seller"): Promise<ActionProposal> {
+    const a = await this.store.patch(id, { status: "rejected" });
+    await this.audit.append("action_proposed", actor, `rejected: ${a.summary}`, { actionId: id, outcome: "rejected" });
     this.opts.onChange?.(a);
     return a;
   }
 
   /** Approve and commit. See the protocol note at the top of this file. */
   async approve(id: string, actor: "seller" | "copilot" = "seller"): Promise<ActionProposal> {
-    let action = this.store.get(id);
+    let action = await this.store.get(id);
     if (!action) throw new Error(`action ${id} not found`);
     if (action.status === "committed") return action;
     if (!action.preflight.ok) {
@@ -202,14 +235,14 @@ export class ActionExecutor {
     }
 
     // 1. idempotency
-    const prior = this.store.commitFor(action.idempotencyKey);
+    const prior = await this.store.commitFor(action.idempotencyKey);
     if (prior) {
-      const a = this.store.patch(id, { status: "committed", error: null });
+      const a = await this.store.patch(id, { status: "committed", error: null });
       this.opts.onChange?.(a);
       return a;
     }
 
-    action = this.store.patch(id, { status: "committing", error: null });
+    action = await this.store.patch(id, { status: "committing", error: null });
     this.opts.onChange?.(action);
 
     const intent: ActionIntent = {
@@ -243,12 +276,16 @@ export class ActionExecutor {
     // 4. record locally — listing mutation and the idempotency ledger row must
     //    land together or not at all.
     try {
-      const tx = this.d.transaction(() => {
-        this.applyLocal(action!);
-        this.d.prepare("INSERT INTO action_commits (idempotency_key, action_id, committed_at, result) VALUES (?,?,?,?)")
-          .run(action!.idempotencyKey, action!.id, new Date().toISOString(), JSON.stringify(remote));
+      await tx(this.d, async (c) => {
+        // The repo is REBOUND to this client, so the listing mutation and the
+        // ledger insert are one atomic unit. That pairing is the whole of the
+        // idempotency claim: a retried commit finds the ledger row and stops.
+        await this.applyLocal(action!, this.repo.bind(c));
+        await c.query(
+          "INSERT INTO action_commits (idempotency_key, show_id, action_id, committed_at, result) VALUES ($1,$2,$3,$4,$5::jsonb)",
+          [action!.idempotencyKey, this.repo.showId, action!.id, new Date().toISOString(), JSON.stringify(remote)],
+        );
       });
-      tx();
     } catch (e) {
       // Remote moved, local did not. Undo the remote write rather than leave the
       // two out of step — a silent divergence here is how a seller ends up
@@ -262,8 +299,8 @@ export class ActionExecutor {
     this.opts.onListingWrite?.(action.listingId);
 
     const undoableUntil = new Date(Date.now() + this.opts.undoWindowS * 1000).toISOString();
-    const committed = this.store.patch(id, { status: "committed", undoableUntil, error: null });
-    this.audit.append("action_committed", actor, action.summary, {
+    const committed = await this.store.patch(id, { status: "committed", undoableUntil, error: null });
+    await this.audit.append("action_committed", actor, action.summary, {
       actionId: id, kind: action.kind, listingId: action.listingId,
       params: action.params, before: action.before, remoteVersion: remote.version,
       idempotencyKey: action.idempotencyKey,
@@ -274,13 +311,13 @@ export class ActionExecutor {
 
   /** Compensating write, from the snapshot captured at preflight. */
   async rollback(id: string, actor: "seller" | "system" = "seller"): Promise<ActionProposal> {
-    const action = this.store.get(id);
+    const action = await this.store.get(id);
     if (!action) throw new Error(`action ${id} not found`);
     if (action.status !== "committed") {
       return this.fail(action, `only a committed action can be rolled back (this one is ${action.status})`);
     }
 
-    const current = this.repo.listing(action.listingId);
+    const current = await this.repo.listing(action.listingId);
     const reservation = {
       token: `res_rollback_${action.idempotencyKey}`,
       listingId: action.listingId,
@@ -298,21 +335,25 @@ export class ActionExecutor {
       return this.fail(action, `rollback failed at the marketplace: ${(e as Error).message}`);
     }
 
-    const tx = this.d.transaction(() => {
-      this.repo.mutateListing(action.listingId, {
+    await tx(this.d, async (c) => {
+      await this.repo.bind(c).mutateListing(action.listingId, {
         priceCents: action.before.priceCents as number,
         qty: action.before.qty as number,
         state: action.before.state as never,
         pinned: action.before.pinned as boolean,
       });
-      this.d.prepare("INSERT OR REPLACE INTO action_commits (idempotency_key, action_id, committed_at, result) VALUES (?,?,?,?)")
-        .run(`${action.idempotencyKey}:rollback`, action.id, new Date().toISOString(), JSON.stringify(action.before));
+      await c.query(
+        `INSERT INTO action_commits (idempotency_key, show_id, action_id, committed_at, result)
+         VALUES ($1,$2,$3,$4,$5::jsonb)
+         ON CONFLICT (show_id, idempotency_key) DO UPDATE SET committed_at = EXCLUDED.committed_at, result = EXCLUDED.result`,
+        [`${action.idempotencyKey}:rollback`, this.repo.showId, action.id, new Date().toISOString(),
+         JSON.stringify(action.before)],
+      );
     });
-    tx();
     this.opts.onListingWrite?.(action.listingId);
 
-    const rolled = this.store.patch(id, { status: "rolled_back", undoableUntil: null });
-    this.audit.append("action_rolled_back", actor, `rolled back: ${action.summary}`, {
+    const rolled = await this.store.patch(id, { status: "rolled_back", undoableUntil: null });
+    await this.audit.append("action_rolled_back", actor, `rolled back: ${action.summary}`, {
       actionId: id, restoredTo: action.before, kind: action.kind, listingId: action.listingId,
     });
     this.opts.onChange?.(rolled);
@@ -320,23 +361,23 @@ export class ActionExecutor {
   }
 
   /** Apply the action's effect to our own listing row. */
-  private applyLocal(a: ActionProposal): void {
+  private async applyLocal(a: ActionProposal, repo: Repo = this.repo): Promise<void> {
     switch (a.kind) {
       case "markdown_price":
-        this.repo.mutateListing(a.listingId, { priceCents: Number(a.params.newPriceCents) });
+        await repo.mutateListing(a.listingId, { priceCents: Number(a.params.newPriceCents) });
         break;
       case "adjust_stock":
-        this.repo.mutateListing(a.listingId, { qty: Number(a.params.newQty) });
+        await repo.mutateListing(a.listingId, { qty: Number(a.params.newQty) });
         break;
       case "swap_pinned":
-        this.repo.setPinned(a.listingId);
-        this.repo.mutateListing(a.listingId, { state: "live" });
+        await repo.setPinned(a.listingId);
+        await repo.mutateListing(a.listingId, { state: "live" });
         break;
       case "push_listing":
-        this.repo.mutateListing(a.listingId, { state: "live" });
+        await repo.mutateListing(a.listingId, { state: "live" });
         break;
       case "end_listing":
-        this.repo.mutateListing(a.listingId, { state: "ended", pinned: false });
+        await repo.mutateListing(a.listingId, { state: "ended", pinned: false });
         break;
     }
   }
@@ -350,9 +391,9 @@ export class ActionExecutor {
     };
   }
 
-  private fail(a: ActionProposal, error: string): ActionProposal {
-    const failed = this.store.patch(a.id, { status: "failed", error });
-    this.audit.append("action_failed", "system", `failed: ${a.summary}`, { actionId: a.id, error });
+  private async fail(a: ActionProposal, error: string): Promise<ActionProposal> {
+    const failed = await this.store.patch(a.id, { status: "failed", error });
+    await this.audit.append("action_failed", "system", `failed: ${a.summary}`, { actionId: a.id, error });
     this.opts.onChange?.(failed);
     return failed;
   }

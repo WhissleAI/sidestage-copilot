@@ -11,7 +11,8 @@
 // happened.
 
 import { createHash } from "node:crypto";
-import type { DB } from "../db/index.js";
+import type { Pool, Queryable } from "../db/pg.js";
+import { tx } from "../db/pg.js";
 import type { AuditEntry, AuditKind } from "../domain/types.js";
 
 export const GENESIS = "0".repeat(64);
@@ -22,7 +23,9 @@ const SEP = String.fromCharCode(0);
 
 interface Row {
   seq: number; at: string; hash: string; prev_hash: string;
-  kind: string; actor_type: string; summary: string; detail: string;
+  kind: string; actor_type: string; summary: string;
+  /** TEXT, holding the EXACT bytes that were hashed. See migration 003. */
+  detail: string;
 }
 
 const toEntry = (r: Row): AuditEntry => ({
@@ -44,56 +47,79 @@ export function hashEntry(
 }
 
 export class AuditLog {
-  constructor(private d: DB) {}
+  constructor(private p: Pool, private showId: string) {}
 
-  /** Append one entry. The seq is allocated and the hash computed inside a single
-   *  transaction so two concurrent appends cannot interleave and fork the chain. */
-  append(
+  /**
+   * Append one entry.
+   *
+   * The seq is allocated and the hash computed inside a single transaction that
+   * first takes an advisory lock on this SHOW. SQLite gave that serialisation
+   * for free with a whole-database write lock; Postgres does not, and two
+   * concurrent appends that both read the same head would compute two entries
+   * claiming the same `prev_hash` — one would lose the primary key race and the
+   * other would be a chain that silently dropped a write. The lock is per show,
+   * so two shows appending at once do not queue behind each other.
+   */
+  async append(
     kind: AuditKind,
     actorType: AuditEntry["actorType"],
     summary: string,
     detail: Record<string, unknown> = {},
-  ): AuditEntry {
-    const tx = this.d.transaction((): AuditEntry => {
-      const head = this.d.prepare("SELECT seq, hash FROM audit ORDER BY seq DESC LIMIT 1").get() as
-        | { seq: number; hash: string } | undefined;
-      const seq = (head?.seq ?? 0) + 1;
-      const prevHash = head?.hash ?? GENESIS;
+    actorId: string | null = null,
+  ): Promise<AuditEntry> {
+    return tx(this.p, async (c) => {
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [this.showId]);
+      const head = await c.query<{ seq: number; hash: string }>(
+        "SELECT seq, hash FROM audit WHERE show_id = $1 ORDER BY seq DESC LIMIT 1", [this.showId],
+      );
+      const seq = (head.rows[0]?.seq ?? 0) + 1;
+      const prevHash = head.rows[0]?.hash ?? GENESIS;
       const at = new Date().toISOString();
       const hash = hashEntry(prevHash, { seq, at, kind, actorType, summary, detail });
-      this.d.prepare(
-        "INSERT INTO audit (seq, at, hash, prev_hash, kind, actor_type, summary, detail) VALUES (?,?,?,?,?,?,?,?)",
-      ).run(seq, at, hash, prevHash, kind, actorType, summary, JSON.stringify(detail));
+      await c.query(
+        `INSERT INTO audit (show_id, seq, at, hash, prev_hash, kind, actor_type, actor_id, summary, detail)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [this.showId, seq, at, hash, prevHash, kind, actorType, actorId, summary, JSON.stringify(detail)],
+      );
       return { seq, at, hash, prevHash, kind, actorType, summary, detail };
     });
-    return tx();
   }
 
-  list(limit = 200): AuditEntry[] {
-    const rows = this.d.prepare("SELECT * FROM audit ORDER BY seq DESC LIMIT ?").all(limit) as Row[];
-    return rows.reverse().map(toEntry);
+  async list(limit = 200): Promise<AuditEntry[]> {
+    const r = await this.p.query<Row>(
+      "SELECT * FROM audit WHERE show_id = $1 ORDER BY seq DESC LIMIT $2", [this.showId, limit],
+    );
+    return r.rows.reverse().map(toEntry);
   }
 
-  height(): number {
-    return (this.d.prepare("SELECT COUNT(*) AS c FROM audit").get() as { c: number }).c;
+  async height(): Promise<number> {
+    const r = await this.p.query<{ c: number }>(
+      "SELECT COUNT(*)::int AS c FROM audit WHERE show_id = $1", [this.showId],
+    );
+    return r.rows[0]?.c ?? 0;
   }
 
   /** Walk the whole chain. Reports the first seq where it breaks, if any. */
-  verify(): { ok: boolean; height: number; brokenAt?: number; reason?: string } {
-    const rows = this.d.prepare("SELECT * FROM audit ORDER BY seq ASC").all() as Row[];
+  async verify(): Promise<{ ok: boolean; height: number; brokenAt?: number; reason?: string }> {
+    const r = await this.p.query<Row>(
+      "SELECT * FROM audit WHERE show_id = $1 ORDER BY seq ASC", [this.showId],
+    );
+    const rows = r.rows;
     let prev = GENESIS;
-    for (const r of rows) {
-      if (r.prev_hash !== prev) {
-        return { ok: false, height: rows.length, brokenAt: r.seq, reason: "prev_hash does not match the preceding entry" };
+    for (const row of rows) {
+      if (row.prev_hash !== prev) {
+        return { ok: false, height: rows.length, brokenAt: row.seq, reason: "prev_hash does not match the preceding entry" };
       }
       const expect = hashEntry(prev, {
-        seq: r.seq, at: r.at, kind: r.kind, actorType: r.actor_type,
-        summary: r.summary, detail: JSON.parse(r.detail),
+        seq: row.seq, at: row.at, kind: row.kind, actorType: row.actor_type,
+        // Re-hash the STORED text, not a re-serialisation of it: the whole
+        // point is that these are the bytes the hash was taken over.
+        summary: row.summary, detail: JSON.parse(row.detail),
       });
-      if (expect !== r.hash) {
-        return { ok: false, height: rows.length, brokenAt: r.seq, reason: "entry content does not match its hash" };
+      if (expect !== row.hash) {
+        return { ok: false, height: rows.length, brokenAt: row.seq, reason: "entry content does not match its hash" };
       }
-      prev = r.hash;
+      prev = row.hash;
     }
     return { ok: true, height: rows.length };
   }

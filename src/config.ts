@@ -18,9 +18,15 @@ function num(name: string, dflt: number): number {
 
 export const config = {
   port: num("PORT", 8790),
-  dbPath: resolve(process.env.DB_PATH || "./data/sidestage.db"),
-  /** One SQLite file per watched live show. */
-  showsDir: resolve(process.env.SHOWS_DIR || "./data/shows"),
+  /**
+   * One Postgres database for everything.
+   *
+   * Replaces the show-per-SQLite-file store: accounts, settings and cross-show
+   * analytics all want shared multi-process state, and a show stays a tenant
+   * boundary by scoping rather than by filesystem (see db/pg.ts).
+   */
+  databaseUrl:
+    process.env.DATABASE_URL || "postgres://localhost:5432/sidestage",
   /** Seller catalogs the operator picks from when starting a session. */
   catalogsDir: resolve(process.env.CATALOGS_DIR || "./fixtures/catalogs"),
   /** Each watched show costs a browser page; cap it. */

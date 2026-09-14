@@ -1,11 +1,25 @@
-// Repositories. The only place SQL touches the domain types.
+// The only place SQL touches the domain.
 //
-// The single most important method here is `mutateListing`: every write to a
-// listing goes through it, and it bumps `version` in the same statement. Nothing
-// else may UPDATE listings. That is what lets a guardrail prove a reply was
-// grounded on a stale read.
+// Two invariants survive from the SQLite era and are the reason this file is a
+// class rather than a bag of functions:
+//
+//   1. `mutateListing` is the ONLY write path for a listing, and it bumps
+//      `version` in the same statement as the change. Retrieved evidence records
+//      the version it was read at, so a reply grounded on a stale read is
+//      DETECTABLE rather than merely unlikely.
+//   2. Tenancy is structural. A show used to be its own database FILE, which
+//      enforced isolation whether or not anyone remembered it. On Postgres the
+//      boundary is a `show_id` column — so this class is CONSTRUCTED with a show
+//      id and binds it into every statement. No call site is ever trusted to
+//      write a WHERE clause correctly.
+//
+// Every method is async because the driver is. The hot path stays fast anyway:
+// the retriever holds its index in memory and only rebuilds on a write, so a
+// buyer question costs zero database round-trips until the guards re-read
+// listing state — which is exactly the read that has to be fresh.
 
-import type { DB } from "../db/index.js";
+import type { Queryable } from "../db/pg.js";
+import { tx, type Pool } from "../db/pg.js";
 import type { Comp, Listing, PolicyClause, ShowState, AutonomyLevel } from "./types.js";
 import { createHash } from "node:crypto";
 
@@ -13,8 +27,8 @@ interface ListingRow {
   id: string; sku: string; title: string; short_name: string; brand: string; model: string; colorway: string;
   size: string; condition: string; price_cents: number; floor_price_cents: number;
   cost_cents: number; qty: number; sold_this_show: number; views: number; state: string;
-  pinned: number; version: number; image_url: string; shipping_profile: string;
-  authenticated: number; cert_id: string | null; description: string; updated_at: string;
+  pinned: boolean; version: number; image_url: string; shipping_profile: string;
+  authenticated: boolean; cert_id: string | null; description: string; updated_at: string;
   external_ref: string | null; observed_at: string | null;
 }
 
@@ -31,9 +45,9 @@ function toListing(r: ListingRow): ListingWithDescription {
     size: r.size, condition: r.condition as Listing["condition"],
     priceCents: r.price_cents, floorPriceCents: r.floor_price_cents, costCents: r.cost_cents,
     qty: r.qty, soldThisShow: r.sold_this_show, views: r.views,
-    state: r.state as Listing["state"], pinned: r.pinned === 1, version: r.version,
+    state: r.state as Listing["state"], pinned: r.pinned, version: r.version,
     imageUrl: r.image_url, shippingProfile: r.shipping_profile,
-    authenticated: r.authenticated === 1, certId: r.cert_id, description: r.description,
+    authenticated: r.authenticated, certId: r.cert_id, description: r.description,
     externalRef: r.external_ref, updatedAt: r.updated_at,
   };
 }
@@ -49,22 +63,44 @@ export interface ListingPatch {
 }
 
 export class Repo {
-  constructor(private d: DB) {}
+  constructor(private d: Queryable, readonly showId: string) {}
+
+  /**
+   * The same repo, bound to one transaction client.
+   *
+   * This is what keeps "mutate the listing" and "record the idempotency key" in
+   * a single atomic unit — the property the two-phase commit rests on. Without
+   * it the executor would have to hand-write SQL to stay in the transaction,
+   * and the single-write-path invariant above would have an exception.
+   */
+  bind(c: Queryable): Repo {
+    return new Repo(c, this.showId);
+  }
+
+  private q<T>(sql: string, args: unknown[] = []): Promise<{ rows: T[]; rowCount: number | null }> {
+    return this.d.query(sql, args) as unknown as Promise<{ rows: T[]; rowCount: number | null }>;
+  }
 
   // ── listings ──────────────────────────────────────────────────────────────
-  listings(): ListingWithDescription[] {
-    return (this.d.prepare("SELECT * FROM listings ORDER BY pinned DESC, title").all() as ListingRow[])
-      .map(toListing);
+  async listings(): Promise<ListingWithDescription[]> {
+    const r = await this.q<ListingRow>(
+      "SELECT * FROM listings WHERE show_id = $1 ORDER BY pinned DESC, title", [this.showId],
+    );
+    return r.rows.map(toListing);
   }
 
-  listing(id: string): ListingWithDescription | null {
-    const r = this.d.prepare("SELECT * FROM listings WHERE id = ?").get(id) as ListingRow | undefined;
-    return r ? toListing(r) : null;
+  async listing(id: string): Promise<ListingWithDescription | null> {
+    const r = await this.q<ListingRow>(
+      "SELECT * FROM listings WHERE show_id = $1 AND id = $2", [this.showId, id],
+    );
+    return r.rows[0] ? toListing(r.rows[0]) : null;
   }
 
-  pinned(): ListingWithDescription | null {
-    const r = this.d.prepare("SELECT * FROM listings WHERE pinned = 1 LIMIT 1").get() as ListingRow | undefined;
-    return r ? toListing(r) : null;
+  async pinned(): Promise<ListingWithDescription | null> {
+    const r = await this.q<ListingRow>(
+      "SELECT * FROM listings WHERE show_id = $1 AND pinned LIMIT 1", [this.showId],
+    );
+    return r.rows[0] ? toListing(r.rows[0]) : null;
   }
 
   /**
@@ -72,65 +108,77 @@ export class Repo {
    * with the change, so every mutation is observable as a version change.
    * Returns the listing as it is AFTER the write.
    */
-  mutateListing(id: string, patch: ListingPatch): ListingWithDescription {
+  async mutateListing(id: string, patch: ListingPatch): Promise<ListingWithDescription> {
     const sets: string[] = [];
     const args: unknown[] = [];
-    const put = (col: string, v: unknown) => { sets.push(`${col} = ?`); args.push(v); };
+    const put = (col: string, v: unknown) => { args.push(v); sets.push(`${col} = $${args.length}`); };
 
     if (patch.priceCents !== undefined) put("price_cents", patch.priceCents);
     if (patch.qty !== undefined) put("qty", patch.qty);
     if (patch.state !== undefined) put("state", patch.state);
-    if (patch.pinned !== undefined) put("pinned", patch.pinned ? 1 : 0);
+    if (patch.pinned !== undefined) put("pinned", patch.pinned);
     if (patch.soldThisShow !== undefined) put("sold_this_show", patch.soldThisShow);
     if (patch.views !== undefined) put("views", patch.views);
     if (!sets.length) {
-      const cur = this.listing(id);
+      const cur = await this.listing(id);
       if (!cur) throw new Error(`listing ${id} not found`);
       return cur;
     }
 
-    sets.push("version = version + 1", "updated_at = ?");
-    args.push(new Date().toISOString(), id);
-    const info = this.d.prepare(`UPDATE listings SET ${sets.join(", ")} WHERE id = ?`).run(...args as never[]);
-    if (info.changes === 0) throw new Error(`listing ${id} not found`);
-    return this.listing(id)!;
+    put("updated_at", new Date().toISOString());
+    sets.push("version = version + 1");
+    args.push(this.showId, id);
+    // RETURNING, so the post-write state comes back in the same round trip —
+    // and, more importantly, is the state this exact statement produced rather
+    // than whatever a second SELECT happens to see.
+    const r = await this.q<ListingRow>(
+      `UPDATE listings SET ${sets.join(", ")}
+       WHERE show_id = $${args.length - 1} AND id = $${args.length} RETURNING *`,
+      args,
+    );
+    if (!r.rows[0]) throw new Error(`listing ${id} not found`);
+    return toListing(r.rows[0]);
   }
 
-  /** Unpin everything, then pin one. Used by `swap_pinned`. Single transaction. */
-  setPinned(id: string): ListingWithDescription {
-    const tx = this.d.transaction((target: string) => {
-      const now = new Date().toISOString();
-      this.d.prepare("UPDATE listings SET pinned = 0, version = version + 1, updated_at = ? WHERE pinned = 1 AND id != ?").run(now, target);
-      this.d.prepare("UPDATE listings SET pinned = 1, version = version + 1, updated_at = ? WHERE id = ?").run(now, target);
-    });
-    tx(id);
-    return this.listing(id)!;
+  /** Unpin everything, then pin one. Used by `swap_pinned`. Single statement, so
+   *  there is no window in which the show has two pinned lots or none. */
+  async setPinned(id: string): Promise<ListingWithDescription> {
+    const now = new Date().toISOString();
+    await this.q(
+      `UPDATE listings SET pinned = (id = $3), version = version + 1, updated_at = $2
+       WHERE show_id = $1 AND (pinned OR id = $3)`,
+      [this.showId, now, id],
+    );
+    const l = await this.listing(id);
+    if (!l) throw new Error(`listing ${id} not found`);
+    return l;
   }
 
   /** Insert a catalog item the seller imported. Live-stream lots go through
    *  `upsertObservedLot` instead — different identity, different lifecycle. */
-  insertListing(i: {
+  async insertListing(i: {
     sku: string; title: string; shortName: string; brand: string; model: string; colorway: string;
     size: string; condition: Listing["condition"]; priceCents: number; floorPriceCents: number;
     costCents: number; qty: number; state: Listing["state"]; shippingProfile: string;
     authenticated: boolean; certId: string | null; description: string; imageUrl: string;
-  }): ListingWithDescription {
+  }): Promise<ListingWithDescription> {
     const id = `lst_${createHash("sha1").update(i.sku).digest("hex").slice(0, 12)}`;
-    this.d.prepare(`
-      INSERT INTO listings (id, sku, title, short_name, brand, model, colorway, size, condition,
+    const r = await this.q<ListingRow>(`
+      INSERT INTO listings (show_id, id, sku, title, short_name, brand, model, colorway, size, condition,
         price_cents, floor_price_cents, cost_cents, qty, sold_this_show, views, state, pinned,
         version, image_url, shipping_profile, authenticated, cert_id, description, updated_at)
-      VALUES (@id, @sku, @title, @short, @brand, @model, @colorway, @size, @condition,
-        @price, @floor, @cost, @qty, 0, 0, @state, 0,
-        1, @image, @shipping, @auth, @cert, @desc, @now)
-    `).run({
-      id, sku: i.sku, title: i.title, short: i.shortName, brand: i.brand, model: i.model,
-      colorway: i.colorway, size: i.size, condition: i.condition, price: i.priceCents,
-      floor: i.floorPriceCents, cost: i.costCents, qty: i.qty, state: i.state,
-      image: i.imageUrl, shipping: i.shippingProfile, auth: i.authenticated ? 1 : 0,
-      cert: i.certId, desc: i.description, now: new Date().toISOString(),
-    });
-    return this.listing(id)!;
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, 0, 0, $15, FALSE,
+        1, $16, $17, $18, $19, $20, $21)
+      ON CONFLICT (show_id, id) DO UPDATE SET
+        title = EXCLUDED.title, price_cents = EXCLUDED.price_cents, qty = EXCLUDED.qty,
+        version = listings.version + 1, updated_at = EXCLUDED.updated_at
+      RETURNING *`,
+      [this.showId, id, i.sku, i.title, i.shortName, i.brand, i.model, i.colorway, i.size, i.condition,
+       i.priceCents, i.floorPriceCents, i.costCents, i.qty, i.state,
+       i.imageUrl, i.shippingProfile, i.authenticated, i.certId, i.description, new Date().toISOString()],
+    );
+    return toListing(r.rows[0]!);
   }
 
   /**
@@ -142,135 +190,182 @@ export class Repo {
    * row goes through `mutateListing` and the version bumps. That is what makes a
    * reply grounded seconds ago provably stale — now against real auction
    * movement rather than a scripted demo.
-   *
-   * Returns the listing and whether this observation actually changed anything.
    */
-  upsertObservedLot(lot: {
+  async upsertObservedLot(lot: {
     title: string; priceCents: number; soldOut: boolean; highBidder?: string | null;
-  }): { listing: ListingWithDescription; changed: boolean; created: boolean } {
+  }): Promise<{ listing: ListingWithDescription; changed: boolean; created: boolean }> {
     const ref = "ebaylive:" + createHash("sha1").update(lot.title).digest("hex").slice(0, 16);
     const now = new Date().toISOString();
-    const existing = this.d.prepare("SELECT * FROM listings WHERE external_ref = ?").get(ref) as ListingRow | undefined;
     const qty = lot.soldOut ? 0 : 1;
-
-    if (!existing) {
-      const id = `lot_${ref.slice(-10)}`;
-      this.d.prepare(`
-        INSERT INTO listings (id, sku, title, short_name, brand, model, colorway, size, condition,
-          price_cents, floor_price_cents, cost_cents, qty, sold_this_show, views, state, pinned,
-          version, image_url, shipping_profile, authenticated, cert_id, description, updated_at,
-          external_ref, observed_at)
-        VALUES (@id, @sku, @title, @short, '', '', '', '', 'USED',
-          @price, @price, 0, @qty, 0, 0, 'live', 1,
-          1, '', 'us-standard', 0, NULL, @desc, @now, @ref, @now)
-      `).run({
-        id, sku: ref, title: lot.title, short: shortLotName(lot.title),
-        price: lot.priceCents, qty, now, ref,
-        desc: "Lot observed on the live stream. Condition and specifics are whatever the host states on air.",
-      });
-      // A newly observed lot becomes the one on screen.
-      this.setPinned(id);
-      return { listing: this.listing(id)!, changed: true, created: true };
-    }
-
     // A lot the host has closed is HISTORY, not inventory with zero stock.
     // Leaving it `live` meant every `state !== "ended"` filter in the system —
     // the lineup fact, the knowledge-base document, the hello payload — kept
     // carrying it, so a three-hour show accumulated hundreds of dead lots and
     // offered them to the model as things it could sell.
     const state: Listing["state"] = lot.soldOut ? "ended" : "live";
+
+    const found = await this.q<ListingRow>(
+      "SELECT * FROM listings WHERE show_id = $1 AND external_ref = $2", [this.showId, ref],
+    );
+    const existing = found.rows[0];
+
+    if (!existing) {
+      const id = `lot_${ref.slice(-10)}`;
+      await this.q(`
+        INSERT INTO listings (show_id, id, sku, title, short_name, brand, model, colorway, size, condition,
+          price_cents, floor_price_cents, cost_cents, qty, sold_this_show, views, state, pinned,
+          version, image_url, shipping_profile, authenticated, cert_id, description, updated_at,
+          external_ref, observed_at)
+        VALUES ($1, $2, $3, $4, $5, '', '', '', '', 'USED',
+          $6, $6, 0, $7, 0, 0, $8, TRUE,
+          1, '', 'us-standard', FALSE, NULL, $9, $10, $11, $10)`,
+        [this.showId, id, ref, lot.title, shortLotName(lot.title), lot.priceCents, qty, state,
+         "Lot observed on the live stream. Condition and specifics are whatever the host states on air.",
+         now, ref],
+      );
+      // A newly observed lot becomes the one on screen.
+      await this.setPinned(id);
+      return { listing: (await this.listing(id))!, changed: true, created: true };
+    }
+
     const changed =
       existing.price_cents !== lot.priceCents ||
       existing.qty !== qty ||
       existing.state !== state ||
-      (state === "live" && existing.pinned !== 1);
+      (state === "live" && !existing.pinned);
     if (!changed) {
-      this.d.prepare("UPDATE listings SET observed_at = ? WHERE id = ?").run(now, existing.id);
-      return { listing: this.listing(existing.id)!, changed: false, created: false };
+      await this.q("UPDATE listings SET observed_at = $3 WHERE show_id = $1 AND id = $2",
+        [this.showId, existing.id, now]);
+      return { listing: (await this.listing(existing.id))!, changed: false, created: false };
     }
 
     // Floor tracks the live price on a stream we do not own: there is no seller
     // floor to read, and pretending one exists would let a markdown look legal.
-    this.d.prepare("UPDATE listings SET floor_price_cents = ?, observed_at = ? WHERE id = ?")
-      .run(lot.priceCents, now, existing.id);
-    this.mutateListing(existing.id, { priceCents: lot.priceCents, qty, state });
+    await this.q(
+      "UPDATE listings SET floor_price_cents = $3, observed_at = $4 WHERE show_id = $1 AND id = $2",
+      [this.showId, existing.id, lot.priceCents, now],
+    );
+    await this.mutateListing(existing.id, { priceCents: lot.priceCents, qty, state });
     // Only a lot still being sold takes the pin. Pinning one that just ended
     // would leave the console showing a closed lot as the item on screen.
-    if (state === "live" && existing.pinned !== 1) this.setPinned(existing.id);
-    return { listing: this.listing(existing.id)!, changed: true, created: false };
+    if (state === "live" && !existing.pinned) await this.setPinned(existing.id);
+    return { listing: (await this.listing(existing.id))!, changed: true, created: false };
   }
 
   // ── policies / comps / qa ─────────────────────────────────────────────────
-  upsertPolicy(p: PolicyClause): void {
-    this.d.prepare("INSERT OR REPLACE INTO policies (id, topic, title, body) VALUES (?, ?, ?, ?)")
-      .run(p.id, p.topic, p.title, p.body);
+  async upsertPolicy(p: PolicyClause): Promise<void> {
+    await this.q(
+      `INSERT INTO policies (show_id, id, topic, title, body) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (show_id, id) DO UPDATE SET topic = EXCLUDED.topic, title = EXCLUDED.title, body = EXCLUDED.body`,
+      [this.showId, p.id, p.topic, p.title, p.body],
+    );
   }
 
-  policies(): PolicyClause[] {
-    return this.d.prepare("SELECT id, topic, title, body FROM policies").all() as PolicyClause[];
+  async policies(): Promise<PolicyClause[]> {
+    const r = await this.q<PolicyClause>(
+      "SELECT id, topic, title, body FROM policies WHERE show_id = $1", [this.showId],
+    );
+    return r.rows;
   }
 
-  policy(id: string): PolicyClause | null {
-    return (this.d.prepare("SELECT id, topic, title, body FROM policies WHERE id = ?").get(id) as PolicyClause) ?? null;
+  async policy(id: string): Promise<PolicyClause | null> {
+    const r = await this.q<PolicyClause>(
+      "SELECT id, topic, title, body FROM policies WHERE show_id = $1 AND id = $2", [this.showId, id],
+    );
+    return r.rows[0] ?? null;
   }
 
-  comps(sku: string): Comp[] {
-    const rows = this.d
-      .prepare("SELECT title, sold_price_cents, sold_at, condition, size FROM comps WHERE sku = ? ORDER BY sold_at DESC")
-      .all(sku) as { title: string; sold_price_cents: number; sold_at: string; condition: string; size: string }[];
-    return rows.map((r) => ({
-      title: r.title, soldPriceCents: r.sold_price_cents, soldAt: r.sold_at,
-      condition: r.condition, size: r.size,
+  async insertComp(c: Comp & { sku: string }): Promise<void> {
+    await this.q(
+      "INSERT INTO comps (show_id, sku, title, sold_price_cents, sold_at, condition, size) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [this.showId, c.sku, c.title, c.soldPriceCents, c.soldAt, c.condition, c.size],
+    );
+  }
+
+  async comps(sku: string): Promise<Comp[]> {
+    const r = await this.q<{ title: string; sold_price_cents: number; sold_at: string; condition: string; size: string }>(
+      "SELECT title, sold_price_cents, sold_at, condition, size FROM comps WHERE show_id = $1 AND sku = $2 ORDER BY sold_at DESC",
+      [this.showId, sku],
+    );
+    return r.rows.map((x) => ({
+      title: x.title, soldPriceCents: x.sold_price_cents, soldAt: x.sold_at,
+      condition: x.condition, size: x.size,
     }));
   }
 
-  qa(): { id: string; question: string; answer: string; tags: string }[] {
-    return this.d.prepare("SELECT id, question, answer, tags FROM qa").all() as never;
+  async insertQa(q: { id: string; question: string; answer: string; tags: string }): Promise<void> {
+    await this.q(
+      `INSERT INTO qa (show_id, id, question, answer, tags) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (show_id, id) DO UPDATE SET question = EXCLUDED.question, answer = EXCLUDED.answer, tags = EXCLUDED.tags`,
+      [this.showId, q.id, q.question, q.answer, q.tags],
+    );
+  }
+
+  async qa(): Promise<{ id: string; question: string; answer: string; tags: string }[]> {
+    const r = await this.q<{ id: string; question: string; answer: string; tags: string }>(
+      "SELECT id, question, answer, tags FROM qa WHERE show_id = $1", [this.showId],
+    );
+    return r.rows;
   }
 
   // ── show ──────────────────────────────────────────────────────────────────
-  /** Provision the single show row for a freshly created per-show database. */
-  createShow(s: {
+  async createShow(s: {
     id: string; title: string; sellerHandle: string; source: string;
     externalId?: string | null; readOnly?: boolean; autonomyLevel: AutonomyLevel; undoWindowS: number;
-  }): ShowState {
-    this.d.prepare(`
-      INSERT OR REPLACE INTO show (id, title, seller_handle, started_at, viewers, pinned_listing_id,
-        lot_queue, autonomy_level, undo_window_s, source, external_id, read_only, status)
-      VALUES (?, ?, ?, ?, 0, NULL, '[]', ?, ?, ?, ?, ?, 'live')
-    `).run(
-      s.id, s.title, s.sellerHandle, new Date().toISOString(),
-      s.autonomyLevel, s.undoWindowS, s.source, s.externalId ?? null, s.readOnly ? 1 : 0,
+    ownerAccountId?: string | null; catalogId?: string | null;
+  }): Promise<ShowState> {
+    await this.q(`
+      INSERT INTO shows (id, owner_account_id, title, seller_handle, started_at, viewers, pinned_listing_id,
+        lot_queue, autonomy_level, undo_window_s, source, external_id, read_only, status, catalog_id)
+      VALUES ($1, $2, $3, $4, $5, 0, NULL, '[]'::jsonb, $6, $7, $8, $9, $10, 'live', $11)
+      ON CONFLICT (id) DO UPDATE SET
+        title = EXCLUDED.title, seller_handle = EXCLUDED.seller_handle,
+        source = EXCLUDED.source, external_id = EXCLUDED.external_id,
+        read_only = EXCLUDED.read_only, catalog_id = EXCLUDED.catalog_id`,
+      [s.id, s.ownerAccountId ?? null, s.title, s.sellerHandle, new Date().toISOString(),
+       s.autonomyLevel, s.undoWindowS, s.source, s.externalId ?? null, s.readOnly ?? false,
+       s.catalogId ?? null],
     );
     return this.show();
   }
 
-  show(): ShowState {
-    const r = this.d.prepare("SELECT * FROM show LIMIT 1").get() as {
+  async show(): Promise<ShowState> {
+    const r = await this.q<{
       id: string; title: string; seller_handle: string; started_at: string; viewers: number;
-      pinned_listing_id: string | null; lot_queue: string; autonomy_level: string; undo_window_s: number;
-      source: string; external_id: string | null; read_only: number; status: string;
-    } | undefined;
-    if (!r) throw new Error("no show row — run `npm run seed` first");
+      pinned_listing_id: string | null; lot_queue: string[]; autonomy_level: string; undo_window_s: number;
+      source: string; external_id: string | null; read_only: boolean; status: string;
+    }>("SELECT * FROM shows WHERE id = $1", [this.showId]);
+    const row = r.rows[0];
+    if (!row) throw new Error(`no show ${this.showId} — run \`npm run seed\` first`);
     return {
-      id: r.id, title: r.title, sellerHandle: r.seller_handle, startedAt: r.started_at,
-      viewers: r.viewers, pinnedListingId: r.pinned_listing_id,
-      lotQueue: JSON.parse(r.lot_queue) as string[],
-      autonomyLevel: r.autonomy_level as AutonomyLevel, undoWindowS: r.undo_window_s,
-      source: r.source as ShowState["source"], externalId: r.external_id,
-      readOnly: r.read_only === 1, status: r.status as ShowState["status"],
+      id: row.id, title: row.title, sellerHandle: row.seller_handle, startedAt: row.started_at,
+      viewers: row.viewers, pinnedListingId: row.pinned_listing_id,
+      // jsonb comes back already parsed.
+      lotQueue: (row.lot_queue ?? []) as string[],
+      autonomyLevel: row.autonomy_level as AutonomyLevel, undoWindowS: row.undo_window_s,
+      source: row.source as ShowState["source"], externalId: row.external_id,
+      readOnly: row.read_only, status: row.status as ShowState["status"],
     };
   }
 
-  updateShow(patch: Partial<Pick<ShowState, "viewers" | "pinnedListingId" | "lotQueue" | "autonomyLevel" | "status" | "sellerHandle" | "title">>): ShowState {
-    const cur = this.show();
+  async updateShow(
+    patch: Partial<Pick<ShowState, "viewers" | "pinnedListingId" | "lotQueue" | "autonomyLevel" | "status" | "sellerHandle" | "title">>,
+  ): Promise<ShowState> {
+    const cur = await this.show();
     const next = { ...cur, ...patch };
-    this.d.prepare(
-      "UPDATE show SET viewers = ?, pinned_listing_id = ?, lot_queue = ?, autonomy_level = ?, status = ?, seller_handle = ?, title = ? WHERE id = ?",
-    ).run(next.viewers, next.pinnedListingId, JSON.stringify(next.lotQueue), next.autonomyLevel,
-          next.status, next.sellerHandle, next.title, cur.id);
+    await this.q(
+      `UPDATE shows SET viewers = $2, pinned_listing_id = $3, lot_queue = $4::jsonb,
+         autonomy_level = $5, status = $6, seller_handle = $7, title = $8 WHERE id = $1`,
+      [cur.id, next.viewers, next.pinnedListingId, JSON.stringify(next.lotQueue),
+       next.autonomyLevel, next.status, next.sellerHandle, next.title],
+    );
     return next;
   }
+}
+
+/** Run `fn` with a repo bound to one transaction. */
+export function repoTx<T>(pool: Pool, showId: string, fn: (r: Repo) => Promise<T>): Promise<T> {
+  return tx(pool, (c) => fn(new Repo(c, showId)));
 }
 
 /** A chip-sized name for an observed lot: strip the lot number and date prefix

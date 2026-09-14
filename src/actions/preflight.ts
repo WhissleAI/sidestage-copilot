@@ -45,7 +45,6 @@ export function preflight(
   kind: ActionKind,
   listing: ListingWithDescription | null,
   params: Record<string, unknown>,
-  repo: Repo,
   ctx: PreflightContext,
 ): PreflightResult {
   const checks: PreflightCheck[] = [];
@@ -200,12 +199,12 @@ export function idempotencyKey(kind: ActionKind, listingId: string, version: num
   return `${kind}:${listingId}:v${version}:${norm}`;
 }
 
-export function showBudgetContext(
+export async function showBudgetContext(
   repo: Repo,
   d: { committedThisShow: number; committedLastMinute: number },
-): PreflightContext {
+): Promise<PreflightContext> {
   return {
-    readOnlyShow: repo.show().readOnly,
+    readOnlyShow: (await repo.show()).readOnly,
     committedThisShow: d.committedThisShow,
     actionBudget: Number(process.env.ACTION_BUDGET_PER_SHOW || 25),
     committedLastMinute: d.committedLastMinute,

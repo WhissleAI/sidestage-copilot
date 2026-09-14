@@ -21,9 +21,9 @@ import { terms } from "../retrieval/text.js";
 export class ResearchService {
   constructor(private repo: Repo) {}
 
-  run(query: string, listingId?: string | null): ResearchCard {
+  async run(query: string, listingId?: string | null): Promise<ResearchCard> {
     const t0 = performance.now();
-    const listing = this.resolve(query, listingId ?? null);
+    const listing = await this.resolve(query, listingId ?? null);
 
     if (!listing) {
       return {
@@ -36,7 +36,7 @@ export class ResearchService {
       };
     }
 
-    const comps = this.repo.comps(listing.sku);
+    const comps = await this.repo.comps(listing.sku);
     const prices = comps.map((c) => c.soldPriceCents);
     const med = median(prices);
 
@@ -62,7 +62,7 @@ export class ResearchService {
       comps: comps.slice(0, 8),
       medianCents: med,
       suggestion: this.suggest(listing, med, prices),
-      specDiff: this.specDiff(listing),
+      specDiff: await this.specDiff(listing),
       latencyMs: Math.round(performance.now() - t0),
       evidence,
     };
@@ -86,8 +86,8 @@ export class ResearchService {
   }
 
   /** How this pair differs from the other sizes/conditions that recently sold. */
-  private specDiff(l: ListingWithDescription): { attribute: string; ours: string; theirs: string }[] {
-    const comps = this.repo.comps(l.sku);
+  private async specDiff(l: ListingWithDescription): Promise<{ attribute: string; ours: string; theirs: string }[]> {
+    const comps = await this.repo.comps(l.sku);
     if (!comps.length) return [];
     const sizes = [...new Set(comps.map((c) => c.size))].filter((s) => s !== l.size);
     const conds = [...new Set(comps.map((c) => c.condition))].filter((c) => c !== l.condition);
@@ -100,16 +100,16 @@ export class ResearchService {
   }
 
   /** Resolve the query to a lot: explicit id wins, then title/brand token overlap. */
-  private resolve(query: string, listingId: string | null): ListingWithDescription | null {
+  private async resolve(query: string, listingId: string | null): Promise<ListingWithDescription | null> {
     if (listingId) {
-      const byId = this.repo.listing(listingId);
+      const byId = await this.repo.listing(listingId);
       if (byId) return byId;
     }
     const q = new Set(terms(query));
     if (!q.size) return this.repo.pinned();
 
     let best: { l: ListingWithDescription; score: number } | null = null;
-    for (const l of this.repo.listings()) {
+    for (const l of await this.repo.listings()) {
       const hay = new Set(terms(`${l.title} ${l.brand} ${l.model} ${l.colorway} ${l.sku}`));
       let score = 0;
       for (const t of q) if (hay.has(t)) score++;

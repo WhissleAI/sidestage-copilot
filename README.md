@@ -16,6 +16,12 @@ Two repositories:
 
 ---
 
+## Prerequisites
+
+- Node 20+
+- **Postgres 14+** running locally. `createdb sidestage` once; the server
+  migrates and seeds the demo show on boot. Override with `DATABASE_URL`.
+
 ## PRD
 
 **[`docs/PRD.md`](docs/PRD.md)** — the single user, the pain, the first workflow, the

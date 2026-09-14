@@ -93,12 +93,13 @@ export class Pipeline {
   }
 
   // ── entry point ───────────────────────────────────────────────────────────
-  ingest(incoming: IncomingMessage): ChatMessage {
+  async ingest(incoming: IncomingMessage): Promise<ChatMessage> {
     const timer = new SpanTimer();
     const intent = classify(incoming.text);
     timer.mark("classify");
 
-    const level = this.d.repo.show().autonomyLevel;
+    const show = await this.d.repo.show();
+    const level = show.autonomyLevel;
     const observing = level === "L0_OBSERVE";
     const decision = admit(incoming.text, intent, observing ? false : this.rate.tryAdmit());
     timer.mark("admit");
@@ -118,7 +119,7 @@ export class Pipeline {
     // or not we replied to all four.
     if (intent !== "hype") {
       const resolved = this.d.retriever.retrieve(incoming.text, {
-        pinnedId: this.d.repo.show().pinnedListingId,
+        pinnedId: show.pinnedListingId,
         mode: "structured-only",
         maxFacts: 2,
       });
@@ -186,17 +187,17 @@ export class Pipeline {
    * Dedupes against what retrieval already found, so a listing's price is not
    * cited twice under two ids.
    */
-  private researchEvidence(
+  private async researchEvidence(
     msg: ChatMessage,
     already: Evidence[],
     pinnedId: string | null,
-  ): Evidence[] {
+  ): Promise<Evidence[]> {
     const wants =
       msg.intent === "comparison" ||
       /\b(good (?:price|deal)|worth it|going for|market value|overpriced|fair price|too much)\b/i.test(msg.text);
     if (!wants) return [];
 
-    const card = this.d.research.run(msg.text, pinnedId);
+    const card = await this.d.research.run(msg.text, pinnedId);
     const seen = new Set(already.map((e) => e.factId));
     return card.evidence.filter((e) => !seen.has(e.factId));
   }
@@ -206,7 +207,7 @@ export class Pipeline {
     // written or anyone to render it.
     if (this.stopped) return;
     const timer = new SpanTimer();
-    const show = this.d.repo.show();
+    const show = await this.d.repo.show();
 
     let proposal: ReplyProposal = {
       id: `prop_${msg.id}`,
@@ -231,7 +232,7 @@ export class Pipeline {
     // the reply path just never asked. Research is a local query costing
     // single-digit milliseconds and it returns Evidence in the same shape as
     // everything else, so a reply built on it stays guard-checkable.
-    for (const e of this.researchEvidence(msg, r.evidence, show.pinnedListingId)) {
+    for (const e of await this.researchEvidence(msg, r.evidence, show.pinnedListingId)) {
       r.evidence.push(e);
     }
     timer.mark("retrieve");
@@ -242,7 +243,7 @@ export class Pipeline {
     const key = cacheKey({ question: msg.text, facts: r.evidence });
     const hit = previous ? null : this.cache.get(key);
     if (hit) {
-      proposal = this.finish(proposal, {
+      proposal = await this.finish(proposal, {
         ...hit, spans: timer.result(config.latencyBudgetMs, true),
       }, msg);
       return;
@@ -253,7 +254,7 @@ export class Pipeline {
       const { draft, contextBlock } = await this.composer.draft(
         {
           show,
-          pinned: show.pinnedListingId ? this.d.repo.listing(show.pinnedListingId) : null,
+          pinned: show.pinnedListingId ? await this.d.repo.listing(show.pinnedListingId) : null,
           context: this.d.showContext.current(),
           seller: this.d.seller?.() ?? null,
           facts: r.facts,
@@ -267,16 +268,25 @@ export class Pipeline {
       timer.mark("compose");
 
       // 4. guard, against state re-read NOW
-      const guardInput = () => ({
-        draft,
-        question: msg.text,
-        facts: r.facts,
-        factById: new Map(r.facts.map((f) => [f.factId, f])),
-        currentListings: new Map(this.d.repo.listings().map((l) => [l.id, l])),
-        slots: r.slots,
-        policies: this.d.repo.policies(),
-      });
-      let chain = runChain(guardInput(), { evidenceQuality: r.evidence[0]?.score ?? 0, abstained: r.abstain });
+      const guardInput = async () => {
+        // Re-read together, AFTER the compose hop. The gap between the state
+        // retrieval saw and the state that is true now is the whole point of
+        // this layer — a markdown landing during the LLM round trip is exactly
+        // what the price guard exists to catch.
+        const [listings, policies] = await Promise.all([
+          this.d.repo.listings(), this.d.repo.policies(),
+        ]);
+        return {
+          draft,
+          question: msg.text,
+          facts: r.facts,
+          factById: new Map(r.facts.map((f) => [f.factId, f])),
+          currentListings: new Map(listings.map((l) => [l.id, l])),
+          slots: r.slots,
+          policies,
+        };
+      };
+      let chain = runChain(await guardInput(), { evidenceQuality: r.evidence[0]?.score ?? 0, abstained: r.abstain });
       timer.mark("guard");
 
       // 5. exactly one repair pass, and only for `revise`
@@ -286,7 +296,7 @@ export class Pipeline {
         const repairedDraft = await this.composer.repair(contextBlock, msg.author, msg.text, chain.failures);
         finalDraft = repairedDraft;
         repaired = true;
-        const input = { ...guardInput(), draft: repairedDraft };
+        const input = { ...(await guardInput()), draft: repairedDraft };
         chain = runChain(input, { evidenceQuality: r.evidence[0]?.score ?? 0, abstained: r.abstain });
         timer.mark("repair");
       }
@@ -319,12 +329,12 @@ export class Pipeline {
       };
       this.proposals.set(failed.id, failed);
       this.d.events.onProposal(failed);
-      this.d.events.onMetrics(this.metrics());
+      void this.emitMetrics();
     }
   }
 
   /** Apply the autonomy ladder, record metrics, emit. */
-  private finish(
+  private async finish(
     base: ReplyProposal,
     r: {
       answer: string; claims: ReplyProposal["claims"]; evidence: Evidence[];
@@ -332,8 +342,8 @@ export class Pipeline {
       confidence: number; repaired: boolean; spans: ReplyProposal["spans"];
     },
     msg: ChatMessage,
-  ): ReplyProposal {
-    const level = this.d.repo.show().autonomyLevel;
+  ): Promise<ReplyProposal> {
+    const level = (await this.d.repo.show()).autonomyLevel;
     const disposition = decideReply({
       level, intent: msg.intent, verdict: r.verdict,
       confidence: r.confidence, abstained: r.evidence.length === 0,
@@ -377,7 +387,7 @@ export class Pipeline {
     this.latency.record(r.spans.totalMs, r.spans.cacheHit);
     this.proposals.set(proposal.id, proposal);
     this.d.events.onProposal(proposal);
-    this.d.events.onMetrics(this.metrics());
+    void this.emitMetrics();
     return proposal;
   }
 
@@ -394,7 +404,7 @@ export class Pipeline {
       verdictAtSend: p.verdict,
     });
     this.d.events.onProposal(next);
-    this.d.events.onMetrics(this.metrics());
+    void this.emitMetrics();
     return next;
   }
 
@@ -405,7 +415,7 @@ export class Pipeline {
     this.proposals.set(id, next);
     this.counters.dismissed++;
     this.d.events.onProposal(next);
-    this.d.events.onMetrics(this.metrics());
+    void this.emitMetrics();
     return next;
   }
 
@@ -418,10 +428,10 @@ export class Pipeline {
     return this.proposals.get(id)!;
   }
 
-  setAutonomy(level: AutonomyLevel): void {
-    const prev = this.d.repo.show().autonomyLevel;
-    this.d.repo.updateShow({ autonomyLevel: level });
-    this.d.audit.append("autonomy_changed", "seller", `autonomy ${prev} to ${level}`, { from: prev, to: level });
+  async setAutonomy(level: AutonomyLevel): Promise<void> {
+    const prev = (await this.d.repo.show()).autonomyLevel;
+    await this.d.repo.updateShow({ autonomyLevel: level });
+    await this.d.audit.append("autonomy_changed", "seller", `autonomy ${prev} to ${level}`, { from: prev, to: level });
   }
 
   list(): ReplyProposal[] {
@@ -434,12 +444,12 @@ export class Pipeline {
 
   // ── operational proposals ─────────────────────────────────────────────────
   private async evaluateActions(): Promise<void> {
-    const level = this.d.repo.show().autonomyLevel;
-    for (const p of this.d.proposer.evaluate()) {
+    const level = (await this.d.repo.show()).autonomyLevel;
+    for (const p of await this.d.proposer.evaluate()) {
       if (this.seenActionKeys.has(p.dedupeKey)) continue;
       this.seenActionKeys.add(p.dedupeKey);
 
-      const action = this.d.executor.propose(p.kind, p.listingId, p.params, p.summary, p.rationale);
+      const action = await this.d.executor.propose(p.kind, p.listingId, p.params, p.summary, p.rationale);
       // `propose` is idempotent; a returned action we have already handled needs
       // no second approval pass.
       if (action.status !== "proposed" && action.status !== "preflight_failed") continue;
@@ -450,8 +460,22 @@ export class Pipeline {
     }
   }
 
-  metrics(): Metrics {
+  /** Emit metrics without making every caller async.
+   *
+   *  Metrics are telemetry for the operator's header, not part of the reply
+   *  contract: a send must not wait on a COUNT to render, and a failed count
+   *  must not fail the send. */
+  private async emitMetrics(): Promise<void> {
+    try {
+      this.d.events.onMetrics(await this.metrics());
+    } catch {
+      /* a metrics read that fails is not a reason to fail the turn */
+    }
+  }
+
+  async metrics(): Promise<Metrics> {
     const c = this.counters;
+    const recent = await this.d.executor.list(500);
     return {
       proposals: c.proposals,
       sent: c.sent,
@@ -462,8 +486,8 @@ export class Pipeline {
       latency: this.latency.percentiles(),
       cacheHitRate: this.latency.cacheHitRate,
       answeredRate: c.admitted ? Number((c.sent / c.admitted).toFixed(3)) : 0,
-      actionsCommitted: this.d.executor.list(500).filter((a) => a.status === "committed").length,
-      actionsRolledBack: this.d.executor.list(500).filter((a) => a.status === "rolled_back").length,
+      actionsCommitted: recent.filter((a) => a.status === "committed").length,
+      actionsRolledBack: recent.filter((a) => a.status === "rolled_back").length,
     };
   }
 

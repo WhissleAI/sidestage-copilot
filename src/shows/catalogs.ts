@@ -119,11 +119,11 @@ export interface ApplyResult extends ImportResult {
  * shipping or returns claim against, and the copilot either abstains or leans on
  * whatever a listing happens to say.
  */
-export function applyCatalog(repo: Repo, catalog: Catalog): ApplyResult {
-  const imported = importCatalog(repo, catalog.items);
-  for (const p of catalog.policies) repo.upsertPolicy(p);
+export async function applyCatalog(repo: Repo, catalog: Catalog): Promise<ApplyResult> {
+  const imported = await importCatalog(repo, catalog.items);
+  for (const p of catalog.policies) await repo.upsertPolicy(p);
 
-  repo.updateShow({ sellerHandle: catalog.seller.handle });
+  await repo.updateShow({ sellerHandle: catalog.seller.handle });
 
   return {
     ...imported,

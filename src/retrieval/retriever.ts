@@ -14,7 +14,7 @@
 // a labelled question -> factId set.
 
 import type { Evidence } from "../domain/types.js";
-import type { Repo } from "../domain/repo.js";
+import type { Repo, ListingWithDescription } from "../domain/repo.js";
 import { buildFacts, type Fact, type FactField } from "./facts.js";
 import { Bm25Index } from "./bm25.js";
 import { cosine, ngramVector, terms } from "./text.js";
@@ -59,14 +59,23 @@ export class Retriever {
   private byId = new Map<string, Fact>();
   private bm25!: Bm25Index;
 
-  constructor(private repo: Repo) {
-    this.rebuild();
-  }
+  /** The listings the current index was built from.
+   *
+   *  Held rather than re-read so `retrieve()` stays synchronous — and, more
+   *  importantly, so the lineup a question is resolved against is the SAME
+   *  snapshot the facts were built from. Reading listings live while the index
+   *  lagged a rebuild behind meant slot resolution and the fact text could
+   *  briefly disagree about what was in the show. */
+  private listings: ListingWithDescription[] = [];
+
+  constructor(private repo: Repo) {}
 
   /** Rebuild the index. Called on boot and whenever a listing write lands, so a
    *  markdown is reflected in retrieved facts on the very next question. */
-  rebuild(): void {
-    this.facts = buildFacts(this.repo);
+  async rebuild(): Promise<void> {
+    const [facts, listings] = await Promise.all([buildFacts(this.repo), this.repo.listings()]);
+    this.facts = facts;
+    this.listings = listings;
     this.byId = new Map(this.facts.map((f) => [f.factId, f]));
     this.bm25 = new Bm25Index(this.facts);
   }
@@ -86,7 +95,7 @@ export class Retriever {
     const mode = opts.mode ?? "hybrid";
     let maxFacts = opts.maxFacts ?? MAX_FACTS;
     let noMatchInventory = false;
-    const listings = this.repo.listings();
+    const listings = this.listings;
     const slots = resolveSlots(question, listings, opts.pinnedId ?? null);
 
     const picked = new Map<string, number>(); // factId -> score

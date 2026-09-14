@@ -7,7 +7,7 @@
 // DS/VNDS grading, authentication certs, thin margins over a cost basis, and a
 // floor price the seller will not cross on air.
 
-import { db, type DB } from "./index.js";
+import { db, migrate, tx, type Pool } from "./pg.js";
 import { config } from "../config.js";
 
 const now = () => new Date().toISOString();
@@ -189,56 +189,77 @@ const QA: { id: string; q: string; a: string; tags: string }[] = [
   { id: "qa_ship_speed", q: "how fast do you ship", a: "Handling time is one business day. Orders placed during a Friday show go out on Monday.", tags: "shipping speed handling" },
 ];
 
-export function seed(d: DB): void {
-  const tx = d.transaction(() => {
-    d.exec("DELETE FROM listings; DELETE FROM policies; DELETE FROM comps; DELETE FROM qa; DELETE FROM show; DELETE FROM actions; DELETE FROM action_commits; DELETE FROM audit;");
+export const DEMO_SHOW_ID = "show_ep42";
 
-    const ins = d.prepare(`
-      INSERT INTO listings (id, sku, title, short_name, brand, model, colorway, size, condition, price_cents,
-        floor_price_cents, cost_cents, qty, sold_this_show, views, state, pinned, version, image_url,
-        shipping_profile, authenticated, cert_id, description, updated_at)
-      VALUES (@id, @sku, @title, @short, @brand, @model, @colorway, @size, @condition, @price,
-        @floor, @cost, @qty, 0, @views, @state, @pinned, 1, @image,
-        @shipping, @authenticated, @certId, @description, @updated)
-    `);
-    for (const l of LISTINGS) {
-      ins.run({
-        ...l, pinned: l.pinned ? 1 : 0, authenticated: l.authenticated ? 1 : 0,
-        image: `https://picsum.photos/seed/${l.id}/320/320`, updated: now(),
-      });
-    }
-
-    const pol = d.prepare("INSERT INTO policies (id, topic, title, body) VALUES (?, ?, ?, ?)");
-    for (const p of POLICIES) pol.run(p.id, p.topic, p.title, p.body);
-
-    const cmp = d.prepare("INSERT INTO comps (sku, title, sold_price_cents, sold_at, condition, size) VALUES (?, ?, ?, ?, ?, ?)");
-    for (const c of COMPS) {
-      const at = new Date(Date.now() - c.daysAgo * 86_400_000).toISOString();
-      cmp.run(c.sku, c.title, c.price, at, c.condition, c.size);
-    }
-
-    const qa = d.prepare("INSERT INTO qa (id, question, answer, tags) VALUES (?, ?, ?, ?)");
-    for (const x of QA) qa.run(x.id, x.q, x.a, x.tags);
-
+/** Seed the demo show. Idempotent: re-seeding replaces the show's rows and
+ *  nothing else, so a developer can reset the demo without touching live shows
+ *  being watched in the same database. */
+export async function seed(p: Pool, showId = DEMO_SHOW_ID): Promise<void> {
+  await tx(p, async (c) => {
+    // The show row first — every other table references it.
     const queue = LISTINGS.filter((l) => l.state === "queued").map((l) => l.id);
-    d.prepare(`
-      INSERT INTO show (id, title, seller_handle, started_at, viewers, pinned_listing_id, lot_queue, autonomy_level, undo_window_s)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      "show_ep42", "Friday Night Grails — Ep. 42", "@kicksbyrae",
-      new Date(Date.now() - 72 * 60_000).toISOString(), 247,
-      "lst_aj1_chi_10", JSON.stringify(queue), config.autonomyDefault, config.undoWindowS,
+    await c.query(
+      `INSERT INTO shows (id, title, seller_handle, started_at, viewers, pinned_listing_id,
+         lot_queue, autonomy_level, undo_window_s, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,'simulated')
+       ON CONFLICT (id) DO UPDATE SET
+         title = EXCLUDED.title, seller_handle = EXCLUDED.seller_handle,
+         started_at = EXCLUDED.started_at, viewers = EXCLUDED.viewers,
+         pinned_listing_id = EXCLUDED.pinned_listing_id, lot_queue = EXCLUDED.lot_queue`,
+      [showId, "Friday Night Grails — Ep. 42", "@kicksbyrae",
+       new Date(Date.now() - 72 * 60_000).toISOString(), 247,
+       "lst_aj1_chi_10", JSON.stringify(queue), config.autonomyDefault, config.undoWindowS],
     );
+
+    // Scoped deletes. A global TRUNCATE would take out every other show in the
+    // database, which on SQLite-per-file was impossible and here is one typo away.
+    for (const t of ["listings", "policies", "comps", "qa", "actions", "audit"]) {
+      await c.query(`DELETE FROM ${t} WHERE show_id = $1`, [showId]);
+    }
+    await c.query("DELETE FROM action_commits WHERE show_id = $1", [showId]);
+
+    for (const l of LISTINGS) {
+      await c.query(
+        `INSERT INTO listings (show_id, id, sku, title, short_name, brand, model, colorway, size, condition,
+           price_cents, floor_price_cents, cost_cents, qty, sold_this_show, views, state, pinned, version,
+           image_url, shipping_profile, authenticated, cert_id, description, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,0,$15,$16,$17,1,$18,$19,$20,$21,$22,$23)`,
+        [showId, l.id, l.sku, l.title, l.short, l.brand, l.model, l.colorway, l.size, l.condition,
+         l.price, l.floor, l.cost, l.qty, l.views, l.state, Boolean(l.pinned),
+         `https://picsum.photos/seed/${l.id}/320/320`, l.shipping, l.authenticated, l.certId,
+         l.description, now()],
+      );
+    }
+
+    for (const pol of POLICIES) {
+      await c.query("INSERT INTO policies (show_id, id, topic, title, body) VALUES ($1,$2,$3,$4,$5)",
+        [showId, pol.id, pol.topic, pol.title, pol.body]);
+    }
+
+    for (const comp of COMPS) {
+      const at = new Date(Date.now() - comp.daysAgo * 86_400_000).toISOString();
+      await c.query(
+        "INSERT INTO comps (show_id, sku, title, sold_price_cents, sold_at, condition, size) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        [showId, comp.sku, comp.title, comp.price, at, comp.condition, comp.size]);
+    }
+
+    for (const x of QA) {
+      await c.query("INSERT INTO qa (show_id, id, question, answer, tags) VALUES ($1,$2,$3,$4,$5)",
+        [showId, x.id, x.q, x.a, x.tags]);
+    }
   });
-  tx();
 }
 
 export { LISTINGS, POLICIES, QA };
 
 // `npm run seed`
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const d = db();
-  seed(d);
-  const n = d.prepare("SELECT COUNT(*) AS c FROM listings").get() as { c: number };
-  console.log(`seeded ${n.c} listings, ${POLICIES.length} policy clauses, ${COMPS.length} comps, ${QA.length} Q&A into ${config.dbPath}`);
+  const pool = db();
+  await migrate(pool);
+  await seed(pool);
+  console.log(
+    `seeded ${LISTINGS.length} listings, ${POLICIES.length} policy clauses, ` +
+    `${COMPS.length} comps, ${QA.length} Q&A into ${config.databaseUrl}`,
+  );
+  await pool.end();
 }

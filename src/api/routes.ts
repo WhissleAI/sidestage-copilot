@@ -15,6 +15,8 @@ import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
 import { meter } from "../llm/meter.js";
 import { WhissleBilling, spendWindow } from "../llm/billing.js";
+import { Accounts, canWrite, type Account } from "../auth/accounts.js";
+import { db as pgPool } from "../db/pg.js";
 import { config } from "../config.js";
 import type { AppContext } from "./context.js";
 
@@ -24,16 +26,67 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   /** Resolve the target show, or 404 with something actionable. */
   const rt = (showId?: string) => shows.get(showId);
 
+  // ── who is asking ─────────────────────────────────────────────────────────
+  //
+  // Every request carries an actor, resolved once. A guest may READ everything
+  // and change nothing; only a seller can send a reply, approve an action or
+  // detach a show. The distinction is enforced here rather than in each handler
+  // so a route added later is not accidentally left open.
+  const accounts = new Accounts(pgPool());
+  const actors = new WeakMap<object, Account | null>();
+
+  app.addHook("onRequest", async (req) => {
+    const header = req.headers.authorization;
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
+    actors.set(req as object, await accounts.resolve(token));
+  });
+
+  const actorOf = (req: object): Account | null => actors.get(req) ?? null;
+
+  /** Refuse a write from a guest — or from nobody at all. */
+  const mustWrite = (
+    req: object,
+    reply: { code(n: number): { send(b: unknown): unknown } },
+  ): Account | null => {
+    const a = actorOf(req);
+    if (canWrite(a)) return a;
+    reply.code(403).send({
+      error: a
+        ? "this session is a guest — it can watch the show but cannot send replies or approve actions"
+        : "no session — the console mints one on load; send it as `Authorization: Bearer <token>`",
+      actor: a?.kind ?? null,
+    });
+    return null;
+  };
+
+  app.post("/api/auth/guest", async () => {
+    // No credentials, deliberately: the point is that someone can open the
+    // console and watch a live show work. Acting on it needs a seller.
+    const s = await accounts.createGuest();
+    return { token: s.token, account: s.account, expiresAt: s.expiresAt };
+  });
+
+  app.get("/api/auth/me", async (req) => ({ account: actorOf(req as object) }));
+
+  app.post<{ Body: { displayName?: string } }>("/api/auth/claim", async (req, reply) => {
+    // "This is my show." Promotes the guest holding this session to operator.
+    const a = actorOf(req as object);
+    if (!a) return reply.code(401).send({ error: "no session to claim" });
+    const promoted = await accounts.promoteToSeller(a.id, (req.body?.displayName || a.handle).slice(0, 80));
+    return { account: promoted };
+  });
+
+
   // ── health ────────────────────────────────────────────────────────────────
   app.get("/health", async () => ({
     ok: true,
     llm: ctx.llmName,
-    shows: shows.list(),
+    shows: await shows.list(),
     clients: hub.size,
   }));
 
   // ── the event stream ──────────────────────────────────────────────────────
-  app.get<{ Querystring: { showId?: string } }>("/api/stream", (req, reply) => {
+  app.get<{ Querystring: { showId?: string } }>("/api/stream", async (req, reply) => {
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
@@ -46,8 +99,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     try {
       const target = rt(req.query.showId);
       id = hub.add(reply, target.showId);
-      reply.raw.write(`event: hello\ndata: ${JSON.stringify({ showId: target.showId, ...target.snapshot() })}\n\n`);
-      reply.raw.write(`event: shows\ndata: ${JSON.stringify(shows.list())}\n\n`);
+      // Both awaited BEFORE writing. An unresolved promise serialises to `{}`,
+      // which would hand the console an empty hello it happily rendered as a
+      // show with no listings, no proposals and no audit.
+      const [snapshot, list] = await Promise.all([target.snapshot(), shows.list()]);
+      reply.raw.write(`event: hello\ndata: ${JSON.stringify({ showId: target.showId, ...snapshot })}\n\n`);
+      reply.raw.write(`event: shows\ndata: ${JSON.stringify(list)}\n\n`);
     } catch (e) {
       reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`);
     }
@@ -80,7 +137,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       // The process window opens on the first successful read, so "spent since
       // the server started" is available without a separate bootstrap step.
       spendWindow.open("process", wallet.balanceUsd);
-      for (const s of shows.list()) spendWindow.open(s.showId, wallet.balanceUsd);
+      for (const s of await shows.list()) spendWindow.open(s.showId, wallet.balanceUsd);
     }
 
     return {
@@ -151,8 +208,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           target.catalogId = catalog.id;
           // Answer as THIS seller's agent, with THIS seller's knowledge base.
           if (catalog.agentId) target.useAgent(catalog.agentId);
-          target.retriever.rebuild();
-          for (const l of target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
+          await target.retriever.rebuild();
+          for (const l of await target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
         }
 
         // A newly started session becomes the one a console without a showId sees.
@@ -161,7 +218,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // Seed the agent's knowledge base in the background — the reply path is
         // grounded per-turn regardless.
         void kb.syncShow(target).catch(() => {});
-        return { showId: target.showId, show: target.show, catalog: applied, snapshot: target.snapshot() };
+        return {
+          showId: target.showId, show: await target.show(),
+          catalog: applied, snapshot: await target.snapshot(),
+        };
       } catch (e) {
         return reply.code(502).send({ error: (e as Error).message });
       }
@@ -180,8 +240,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         target.seller = catalog.seller;
         target.catalogId = catalog.id;
         if (catalog.agentId) target.useAgent(catalog.agentId);
-        target.retriever.rebuild();
-        for (const l of target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
+        await target.retriever.rebuild();
+        for (const l of await target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
         const kbResult = await kb.syncShow(target).catch((e) => ({ uploaded: false, lots: 0, reason: (e as Error).message }));
         return { ...applied, kb: kbResult };
       } catch (e) {
@@ -203,7 +263,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     try {
       kb.cancel(req.params.showId);
       await shows.detach(req.params.showId);
-      return { ok: true, shows: shows.list() };
+      return { ok: true, shows: await shows.list() };
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }
@@ -231,15 +291,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       }
       if (!items.length) return reply.code(400).send({ error: "no catalog items found in the body" });
 
-      const result = importCatalog(target.repo, items);
-      target.retriever.rebuild();
+      const result = await importCatalog(target.repo, items);
+      await target.retriever.rebuild();
       // An import is the one time emitting the whole catalog is right.
-      for (const l of target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
+      for (const l of await target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
 
       // Push the imported lineup to the agent's knowledge base so it can also be
       // searched by the agent's own retrieval, not just ours.
       const kbResult = await kb.syncShow(target).catch((e) => ({ uploaded: false, lots: 0, reason: (e as Error).message }));
-      return { ...result, kb: kbResult, listings: target.repo.listings().length };
+      return { ...result, kb: kbResult, listings: (await target.repo.listings()).length };
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }
@@ -316,6 +376,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { id: string }; Querystring: { showId?: string }; Body: { text?: string } }>(
     "/api/proposals/:id/send",
     async (req, reply) => {
+      if (!mustWrite(req as object, reply)) return;
       try {
         return rt(req.query.showId).pipeline.send(req.params.id, req.body?.text);
       } catch (e) {
@@ -327,6 +388,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { id: string }; Querystring: { showId?: string } }>(
     "/api/proposals/:id/dismiss",
     async (req, reply) => {
+      if (!mustWrite(req as object, reply)) return;
       try {
         return rt(req.query.showId).pipeline.dismiss(req.params.id);
       } catch (e) {
@@ -338,6 +400,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { id: string }; Querystring: { showId?: string } }>(
     "/api/proposals/:id/regenerate",
     async (req, reply) => {
+      if (!mustWrite(req as object, reply)) return;
       try {
         return await rt(req.query.showId).pipeline.regenerate(req.params.id);
       } catch (e) {
@@ -350,6 +413,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { id: string }; Querystring: { showId?: string } }>(
     "/api/actions/:id/approve",
     async (req, reply) => {
+      if (!mustWrite(req as object, reply)) return;
       try {
         return await rt(req.query.showId).executor.approve(req.params.id, "seller");
       } catch (e) {
@@ -361,6 +425,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { id: string }; Querystring: { showId?: string } }>(
     "/api/actions/:id/reject",
     async (req, reply) => {
+      if (!mustWrite(req as object, reply)) return;
       try {
         return rt(req.query.showId).executor.reject(req.params.id);
       } catch (e) {
@@ -372,6 +437,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { id: string }; Querystring: { showId?: string } }>(
     "/api/actions/:id/rollback",
     async (req, reply) => {
+      if (!mustWrite(req as object, reply)) return;
       try {
         return await rt(req.query.showId).executor.rollback(req.params.id, "seller");
       } catch (e) {
@@ -390,8 +456,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       }
       try {
         const target = rt(req.query.showId);
-        const show = target.setAutonomy(level);
-        hub.emit("audit", { showId: target.showId, ...target.audit.list(1)[0] });
+        const show = await target.setAutonomy(level);
+        const [entry] = await target.audit.list(1);
+        if (entry) hub.emit("audit", { showId: target.showId, ...entry });
         return show;
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
@@ -420,7 +487,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!query) return reply.code(400).send({ error: "query is required" });
       try {
         const target = rt(req.query.showId);
-        return target.research.run(query, req.body?.listingId ?? target.show.pinnedListingId);
+        return target.research.run(query, req.body?.listingId ?? (await target.show()).pinnedListingId);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -440,7 +507,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Querystring: { showId?: string; limit?: string } }>("/api/audit", read((s) => rt(s).audit.list(200)));
   app.get<{ Querystring: { showId?: string } }>("/api/audit/verify", read((s) => rt(s).audit.verify()));
   app.get<{ Querystring: { showId?: string } }>("/api/metrics", read((s) => rt(s).pipeline.metrics()));
-  app.get<{ Querystring: { showId?: string } }>("/api/show", read((s) => rt(s).show));
+  app.get<{ Querystring: { showId?: string } }>("/api/show", read((s) => rt(s).show()));
   app.get<{ Querystring: { showId?: string } }>("/api/listings", read((s) => rt(s).repo.listings()));
   app.get<{ Querystring: { showId?: string } }>("/api/context", read((s) => rt(s).showContext.current()));
   app.get<{ Querystring: { showId?: string } }>("/api/actions", read((s) => rt(s).executor.list()));

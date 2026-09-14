@@ -14,7 +14,7 @@
 // Numbers land in docs/EVALS.md. They move with the gateway's load, which is the
 // honest situation for anything with a network hop in the path.
 
-import { buildBench, stats } from "./harness.js";
+import { buildBench, type Bench, stats } from "./harness.js";
 import { QUESTIONS, rng } from "../src/ingest/script.js";
 import { config } from "../src/config.js";
 import type { ReplyProposal } from "../src/domain/types.js";
@@ -52,14 +52,14 @@ function report(title: string, proposals: ReplyProposal[]): void {
   );
 }
 
-async function pass(b: ReturnType<typeof buildBench>, questions: string[], label: string): Promise<ReplyProposal[]> {
+async function pass(b: Bench, questions: string[], label: string): Promise<ReplyProposal[]> {
   const before = new Set(b.settled.keys());
   const rand = rng(7);
   // Only ADMITTED messages become proposals — the relevance gate and the rate
   // cap drop the rest by design, so waiting on the submitted count would hang.
   let admitted = 0;
   for (let i = 0; i < questions.length; i++) {
-    const m = b.pipeline.ingest({
+    const m = await b.pipeline.ingest({
       author: `bench_${Math.floor(rand() * 40)}`,
       text: questions[i],
       externalId: `${label}_${i}`,
@@ -74,7 +74,7 @@ async function pass(b: ReturnType<typeof buildBench>, questions: string[], label
 }
 
 async function main(): Promise<void> {
-  const b = buildBench();
+  const b = await buildBench();
   const rand = rng(42);
   const questions = Array.from({ length: N }, () => QUESTIONS[Math.floor(rand() * QUESTIONS.length)].text);
 
@@ -91,9 +91,9 @@ async function main(): Promise<void> {
 
   // The cache's correctness property, not just its speed: a markdown must make
   // every cached answer for that listing unreachable.
-  const pinned = b.repo.pinned()!;
-  b.repo.mutateListing(pinned.id, { priceCents: pinned.priceCents - 4200 });
-  b.retriever.rebuild();
+  const pinned = (await b.repo.pinned())!;
+  await b.repo.mutateListing(pinned.id, { priceCents: pinned.priceCents - 4200 });
+  await b.retriever.rebuild();
   const afterMarkdown = await pass(b, ["how much for the chicagos"], "post-markdown");
   const servedFromCache = afterMarkdown[0]?.spans.cacheHit;
   console.log(

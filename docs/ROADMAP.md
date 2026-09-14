@@ -65,7 +65,7 @@ because building an analytics page on top of a corrupt audit log is building on 
 
 The four things you named. Ordered by how much they unblock.
 
-### 2.1 Postgres
+### 2.1 Postgres — **DONE**
 
 SQLite-per-show was the right call for a prototype — a show is a clean tenant
 boundary and file isolation is free. It is the wrong call the moment there is more
@@ -79,7 +79,28 @@ than one process or more than one operator.
 **Sequenced first** because guest accounts, settings and analytics all want shared,
 queryable, multi-process state, and porting them twice is waste.
 
-### 2.2 Guest accounts + auth
+**Shipped.** One database, `show_id` a real column, and `Repo` constructed WITH a
+show id so tenancy is structural rather than remembered. Every layer that touched
+SQL became async; `retrieve()` stayed synchronous by holding the listing snapshot
+its index was built from — which also closed a latent inconsistency where slot
+resolution read listings live while the fact index lagged a rebuild behind.
+
+Three real bugs the move exposed, none of them visible under show-per-file:
+
+1. **`idempotency_key` was globally unique.** The key hashes (kind, listing,
+   version, params), so two shows selling the same catalog produce the SAME key
+   — the second show could never propose an action the first had. Scoped to
+   `(show_id, idempotency_key)` in migration 002.
+2. **`jsonb` cannot hold a hashed payload.** It normalises key order and
+   whitespace, so the audit `detail` we hashed going in was not the `detail`
+   coming back, and `verify()` reported a break in a chain nobody had touched.
+   `detail` is now `text` holding the exact bytes (migration 003). Evidence you
+   reformat is evidence you cannot verify.
+3. **Promises serialise to `{}`.** `hello` and `/health` shipped empty objects
+   where a value used to be, and TypeScript could not see it because the sites
+   were inside object literals. Caught by reading the wire, not the types.
+
+### 2.2 Guest accounts + auth — **DONE**
 
 Today: **no auth at all.** Anyone who can reach port 8790 drives every show,
 approves actions and detaches sessions. Correct for a local tool, wrong the moment
@@ -93,6 +114,14 @@ it is demoed from conference wifi.
 
 This makes the audit log mean something. "Who approved that markdown" is not
 answerable today.
+
+**Shipped.** `accounts` + `auth_sessions` + a bearer token the console mints on
+first load. A guest may read every route and change nothing; the six command
+routes (send, dismiss, regenerate, approve, reject, rollback, autonomy) require
+a seller, enforced in one place so a route added later is not left open by
+omission. `audit.actor_id` now references the account, and the console shows
+which it is acting as — amber "watching · take control" for a guest, the
+operator's name once claimed. Five contract tests cover the boundary.
 
 ### 2.3 Settings
 

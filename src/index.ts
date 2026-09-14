@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   await app.listen({ port: config.port, host: "0.0.0.0" });
   await ctx.start();
 
-  const rows = ctx.shows.list();
+  const rows = await ctx.shows.list();
   console.log(
     `\nSideStage copilot on http://localhost:${config.port}\n` +
     `  llm      ${ctx.llmName}${config.whissle.agentId ? ` · agent ${config.whissle.agentId.slice(0, 8)}` : " · NO AGENT SET"}\n` +

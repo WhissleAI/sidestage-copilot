@@ -21,10 +21,20 @@ import { get } from "node:http";
 
 let app: FastifyInstance;
 let ctx: AppContext;
+/** A seller session. Every command route requires one. */
+let auth: Record<string, string>;
 
 before(async () => {
   ({ app, ctx } = await buildApp());
   await ctx.shows.ensureDemo();
+
+  const guest = (await app.inject({ method: "POST", url: "/api/auth/guest" })).json();
+  const bearer = { authorization: `Bearer ${guest.token}` };
+  await app.inject({
+    method: "POST", url: "/api/auth/claim", headers: { ...bearer, "content-type": "application/json" },
+    payload: { displayName: "contract-suite" },
+  });
+  auth = bearer;
 });
 
 after(async () => {
@@ -46,7 +56,7 @@ describe("the seam that broke", () => {
     const r = await app.inject({
       method: "POST",
       url: "/api/catalogs/reload",
-      headers: BODYLESS_JSON,
+      headers: { ...BODYLESS_JSON, ...auth },
     });
     assert.notEqual(r.statusCode, 400, `bodyless JSON POST returned ${r.statusCode}: ${r.body}`);
   });
@@ -62,7 +72,7 @@ describe("the seam that broke", () => {
     const r = await app.inject({
       method: "POST",
       url: "/api/autonomy",
-      headers: BODYLESS_JSON,
+      headers: { ...BODYLESS_JSON, ...auth },
       payload: "{not json",
     });
     assert.equal(r.statusCode, 400);
@@ -132,7 +142,7 @@ describe("commands", () => {
     const r = await app.inject({
       method: "POST",
       url: "/api/chat/inject",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...auth },
       payload: { author: "contract-test", text: "how much is the pinned one" },
     });
     assert.equal(r.statusCode, 200);
@@ -146,7 +156,7 @@ describe("commands", () => {
     const r = await app.inject({
       method: "POST",
       url: "/api/autonomy",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...auth },
       payload: { level: "L2_ONE_TAP" },
     });
     assert.equal(r.statusCode, 200);
@@ -160,7 +170,7 @@ describe("commands", () => {
     const r = await app.inject({
       method: "POST",
       url: "/api/proposals/does_not_exist/send",
-      headers: BODYLESS_JSON,
+      headers: { ...BODYLESS_JSON, ...auth },
     });
     assert.equal(r.statusCode, 404);
   });
@@ -169,7 +179,7 @@ describe("commands", () => {
     const r = await app.inject({
       method: "POST",
       url: "/api/research",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...auth },
       payload: { query: "what are these going for" },
     });
     assert.equal(r.statusCode, 200);
@@ -178,6 +188,55 @@ describe("commands", () => {
     assert.ok(Array.isArray(card.comps));
     assert.ok(Array.isArray(card.evidence));
     assert.ok(card.latencyMs < 2000, `research took ${card.latencyMs}ms`);
+  });
+});
+
+describe("who is allowed to act", () => {
+  test("a guest may read the show", async () => {
+    const guest = (await app.inject({ method: "POST", url: "/api/auth/guest" })).json();
+    const r = await app.inject({
+      method: "GET", url: "/api/show", headers: { authorization: `Bearer ${guest.token}` },
+    });
+    assert.equal(r.statusCode, 200);
+  });
+
+  test("a guest may NOT send a reply", async () => {
+    // The read-only rung below L1 Suggest. A console opened by someone who is
+    // not the seller can watch the copilot work and change nothing.
+    const guest = (await app.inject({ method: "POST", url: "/api/auth/guest" })).json();
+    const r = await app.inject({
+      method: "POST", url: "/api/proposals/anything/send",
+      headers: { authorization: `Bearer ${guest.token}`, ...BODYLESS_JSON },
+    });
+    assert.equal(r.statusCode, 403);
+    assert.match(r.json().error, /guest/);
+  });
+
+  test("no session at all is refused, and says how to get one", async () => {
+    const r = await app.inject({
+      method: "POST", url: "/api/actions/anything/approve", headers: BODYLESS_JSON,
+    });
+    assert.equal(r.statusCode, 403);
+    assert.match(r.json().error, /no session/);
+  });
+
+  test("an unknown token is not a session", async () => {
+    const r = await app.inject({
+      method: "GET", url: "/api/auth/me", headers: { authorization: "Bearer sst_nope" },
+    });
+    assert.equal(r.json().account, null);
+  });
+
+  test("claiming the console promotes the guest to seller", async () => {
+    const guest = (await app.inject({ method: "POST", url: "/api/auth/guest" })).json();
+    assert.equal(guest.account.kind, "guest");
+    const claimed = await app.inject({
+      method: "POST", url: "/api/auth/claim",
+      headers: { authorization: `Bearer ${guest.token}`, "content-type": "application/json" },
+      payload: { displayName: "Rae" },
+    });
+    assert.equal(claimed.json().account.kind, "seller");
+    assert.equal(claimed.json().account.displayName, "Rae");
   });
 });
 
@@ -201,7 +260,7 @@ describe("the SSE envelope", () => {
     // ended lot cannot be sold, pinned, or answered about.
     const r = await app.inject({ method: "GET", url: "/api/listings" });
     const pinned = (await app.inject({ method: "GET", url: "/api/show" })).json().pinnedListingId;
-    const snap = ctx.shows.get().snapshot() as { listings: { id: string; state: string }[] };
+    const snap = (await ctx.shows.get().snapshot()) as unknown as { listings: { id: string; state: string }[] };
     for (const l of snap.listings) {
       assert.ok(l.state !== "ended" || l.id === pinned, `hello carried ended lot ${l.id}`);
     }

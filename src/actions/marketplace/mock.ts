@@ -33,6 +33,13 @@ export class MockMarketplace implements MarketplaceAdapter {
   private reservations = new Map<string, Reservation>();
   private opts: Required<Omit<MockOptions, "failNextApply">> & { failNextApply: boolean };
 
+  /** Replace the mirrored remote state. Used once a show has loaded its
+   *  catalog — the adapter is constructed before the listings are read. */
+  reset(seed: RemoteListing[]): void {
+    this.remote.clear();
+    for (const l of seed) this.remote.set(l.id, { ...l });
+  }
+
   constructor(seed: RemoteListing[], opts: MockOptions = {}) {
     for (const l of seed) this.remote.set(l.id, { ...l });
     this.opts = {

@@ -16,7 +16,7 @@ import { normalizeDistribution } from "../src/ingest/signals.js";
 
 // ── ingest ──────────────────────────────────────────────────────────────────
 
-test("classify routes the live-chat question vocabulary", () => {
+test("classify routes the live-chat question vocabulary", async () => {
   assert.equal(classify("whats the lowest on the chicagos?"), "discount_request");
   assert.equal(classify("how much for the pandas"), "price_question");
   assert.equal(classify("size 10 still there??"), "availability");
@@ -29,7 +29,7 @@ test("classify routes the live-chat question vocabulary", () => {
   assert.equal(classify("W"), "hype");
 });
 
-test("hype detection keeps reactions out of the reply queue", () => {
+test("hype detection keeps reactions out of the reply queue", async () => {
   for (const s of ["W", "W W W", "LETS GOOO", "gg", "fire", "haha", "🔥🔥", "lol lol"]) {
     assert.equal(isHype(s), true, `"${s}" should be hype`);
   }
@@ -38,7 +38,7 @@ test("hype detection keeps reactions out of the reply queue", () => {
   }
 });
 
-test("a question without a question mark is still a question", () => {
+test("a question without a question mark is still a question", async () => {
   // Buyers on phones drop the "?" constantly. Treating these as hype silently
   // dropped real questions.
   assert.notEqual(classify("can you hold it til friday"), "hype");
@@ -46,14 +46,14 @@ test("a question without a question mark is still a question", () => {
   assert.equal(admit("do you have these in a 12", "other", true).admitted, true);
 });
 
-test("the admission gate reports WHY it dropped a message", () => {
+test("the admission gate reports WHY it dropped a message", async () => {
   assert.match(admit("W", "hype", true).reason!, /reaction/);
   assert.match(admit("ok", "other", true).reason!, /too short/);
   assert.match(admit("these are clean", "other", true).reason!, /no question/);
   assert.match(admit("how much for the pandas", "price_question", false).reason!, /rate cap/);
 });
 
-test("the rate limiter spends its budget then refuses", () => {
+test("the rate limiter spends its budget then refuses", async () => {
   const rl = new RateLimiter(3);
   assert.equal(rl.tryAdmit(), true);
   assert.equal(rl.tryAdmit(), true);
@@ -63,7 +63,7 @@ test("the rate limiter spends its budget then refuses", () => {
 
 // ── money ───────────────────────────────────────────────────────────────────
 
-test("money parses the shapes buyers and sellers actually type", () => {
+test("money parses the shapes buyers and sellers actually type", async () => {
   assert.deepEqual(extractMoneyCents("it is $412.00"), [41200]);
   assert.deepEqual(extractMoneyCents("$1,180"), [118000]);
   assert.deepEqual(extractMoneyCents("412 dollars"), [41200]);
@@ -75,7 +75,7 @@ test("money parses the shapes buyers and sellers actually type", () => {
   assert.deepEqual(extractMoneyCents("there are 3 left"), []);
 });
 
-test("money formats with separators", () => {
+test("money formats with separators", async () => {
   assert.equal(formatMoney(41200), "$412.00");
   assert.equal(formatMoney(118000), "$1,180.00");
   assert.equal(formatMoney(0), "$0.00");
@@ -83,7 +83,7 @@ test("money formats with separators", () => {
 
 // ── composer parsing ────────────────────────────────────────────────────────
 
-test("the JSON extractor counts braces instead of matching greedily", () => {
+test("the JSON extractor counts braces instead of matching greedily", async () => {
   const s = 'prose before {"answer":"a","claims":[{"text":"t","factId":"f"}]} and after {"other":1}';
   const o = extractJsonObject(s)!;
   assert.equal(o.answer, "a");
@@ -91,14 +91,14 @@ test("the JSON extractor counts braces instead of matching greedily", () => {
   assert.ok(Array.isArray(o.claims));
 });
 
-test("a model that answers in prose still produces a checkable draft", () => {
+test("a model that answers in prose still produces a checkable draft", async () => {
   const d = parseDraft("Sure — they're $412 and ship free.");
   assert.equal(d.parsedOk, false);
   assert.equal(d.claims.length, 0);
   assert.match(d.answer, /\$412/);
 });
 
-test("a factId copied back WITH its display brackets still resolves", () => {
+test("a factId copied back WITH its display brackets still resolves", async () => {
   // Facts are presented as `[listing:x#price] ...` and the live agent reliably
   // copies that display format into the citation. Left strict, the grounding
   // guard blocked a large fraction of perfectly good replies.
@@ -111,7 +111,7 @@ test("a factId copied back WITH its display brackets still resolves", () => {
   assert.equal(d.claims[0].factId, "listing:x#price");
 });
 
-test("fenced JSON is handled", () => {
+test("fenced JSON is handled", async () => {
   const d = parseDraft('```json\n{"answer":"Yes, $412.00.","claims":[{"text":"$412.00","factId":"listing:x#price"}]}\n```');
   assert.equal(d.parsedOk, true);
   assert.equal(d.claims[0].factId, "listing:x#price");
@@ -119,7 +119,7 @@ test("fenced JSON is handled", () => {
 
 // ── cache ───────────────────────────────────────────────────────────────────
 
-test("the cache key normalises wording but not meaning", () => {
+test("the cache key normalises wording but not meaning", async () => {
   const facts = [{ factId: "listing:x#price", text: "It is $412.00." }];
   assert.equal(
     cacheKey({ question: "how much for the pandas", facts }),
@@ -131,7 +131,7 @@ test("the cache key normalises wording but not meaning", () => {
   );
 });
 
-test("the cache key ignores the ORDER retrieval happened to rank facts in", () => {
+test("the cache key ignores the ORDER retrieval happened to rank facts in", async () => {
   const a = [
     { factId: "policy:returns", text: "30-day returns." },
     { factId: "listing:x#price", text: "It is $412.00." },
@@ -141,7 +141,7 @@ test("the cache key ignores the ORDER retrieval happened to rank facts in", () =
                cacheKey({ question: "whats the return policy", facts: b }));
 });
 
-test("a changed FACT makes the old entry unreachable", () => {
+test("a changed FACT makes the old entry unreachable", async () => {
   const q = "how much for the chicagos";
   const before = [{ factId: "listing:x#price", text: "It is $412.00." }];
   const after = [{ factId: "listing:x#price", text: "It is $370.00." }];
@@ -156,7 +156,7 @@ test("a changed FACT makes the old entry unreachable", () => {
   assert.equal(c.get(k2), null, "the post-markdown key must miss");
 });
 
-test("an unrelated lot taking a bid does NOT invalidate the answer", () => {
+test("an unrelated lot taking a bid does NOT invalidate the answer", async () => {
   // The whole reason the hit rate sat at 0% on a live auction: keying on every
   // listing's VERSION meant one bid on a lot the answer never mentioned changed
   // the key. A return-policy answer does not depend on what the Chicagos sold for.
@@ -172,7 +172,7 @@ test("an unrelated lot taking a bid does NOT invalidate the answer", () => {
   assert.equal(cacheKey({ question: q, facts }), cacheKey({ question: q, facts: sameAfterABid }));
 });
 
-test("a reply that failed a guardrail is never cached", () => {
+test("a reply that failed a guardrail is never cached", async () => {
   const c = new ReplyCache();
   const blocked = { answer: "x", claims: [], evidence: [], guards: [], verdict: "block" as const, confidence: 0.1, repaired: false };
   c.set("k", blocked);
@@ -182,14 +182,14 @@ test("a reply that failed a guardrail is never cached", () => {
 
 // ── autonomy ladder ─────────────────────────────────────────────────────────
 
-test("a blocked draft never auto-sends, at any rung", () => {
+test("a blocked draft never auto-sends, at any rung", async () => {
   for (const level of ["L1_SUGGEST", "L2_ONE_TAP", "L3_AUTO_REPLY", "L4_AUTO_ACT"] as const) {
     const d = decideReply({ level, intent: "shipping", verdict: "block", confidence: 0.99, abstained: false });
     assert.equal(d.kind, "blocked", `${level} must not auto-send a blocked draft`);
   }
 });
 
-test("L3 auto-sends only allow-listed intents above the confidence floor", () => {
+test("L3 auto-sends only allow-listed intents above the confidence floor", async () => {
   const base = { level: "L3_AUTO_REPLY" as const, verdict: "allow" as const, abstained: false };
   assert.equal(decideReply({ ...base, intent: "shipping", confidence: 0.9 }).kind, "auto_send");
   assert.equal(decideReply({ ...base, intent: "returns", confidence: 0.9 }).kind, "auto_send");
@@ -200,13 +200,13 @@ test("L3 auto-sends only allow-listed intents above the confidence floor", () =>
   assert.equal(decideReply({ ...base, intent: "shipping", confidence: 0.5 }).kind, "needs_review");
 });
 
-test("L1 suggests, L0 drops, and abstention always needs a human", () => {
+test("L1 suggests, L0 drops, and abstention always needs a human", async () => {
   assert.equal(decideReply({ level: "L1_SUGGEST", intent: "shipping", verdict: "allow", confidence: 0.9, abstained: false }).kind, "suggest");
   assert.equal(decideReply({ level: "L0_OBSERVE", intent: "shipping", verdict: "allow", confidence: 0.9, abstained: false }).kind, "drop");
   assert.equal(decideReply({ level: "L4_AUTO_ACT", intent: "shipping", verdict: "allow", confidence: 0.99, abstained: true }).kind, "needs_review");
 });
 
-test("actions auto-commit only at L4, only for bounded kinds, only after preflight", () => {
+test("actions auto-commit only at L4, only for bounded kinds, only after preflight", async () => {
   assert.equal(decideAction("L4_AUTO_ACT", "markdown_price", true).kind, "auto_commit");
   assert.equal(decideAction("L4_AUTO_ACT", "adjust_stock", true).kind, "auto_commit");
   // Ending a listing or swapping the pinned lot always needs a human.
@@ -219,63 +219,63 @@ test("actions auto-commit only at L4, only for bounded kinds, only after preflig
 
 // ── proposer ────────────────────────────────────────────────────────────────
 
-test("sustained discount pressure from DISTINCT buyers proposes a markdown", () => {
-  const r = rig();
+test("sustained discount pressure from DISTINCT buyers proposes a markdown", async () => {
+  const r = await rig();
   const p = new ActionProposer(r.repo, { discountThreshold: 3 });
   const now = Date.now();
 
   // One buyer asking three times is not a signal.
   for (let i = 0; i < 3; i++) p.record({ at: now, intent: "discount_request", listingId: PINNED, author: "mia" });
-  assert.equal(p.evaluate().filter((x) => x.kind === "markdown_price").length, 0);
+  assert.equal((await p.evaluate()).filter((x) => x.kind === "markdown_price").length, 0);
 
   // Three different buyers is.
   p.record({ at: now, intent: "discount_request", listingId: PINNED, author: "dre" });
   p.record({ at: now, intent: "discount_request", listingId: PINNED, author: "vic" });
-  const proposals = p.evaluate().filter((x) => x.kind === "markdown_price");
+  const proposals = (await p.evaluate()).filter((x) => x.kind === "markdown_price");
   assert.equal(proposals.length, 1);
   assert.match(proposals[0].rationale, /3 different buyers/);
 });
 
-test("a proposed markdown respects the floor and the discount cap", () => {
-  const r = rig();
-  const listing = r.repo.listing(PINNED)!;
+test("a proposed markdown respects the floor and the discount cap", async () => {
+  const r = await rig();
+  const listing = (await r.repo.listing(PINNED))!;
   const p = new ActionProposer(r.repo, { discountThreshold: 2 });
   const now = Date.now();
   for (const a of ["mia", "dre", "vic", "rae"]) {
     p.record({ at: now, intent: "discount_request", listingId: PINNED, author: a });
   }
-  const md = p.evaluate().find((x) => x.kind === "markdown_price")!;
+  const md = (await p.evaluate()).find((x) => x.kind === "markdown_price")!;
   const next = Number(md.params.newPriceCents);
   assert.ok(next >= listing.floorPriceCents, `${next} must clear the floor ${listing.floorPriceCents}`);
   const off = ((listing.priceCents - next) / listing.priceCents) * 100;
   assert.ok(off <= policy().maxDiscountPct + 0.001, `${off.toFixed(1)}% must respect the cap`);
 });
 
-test("interest in an unpinned lot proposes a swap", () => {
-  const r = rig();
+test("interest in an unpinned lot proposes a swap", async () => {
+  const r = await rig();
   const p = new ActionProposer(r.repo, { swapThreshold: 3 });
   const now = Date.now();
   for (const a of ["mia", "dre", "vic"]) {
     p.record({ at: now, intent: "price_question", listingId: "lst_dunk_panda_11", author: a });
   }
-  const swap = p.evaluate().find((x) => x.kind === "swap_pinned");
+  const swap = (await p.evaluate()).find((x) => x.kind === "swap_pinned");
   assert.ok(swap, "expected a swap_pinned proposal");
   assert.equal(swap!.listingId, "lst_dunk_panda_11");
 });
 
-test("a sold-out lot that chat is still asking about proposes an end", () => {
-  const r = rig();
-  r.repo.mutateListing(PINNED, { qty: 0 });
+test("a sold-out lot that chat is still asking about proposes an end", async () => {
+  const r = await rig();
+  await r.repo.mutateListing(PINNED, { qty: 0 });
   const p = new ActionProposer(r.repo);
   const now = Date.now();
   p.record({ at: now, intent: "availability", listingId: PINNED, author: "mia" });
   p.record({ at: now, intent: "availability", listingId: PINNED, author: "dre" });
-  assert.ok(p.evaluate().some((x) => x.kind === "end_listing"));
+  assert.ok((await p.evaluate()).some((x) => x.kind === "end_listing"));
 });
 
 // ── the two-layer guardrail policy ──────────────────────────────────────────
 
-test("the policy projects into the gateway's content_guardrails shape", () => {
+test("the policy projects into the gateway's content_guardrails shape", async () => {
   const cg = toContentGuardrails();
   assert.equal(cg.enabled, true);
   assert.equal(cg.redact_pii, true);
@@ -285,7 +285,7 @@ test("the policy projects into the gateway's content_guardrails shape", () => {
   assert.ok(cg.never_say.some((s) => s.startsWith("/") && s.endsWith("/")));
 });
 
-test("certificate-conditional rules stay OUT of the agent config", () => {
+test("certificate-conditional rules stay OUT of the agent config", async () => {
   // The gateway's guard is a pure string match with no catalog access, so
   // pushing "100% authentic" there would blanket-block the phrase even on a
   // listing that genuinely carries a certificate. Those rules live app-side.
@@ -294,13 +294,13 @@ test("certificate-conditional rules stay OUT of the agent config", () => {
   assert.ok(policy().neverSay.some((r) => r.unlessCertified), "…but they must still exist app-side");
 });
 
-test("the policy projects into the gateway's action_policy shape", () => {
+test("the policy projects into the gateway's action_policy shape", async () => {
   const ap = toActionPolicy();
   assert.equal(ap.send_email, "approve");
   assert.equal(ap.send_sms, "approve");
 });
 
-test("fact ids never reach the buyer-facing answer", () => {
+test("fact ids never reach the buyer-facing answer", async () => {
   // Observed against the live agent: it wrote the citation inline, producing
   // "Mookie Betts ($92) listing:lst_83de657499aa#price, Rafael Devers ...".
   const d = parseDraft(JSON.stringify({
@@ -316,8 +316,8 @@ test("fact ids never reach the buyer-facing answer", () => {
 
 // ── inventory search: how collectors actually type ──────────────────────────
 
-test("collector shorthand is recognised as an inventory search", () => {
-  const r = rig();
+test("collector shorthand is recognised as an inventory search", async () => {
+  const r = await rig();
   const q = (text: string) =>
     r.retriever.retrieve(text, { pinnedId: PINNED }).slots.inventoryQuery;
 
@@ -331,14 +331,14 @@ test("collector shorthand is recognised as an inventory search", () => {
   assert.equal(q("whats the return policy"), null);
 });
 
-test("a question with no match in the lineup retrieves ONE fact, not a pile", () => {
-  const r = rig();
+test("a question with no match in the lineup retrieves ONE fact, not a pile", async () => {
+  const r = await rig();
   const res = r.retriever.retrieve("any lakers jerseys", { pinnedId: PINNED });
   assert.equal(res.evidence.length, 1, "an honest 'we don't have that' needs only the lineup");
   assert.equal(res.evidence[0].factId, "catalog:lineup");
 });
 
-test("regenerate asks for a DIFFERENT reply, not the same prompt again", () => {
+test("regenerate asks for a DIFFERENT reply, not the same prompt again", async () => {
   // The agent is effectively deterministic: re-running an identical prompt
   // returns identical text, so Regenerate appeared to do nothing at all.
   const base = "=== GROUNDING FACTS ===\n[listing:x#price] It is $10.";
@@ -352,7 +352,7 @@ test("regenerate asks for a DIFFERENT reply, not the same prompt again", () => {
 
 // ── Whissle live-signal distributions ───────────────────────────────────────
 
-test("gateway emotion/intent arrive as distributions, not labels", () => {
+test("gateway emotion/intent arrive as distributions, not labels", async () => {
   // Shape from docs/live-signal-stream.md §4.5. Labels are SCREAMING_SNAKE and
   // namespaced on the wire; an operator should read "happy", not "EMOTION_HAPPY".
   const d = normalizeDistribution({
@@ -378,7 +378,7 @@ test("gateway emotion/intent arrive as distributions, not labels", () => {
   assert.equal(d.flips, 3);
 });
 
-test("a bare label is kept but marked untrusted, never dressed up", () => {
+test("a bare label is kept but marked untrusted, never dressed up", async () => {
   // Older gateways emit a flat label. Synthesising a fake probability for it
   // would present a guess as a measurement.
   const d = normalizeDistribution("EMOTION_NEUTRAL")!;
@@ -388,7 +388,7 @@ test("a bare label is kept but marked untrusted, never dressed up", () => {
   assert.equal(d.topK.length, 1);
 });
 
-test("normalising junk yields nothing rather than a fake reading", () => {
+test("normalising junk yields nothing rather than a fake reading", async () => {
   assert.equal(normalizeDistribution(null), null);
   assert.equal(normalizeDistribution(undefined), null);
   assert.equal(normalizeDistribution(""), null);
@@ -397,12 +397,12 @@ test("normalising junk yields nothing rather than a fake reading", () => {
 
 // ── grounding holes found on a live show ────────────────────────────────────
 
-test("a reply written from the host transcript alone is NOT waved through", () => {
+test("a reply written from the host transcript alone is NOT waved through", async () => {
   // Seen live, at confidence 0.10 with a green grounding pill — unverified AND
   // presented as verified, which is the worst combination available. It carried
   // no digits and no catalog keywords, so the old FACTUAL test never fired.
-  const r = rig();
-  const res = judge(
+  const r = await rig();
+  const res = await judge(
     r,
     "what's up next",
     "Next up I'm diving into the rarity and significance of a historic coin, as I just discussed its volume and surviving examples.",
@@ -412,39 +412,39 @@ test("a reply written from the host transcript alone is NOT waved through", () =
   assert.equal(g.verdict, "revise", `expected revise, got ${g.verdict}`);
 });
 
-test("a greeting or an explicit deferral may still go uncited", () => {
-  const r = rig();
+test("a greeting or an explicit deferral may still go uncited", async () => {
+  const r = await rig();
   for (const text of [
     "Right here — what can I get you?",
     "The host will cover that shortly.",
     "Let me check on that for you.",
   ]) {
-    const g = judge(r, "you there?", text, []).guards.find((x) => x.guard === "claim_grounding")!;
+    const g = (await judge(r, "you there?", text, [])).guards.find((x) => x.guard === "claim_grounding")!;
     assert.equal(g.verdict, "allow", `"${text}" should need no citation, got ${g.verdict}`);
   }
 });
 
-test("a generic colour word alone does not match an item", () => {
+test("a generic colour word alone does not match an item", async () => {
   // "Do you have any $2.50 incuse Indian gold coin" matched an Ivan Rodriguez
   // card, because "gold" appears in "Topps Gold".
-  const r = rig();
+  const r = await rig();
   const res = r.retriever.retrieve("Do you have any $2.50 incuse Indian gold coin", { pinnedId: PINNED });
   const listingChips = res.evidence.filter((e) => e.factId.startsWith("listing:"));
   assert.equal(listingChips.length, 0, `matched on a generic word: ${listingChips.map((e) => e.factId).join(", ")}`);
   assert.equal(res.evidence[0]?.factId, "catalog:lineup");
 });
 
-test("item descriptions survive a catalog that is not sneaker-shaped", () => {
-  const r = rig();
+test("item descriptions survive a catalog that is not sneaker-shaped", async () => {
+  const r = await rig();
   // brand === the leading word of model, and no size — the card shape.
-  r.repo.insertListing({
+  await r.repo.insertListing({
     sku: "SS-PUDGE-92", title: "Ivan Rodriguez 1992 Topps Gold #78", shortName: "Pudge 92 Gold",
     brand: "Topps", model: "Topps Gold", colorway: "Ivan Rodriguez", size: "",
     condition: "USED", priceCents: 2200, floorPriceCents: 1800, costCents: 1400, qty: 2,
     state: "queued", shippingProfile: "us-standard", authenticated: false, certId: null,
     description: "1992 Topps Gold parallel.", imageUrl: "",
   });
-  r.retriever.rebuild();
+  await r.retriever.rebuild();
 
   const facts = r.retriever.retrieve("any pudge", { pinnedId: PINNED }).facts;
   const ident = facts.find((f) => f.field === "identity" && f.text.includes("Ivan Rodriguez"));

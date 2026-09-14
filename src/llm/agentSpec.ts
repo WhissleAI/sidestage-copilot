@@ -85,9 +85,9 @@ export function guardrailBody() {
 /** The catalog knowledge document. Stable facts only — anything volatile
  *  (price, quantity, pinned state) is injected per turn instead, because a KB
  *  document cannot be re-indexed fast enough to be trusted mid-show. */
-export function catalogDoc(repo: Repo): string {
+export async function catalogDoc(repo: Repo): Promise<string> {
   const lines = ["# Catalog — stable item facts", "", "> Prices and quantities are NOT in this document.", "> They change during a show and are supplied with each turn.", ""];
-  for (const l of repo.listings()) {
+  for (const l of await repo.listings()) {
     lines.push(
       `## ${l.title}`,
       `- SKU: ${l.sku}`,
@@ -107,10 +107,10 @@ export function catalogDoc(repo: Repo): string {
 }
 
 /** The policy knowledge document. */
-export function policyDoc(repo: Repo): string {
+export async function policyDoc(repo: Repo): Promise<string> {
   const lines = ["# Store policies", ""];
-  for (const p of repo.policies()) lines.push(`## ${p.title} (${p.topic})`, "", p.body, "");
-  const qa = repo.qa();
+  for (const p of await repo.policies()) lines.push(`## ${p.title} (${p.topic})`, "", p.body, "");
+  const qa = await repo.qa();
   if (qa.length) {
     lines.push("# Frequently asked in chat", "");
     for (const q of qa) lines.push(`**${q.question}?** ${q.answer}`, "");

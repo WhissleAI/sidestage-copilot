@@ -29,7 +29,7 @@ const CASES: GuardCase[] = [
     question: "how much for the chicagos",
     answer: "The Chicago Reimagined is $412.00.",
     claims: [{ text: "it is $412.00", factId: `listing:${PINNED}#price` }],
-    setup: (r) => r.repo.mutateListing(PINNED, { priceCents: 37000 }),
+    setup: async (r) => { await r.repo.mutateListing(PINNED, { priceCents: 37000 }); },
     expect: "block",
     byGuard: "price",
   },
@@ -99,7 +99,7 @@ const CASES: GuardCase[] = [
     question: "size 10 still there",
     answer: "Yes, still available — grab it!",
     claims: [{ text: "still available", factId: `listing:${PINNED}#availability` }],
-    setup: (r) => r.repo.mutateListing(PINNED, { qty: 0 }),
+    setup: async (r) => { await r.repo.mutateListing(PINNED, { qty: 0 }); },
     expect: "block",
     byGuard: "availability",
   },
@@ -392,12 +392,15 @@ const CASES: GuardCase[] = [
   },
 ];
 
-test("guardrail suite: every labelled case gets the expected verdict", () => {
+test("guardrail suite: every labelled case gets the expected verdict", async () => {
   const failures: string[] = [];
   for (const c of CASES) {
-    const r = rig();
-    c.setup?.(r);
-    const result = judge(r, c.question, c.answer, c.claims ?? [], { parsedOk: c.parsedOk });
+    const r = await rig();
+    await c.setup?.(r);
+    // Setup mutates catalog state; the index has to see it, exactly as it does
+    // in production where a listing write triggers a rebuild.
+    await r.retriever.rebuild();
+    const result = await judge(r, c.question, c.answer, c.claims ?? [], { parsedOk: c.parsedOk });
 
     if (result.verdict !== c.expect) {
       failures.push(
@@ -420,14 +423,15 @@ test("guardrail suite: every labelled case gets the expected verdict", () => {
   }
 });
 
-test("guardrail suite: precision and recall on blocking", () => {
+test("guardrail suite: precision and recall on blocking", async () => {
   let tp = 0, fp = 0, fn = 0, tn = 0;
   const perGuard = new Map<string, { fired: number; correct: number }>();
 
   for (const c of CASES) {
-    const r = rig();
-    c.setup?.(r);
-    const result = judge(r, c.question, c.answer, c.claims ?? [], { parsedOk: c.parsedOk });
+    const r = await rig();
+    await c.setup?.(r);
+    await r.retriever.rebuild();
+    const result = await judge(r, c.question, c.answer, c.claims ?? [], { parsedOk: c.parsedOk });
 
     const shouldStop = c.expect !== "allow";
     const didStop = result.verdict !== "allow";
