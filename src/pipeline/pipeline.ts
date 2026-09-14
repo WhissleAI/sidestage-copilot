@@ -32,7 +32,7 @@ import { Composer } from "../compose/composer.js";
 import { Retriever } from "../retrieval/retriever.js";
 import type { ResearchService } from "../research/research.js";
 import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
-import { admit, classify, RateLimiter } from "../ingest/classify.js";
+import { admit, classify, classifySpeechAct, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
 import { LatencyTracker, SpanTimer } from "../latency/spans.js";
@@ -96,12 +96,15 @@ export class Pipeline {
   async ingest(incoming: IncomingMessage): Promise<ChatMessage> {
     const timer = new SpanTimer();
     const intent = classify(incoming.text);
+    // The second axis: what KIND of utterance this is, on the same vocabulary
+    // Whissle measures the host's audio on. Both are shown to the operator.
+    const speechAct = classifySpeechAct(incoming.text);
     timer.mark("classify");
 
     const show = await this.d.repo.show();
     const level = show.autonomyLevel;
     const observing = level === "L0_OBSERVE";
-    const decision = admit(incoming.text, intent, observing ? false : this.rate.tryAdmit());
+    const decision = admit(incoming.text, intent, observing ? false : this.rate.tryAdmit(), speechAct);
     timer.mark("admit");
 
     const msg: ChatMessage = {
@@ -110,6 +113,7 @@ export class Pipeline {
       text: incoming.text,
       at: new Date().toISOString(),
       intent,
+      speechAct,
       admitted: decision.admitted,
       ...(decision.reason ? { dropReason: observing ? "autonomy is L0 — observing only" : decision.reason } : {}),
     };

@@ -2,9 +2,9 @@
 // that is trivially easy to make and surprisingly hard to keep — so each one
 // forces a specific failure and asserts on the state of BOTH systems afterwards.
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { PINNED, rig } from "./helpers.js";
+import { PINNED, rig, cleanup } from "./helpers.js";
 import { hashEntry, GENESIS } from "../src/actions/audit.js";
 import { preflight, idempotencyKey } from "../src/actions/preflight.js";
 import { showBudgetContext } from "../src/actions/preflight.js";
@@ -211,3 +211,8 @@ test("an action whose preflight failed can never be committed", async () => {
   assert.equal(result.status, "failed");
   assert.equal((await repo.listing(PINNED))!.priceCents, before.priceCents);
 });
+
+// Every rig() creates a real show in the real database. Without this the suite
+// leaked one show plus its whole catalog per test — 809 shows and 6,488 listings
+// before anyone looked.
+after(cleanup);

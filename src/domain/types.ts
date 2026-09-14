@@ -9,6 +9,18 @@ export type ChatIntent =
   | "price_question" | "availability" | "sizing" | "shipping" | "returns"
   | "authenticity" | "comparison" | "discount_request" | "hype" | "other";
 
+/**
+ * What KIND of utterance a comment is — the speech act, not the topic.
+ *
+ * Deliberately the same vocabulary Whissle's metadata head uses for the HOST's
+ * audio, so the two are comparable on one axis: the host informing and a buyer
+ * querying are the same shape of fact about a conversation, measured two
+ * different ways. Without this the classifier had only a topic axis, and a
+ * topic cue fires just as happily on a statement — "Offer from Lesbie 👆"
+ * matched `offer` and became a discount QUESTION nobody asked.
+ */
+export type SpeechAct = "query" | "command" | "inform" | "greeting" | "wish" | "other";
+
 export type GuardName = "price" | "availability" | "policy" | "claim_grounding" | "tone" | "pii";
 export type Verdict = "allow" | "revise" | "block";
 
@@ -64,7 +76,10 @@ export interface ChatMessage {
   author: string;
   text: string;
   at: string;
+  /** WHAT the comment is about. */
   intent: ChatIntent | null;
+  /** WHAT KIND of utterance it is — same axis as the host's voice metadata. */
+  speechAct: SpeechAct | null;
   /** Did it pass the relevance gate + rate cap and become a candidate for reply? */
   admitted: boolean;
   dropReason?: string;

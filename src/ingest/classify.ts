@@ -11,7 +11,7 @@
 // robotic. Everything is still shown to the seller in the ticker; only genuine
 // questions become proposals.
 
-import type { ChatIntent } from "../domain/types.js";
+import type { ChatIntent, SpeechAct } from "../domain/types.js";
 
 const CUES: [ChatIntent, RegExp][] = [
   ["discount_request", /\b(discount\w*|deal|cheap\w*|lower|lowest|can (?:you|u) do|would (?:you|u) take|take \$?\d|negotiat\w*|obo|bundle|best (?:price|offer)|offer\w*)\b/i],
@@ -55,32 +55,91 @@ export function isHype(text: string): boolean {
 export interface AdmissionResult {
   admitted: boolean;
   intent: ChatIntent;
+  speechAct: SpeechAct;
   reason?: string;
 }
 
 /** Should this message become a reply proposal?
  *  `rateOk` is supplied by the caller's token bucket so that the decision, and
  *  the reason it was made, are reported together. */
-export function admit(text: string, intent: ChatIntent, rateOk: boolean): AdmissionResult {
+/**
+ * The speech act of a comment, on the same axis Whissle measures the host's
+ * audio on.
+ *
+ * Two axes, because they answer different questions and the topic axis alone
+ * gets this wrong in a specific, visible way: a topic cue matches the WORDS, so
+ * "Offer from Lesbie 👆" — one buyer relaying another's offer to the host —
+ * matched `offer`, was classified `discount_request`, and became a reply to a
+ * question nobody had asked. Cue order matters: an explicit question beats
+ * everything, because "can you do $850?" is a query whatever else it contains.
+ */
+const SPEECH_ACTS: [SpeechAct, RegExp][] = [
+  // A direct request to DO something. Checked before `query` because "can you
+  // hold it" is a command wearing a question's clothes, and the distinction is
+  // what makes it worth answering.
+  ["command", /\b(hold (?:it|this|that|one)|save (?:it|one|me)|put me down|claim(?:ing)? (?:it|this)|dm me|invoice me|ship (?:it|me)|add me|count me in|i'?ll take (?:it|that|this)|sold to me)\b/i],
+  ["query", /(\?|^(?:what|which|where|when|why|who|how|is|are|do|does|did|can|could|would|will|any|anyone|got|have|has|whats|what'?s|hows|how'?s)\b)/i],
+  ["greeting", /^(?:hi|hey|hello|yo|sup|gm|good (?:morning|evening|afternoon)|first time|just (?:got|joined) here)\b/i],
+  // A want with no question in it. "need these", "want that one" — real demand
+  // signal for the action proposer, but not something to reply to.
+  ["wish", /\b(i (?:need|want|wish)|need (?:these|those|that|this)|want (?:these|those|that|this)|wish i|gotta have)\b/i],
+];
+
+export function classifySpeechAct(text: string): SpeechAct {
+  const t = (text || "").trim();
+  if (!t) return "other";
+  for (const [act, re] of SPEECH_ACTS) if (re.test(t)) return act;
+  // Everything else is someone saying something. The dominant case in live
+  // chat by volume, and the one that must not become a reply.
+  return "inform";
+}
+
+export function admit(
+  text: string,
+  intent: ChatIntent,
+  rateOk: boolean,
+  speechAct: SpeechAct = classifySpeechAct(text),
+): AdmissionResult {
   const t = (text || "").trim();
 
-  // Reaction is checked before length: the operator console shows this reason on
-  // the dropped row, and "reaction, not a question" tells them more about a "W"
-  // than "too short" does.
-  if (intent === "hype") return { admitted: false, intent, reason: "reaction, not a question" };
-  if (t.length < 3) return { admitted: false, intent, reason: "too short to be a question" };
-  if (t.length > 500) return { admitted: false, intent, reason: "too long for a live-chat reply" };
+  // Reaction is checked before length, and stays there: the operator console
+  // shows this reason on the dropped row, and "reaction, not a question" tells
+  // them more about a "W" than "too short" does. A COMMAND is exempt — "i'll
+  // take it" reads as pure hype to the topic cues and is the single most
+  // actionable thing a buyer says all show.
+  // A command is answerable whatever its topic: "i'll take it" reads as pure
+  // hype to the cues and is the single most actionable thing a buyer says.
+  if (speechAct !== "command") {
+    // The speech act names the reason when it has something specific to say,
+    // because "a greeting" is more use to the operator than "reaction".
+    if (speechAct === "greeting") {
+      return { admitted: false, intent, speechAct, reason: "a greeting, not a question" };
+    }
+    if (speechAct === "wish") {
+      // Still a demand signal the action proposer wants — just not a reply.
+      return { admitted: false, intent, speechAct, reason: "wants the item, but asked nothing" };
+    }
+    if (intent === "hype") {
+      return { admitted: false, intent, speechAct, reason: "reaction, not a question" };
+    }
+  }
+  if (t.length < 3) return { admitted: false, intent, speechAct, reason: "too short to be a question" };
+  if (t.length > 500) return { admitted: false, intent, speechAct, reason: "too long for a live-chat reply" };
 
-  // A statement with no question mark and no actionable intent is chat, not a
-  // question. "these are clean" does not need an answer.
-  const actionable = intent !== "other";
-  if (!actionable && !t.includes("?") && !INTERROGATIVE.test(t)) {
-    return { admitted: false, intent, reason: "no question and no recognised intent" };
+  // The speech act is decided FIRST, because it is the stronger signal about
+  // whether a comment wants an answer at all — and because the topic axis gets
+  // this backwards in both directions. "i'll take it" is pure hype by topic
+  // cues and is the most actionable thing a buyer can say; "Offer from Lesbie"
+  // is a discount request by topic cues and is someone talking to the host.
+  //
+  // A command is answerable whatever its topic.
+  if (speechAct !== "command" && speechAct !== "query") {
+    return { admitted: false, intent, speechAct, reason: "a statement, not a question" };
   }
 
-  if (!rateOk) return { admitted: false, intent, reason: "proposal rate cap reached" };
+  if (!rateOk) return { admitted: false, intent, speechAct, reason: "proposal rate cap reached" };
 
-  return { admitted: true, intent };
+  return { admitted: true, intent, speechAct };
 }
 
 /** Refilling token bucket. Caps how many proposals a burst of chat can create,

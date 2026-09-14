@@ -34,19 +34,39 @@ const MAX_FRAME_CHARS = 400_000;
  *  but a client's throttle is a request, not a guarantee. */
 const VISUAL_MIN_GAP_MS = 8_000;
 const VISUAL_QUESTION =
-  "Look at this frame from the seller's live show. In ONE short line, say which item is " +
-  "being held up or shown on screen, using the catalog name if you recognise it. If no " +
-  "item is clearly visible, answer exactly: nothing clear.";
+  "Look at this frame from the seller's live show. In ONE short line of at most 12 words, " +
+  "name the item being held up or shown, using the catalog name if you recognise it. " +
+  "Do not describe the photo, the lighting or the background. If no item is clearly " +
+  "visible, answer exactly: nothing clear.";
+
+/**
+ * Phrases that mean the model is describing the PICTURE rather than the item.
+ *
+ * A live stream between lots produces a dark or empty frame, and asked to
+ * describe it the model returns a paragraph about how dark it is — which then
+ * became "on camera: I'm looking at the image, but it appears to be completely
+ * black…" in the seller's context, once a minute. The client now skips blank
+ * frames before they cost a call; this is the second line of defence, because
+ * "answer exactly X" is a request to a model, not a guarantee from one.
+ */
+const NOT_AN_ITEM =
+  /(nothing clear|no visible|completely black|very dark|appears to be (?:black|dark|blank|empty)|cannot (?:see|make out)|can'?t (?:see|make out)|unable to|no (?:item|object|product)s? (?:is |are )?(?:visible|clear)|i'?m looking at the image|the image (?:is|appears)|blurry|too dark)/i;
 const lastVisualRead = new Map<string, number>();
 
 /** The agent replies in the reply JSON shape; take the answer, drop the rest. */
-function readingText(raw: string): string {
+export function readingText(raw: string): string {
   const obj = extractJsonObject(raw);
   const answer = obj && typeof (obj as { answer?: unknown }).answer === "string"
     ? ((obj as { answer: string }).answer)
     : raw;
   const t = answer.trim();
-  if (!t || /^nothing clear\.?$/i.test(t)) return "";
+  if (!t) return "";
+  // Matched anywhere, not anchored: the model appends "nothing clear" to a
+  // sentence at least as often as it answers with it, and an anchored test let
+  // the whole paragraph through.
+  if (NOT_AN_ITEM.test(t)) return "";
+  // A reading this long is a description, not an item name.
+  if (t.length > 120) return "";
   return t;
 }
 

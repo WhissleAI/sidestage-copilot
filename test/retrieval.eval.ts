@@ -16,9 +16,9 @@
 // is given, so a gold fact that ranks fifth out of eight is much weaker grounding
 // than one that ranks first.
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { rig, PINNED } from "./helpers.js";
+import { rig, PINNED, cleanup } from "./helpers.js";
 import type { RetrievalMode } from "../src/retrieval/retriever.js";
 
 interface Labelled {
@@ -232,3 +232,8 @@ test("retrieval: a markdown is visible to the very next question", async () => {
   assert.equal(updated.numericCents, 37000);
   assert.equal(updated.listingVersion, 2, "the fact must carry the NEW version");
 });
+
+// Every rig() creates a real show in the real database. Without this the suite
+// leaked one show plus its whole catalog per test — 809 shows and 6,488 listings
+// before anyone looked.
+after(cleanup);

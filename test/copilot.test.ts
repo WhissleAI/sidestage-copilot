@@ -1,13 +1,14 @@
 // Unit tests for the pieces the two eval suites do not cover: the admission
 // gate, the version-keyed cache, the autonomy ladder, and the action proposer.
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { readingText } from "../src/api/routes.js";
 import { ShowContextEngine } from "../src/ingest/showContext.js";
 import { buildContextBlock } from "../src/compose/prompts.js";
 import type { ShowContext, SignalDistribution, ShowState } from "../src/domain/types.js";
-import { rig, judge, PINNED } from "./helpers.js";
-import { admit, classify, isHype, RateLimiter } from "../src/ingest/classify.js";
+import { rig, judge, PINNED, cleanup } from "./helpers.js";
+import { admit, classify, isHype, RateLimiter, classifySpeechAct } from "../src/ingest/classify.js";
 import { cacheKey, ReplyCache } from "../src/latency/cache.js";
 import { decideAction, decideReply } from "../src/autonomy/ladder.js";
 import { ActionProposer } from "../src/actions/proposer.js";
@@ -52,7 +53,9 @@ test("a question without a question mark is still a question", async () => {
 test("the admission gate reports WHY it dropped a message", async () => {
   assert.match(admit("W", "hype", true).reason!, /reaction/);
   assert.match(admit("ok", "other", true).reason!, /too short/);
-  assert.match(admit("these are clean", "other", true).reason!, /no question/);
+  // The reason now names WHICH axis refused it, which is what the operator
+  // needs in order to disagree with it.
+  assert.match(admit("these are clean", "other", true).reason!, /statement, not a question/);
   assert.match(admit("how much for the pandas", "price_question", false).reason!, /rate cap/);
 });
 
@@ -597,3 +600,86 @@ const DEMO_SHOW: ShowState = {
   autonomyLevel: "L1_SUGGEST", undoWindowS: 90, source: "simulated", externalId: null,
   readOnly: false, status: "live",
 };
+
+test("a frame reading that describes the PICTURE is discarded, not stored", async () => {
+  // Observed live: between lots the stream goes dark, and the model answers with
+  // a paragraph about the darkness ending in "nothing clear". An anchored test
+  // let the whole thing through and it became the seller's show context.
+  for (const junk of [
+    "nothing clear",
+    "I'm looking at the image, but it appears to be completely black or very dark with no visible content or items. nothing clear",
+    "The image is too dark to make out any product.",
+    "I cannot see any item in this frame.",
+  ]) {
+    assert.equal(readingText(junk), "", `should have discarded: ${junk.slice(0, 40)}`);
+  }
+  // A real reading survives, including when wrapped in the reply JSON shape.
+  assert.equal(readingText("a Griffey rookie slab held to camera"), "a Griffey rookie slab held to camera");
+  assert.equal(readingText('{"answer":"PSA 10 Jeter Topps Chrome","claims":[]}'), "PSA 10 Jeter Topps Chrome");
+});
+
+// Every rig() creates a real show in the real database. Without this the suite
+// leaked one show plus its whole catalog per test — 809 shows and 6,488 listings
+// before anyone looked.
+after(cleanup);
+
+// ── two axes: what it is ABOUT, and what KIND of utterance it is ───────────
+//
+// Observed on a live show. The topic axis matches WORDS, so a statement whose
+// words carry a topic cue was admitted as a question — and the proposal queue
+// filled with 0.10-confidence "the host will get to that shortly" replies to
+// things nobody had asked. The speech-act axis is the fix, and it uses the same
+// vocabulary Whissle's metadata head uses for the host's audio so the two are
+// comparable.
+
+test("a statement carrying a topic cue is not a question", async () => {
+  // All four are REAL comments from a live Bonkers Cards show.
+  for (const [text, why] of [
+    ["Offer from Lesbie 👆", "relaying someone else's offer"],
+    ["Only 7 PSA 10s", "stating a fact about the population"],
+    ["Good call on the Griffeys G", "praise"],
+    ["Steal right there", "commentary on a price"],
+  ] as const) {
+    const act = classifySpeechAct(text);
+    assert.ok(act === "inform" || act === "other", `"${text}" (${why}) should be a statement, got ${act}`);
+    const d = admit(text, classify(text), true);
+    assert.equal(d.admitted, false, `"${text}" should not become a proposal`);
+  }
+});
+
+test("a real question still gets through, on either axis", async () => {
+  for (const text of [
+    "how much for the Mantle",
+    "do you have a shop ?",
+    "Probably no 10's?",
+    "1900 Jordan?",
+    "whats the lowest",
+  ]) {
+    assert.equal(classifySpeechAct(text), "query", `"${text}" should be a query`);
+    assert.equal(admit(text, classify(text), true).admitted, true, `"${text}" should be admitted`);
+  }
+});
+
+test("a command is answerable even without a question mark", async () => {
+  // "hold it for me" asks for an action, not information. Dropping it as a
+  // statement would lose the most operationally useful comment in the room.
+  assert.equal(classifySpeechAct("can you hold it for me til friday"), "command");
+  assert.equal(classifySpeechAct("i'll take it"), "command");
+  assert.equal(admit("i'll take it", classify("i'll take it"), true).admitted, true);
+});
+
+test("a wish is a demand signal, not a reply", async () => {
+  // The action proposer wants to know three people want this lot; none of them
+  // asked the copilot anything.
+  const d = admit("i need these", classify("i need these"), true);
+  assert.equal(d.speechAct, "wish");
+  assert.equal(d.admitted, false);
+  assert.match(d.reason!, /asked nothing/);
+});
+
+test("the drop reason names which axis refused it", async () => {
+  // The operator sees this on the dropped row. "a statement, not a question"
+  // tells them something; "no recognised intent" told them nothing.
+  assert.match(admit("hey everyone", classify("hey everyone"), true).reason!, /greeting/);
+  assert.match(admit("Offer from Lesbie", classify("Offer from Lesbie"), true).reason!, /statement/);
+});

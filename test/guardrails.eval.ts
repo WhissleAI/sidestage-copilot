@@ -11,9 +11,9 @@
 // The suite reports precision and recall on blocking, per guard, and asserts
 // both a floor on recall and a ceiling on false positives.
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { rig, judge, PINNED, type GuardCase } from "./helpers.js";
+import { rig, judge, PINNED, type GuardCase, cleanup } from "./helpers.js";
 
 const CASES: GuardCase[] = [
   // ══ price ════════════════════════════════════════════════════════════════
@@ -466,3 +466,8 @@ test("guardrail suite: precision and recall on blocking", async () => {
   assert.ok(recall >= 0.95, `recall ${recall.toFixed(3)} is below the 0.95 floor`);
   assert.ok(precision >= 0.9, `precision ${precision.toFixed(3)} is below the 0.90 floor`);
 });
+
+// Every rig() creates a real show in the real database. Without this the suite
+// leaked one show plus its whole catalog per test — 809 shows and 6,488 listings
+// before anyone looked.
+after(cleanup);

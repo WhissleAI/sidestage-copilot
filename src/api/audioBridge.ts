@@ -79,7 +79,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 <script>
 (function () {
   var API = location.origin;
-  var room = null, stream = null, visualTimer = null;
+  var room = null, stream = null, visualTimer = null, visualEl = null;
   /** How often a keyframe is offered to the copilot. Lots change on the order of
    *  a minute; the server throttles again at 8s regardless. */
   var VISUAL_EVERY_MS = 12000;
@@ -220,9 +220,20 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
    * rather than a guarantee.
    */
   function startVisual(showId, track) {
+    // The element has to be IN the document and actually PLAYING. A detached,
+    // never-played <video> reports a size but Chrome does not decode into it, so
+    // every drawImage() produced a black canvas — and the copilot dutifully
+    // reported "completely black, nothing clear" into the show context once a
+    // minute. Off-screen rather than hidden: display:none stops decoding too.
     var el2 = document.createElement("video");
     el2.muted = true; el2.playsInline = true; el2.autoplay = true;
+    el2.setAttribute("aria-hidden", "true");
+    el2.style.cssText = "position:fixed;left:-10000px;top:0;width:320px;height:180px;opacity:0.01;pointer-events:none";
+    document.body.appendChild(el2);
     el2.srcObject = new MediaStream([track]);
+    var playing = el2.play();
+    if (playing && playing.catch) playing.catch(function (e) { log("video play blocked: " + e.message); });
+    visualEl = el2;
     var canvas = document.createElement("canvas");
 
     visualTimer = setInterval(async function () {
@@ -234,7 +245,15 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
         var scale = Math.min(1, 640 / Math.max(w, h));
         canvas.width = Math.round(w * scale);
         canvas.height = Math.round(h * scale);
-        canvas.getContext("2d").drawImage(el2, 0, 0, canvas.width, canvas.height);
+        var cx = canvas.getContext("2d");
+        cx.drawImage(el2, 0, 0, canvas.width, canvas.height);
+
+        // Do not pay a vision call for a frame with nothing in it. A stream
+        // between lots, a paused tab or a still-warming decoder all produce a
+        // near-black frame, and asking a model to describe one gets back a
+        // paragraph about how dark it is — which then becomes "show context".
+        if (isBlank(cx, canvas)) { return; }
+
         var frame = canvas.toDataURL("image/jpeg", 0.7);
 
         var r = await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/visual/frame", {
@@ -252,8 +271,36 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
     log("watching the show's video, one frame every " + (VISUAL_EVERY_MS / 1000) + "s");
   }
 
+  /**
+   * Is this frame worth a model call?
+   *
+   * Mean luma plus spread, on a coarse sample. Mean alone calls a flat grey
+   * slate "content"; spread alone passes noise. Both have to clear the floor.
+   */
+  function isBlank(cx, canvas) {
+    try {
+      var d = cx.getImageData(0, 0, canvas.width, canvas.height).data;
+      var n = 0, sum = 0, sumSq = 0;
+      for (var i = 0; i < d.length; i += 64) {  // every 16th pixel
+        var y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        sum += y; sumSq += y * y; n++;
+      }
+      if (!n) return true;
+      var mean = sum / n;
+      var sd = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+      if (mean < 12 || sd < 6) {
+        log("frame skipped: nothing on screen (luma " + mean.toFixed(0) + ", spread " + sd.toFixed(0) + ")");
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;  // a tainted canvas is not a reason to stop looking
+    }
+  }
+
   el("stop").onclick = async function () {
     if (visualTimer) { clearInterval(visualTimer); visualTimer = null; }
+    if (visualEl) { try { visualEl.remove(); } catch (e) {} visualEl = null; }
     try { if (room) await room.disconnect(); } catch (e) {}
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     room = null; stream = null;
