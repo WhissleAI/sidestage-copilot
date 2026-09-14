@@ -8,6 +8,7 @@
 import { config } from "../config.js";
 import type { EventHub, EventName } from "../api/hub.js";
 import { ShowRuntime } from "./runtime.js";
+import type { ShowReport } from "./sessionRecord.js";
 import { parseEventId } from "../ingest/ebaylive/discovery.js";
 
 export const DEMO_SHOW_ID = "show_ep42";
@@ -109,14 +110,19 @@ export class ShowRegistry {
     return rt;
   }
 
-  async detach(showId: string): Promise<void> {
+  async detach(showId: string): Promise<ShowReport | null> {
     if (showId === DEMO_SHOW_ID) throw new Error("the demo show cannot be detached");
     const rt = this.runtimes.get(showId);
-    if (!rt) return;
+    if (!rt) return null;
+    // The report is built BEFORE teardown, while the show row still says what
+    // it was, and returned so the console can show it instead of dropping the
+    // operator back to an empty launcher with nothing to read.
+    const report = await rt.finishSession();
     this.runtimes.delete(showId);
     if (this.activeShowId === showId) this.activeShowId = DEMO_SHOW_ID;
     await rt.close().catch(() => {});
     this.hub.emit("shows", await this.list());
+    return report;
   }
 
   get active(): string {

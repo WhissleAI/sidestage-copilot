@@ -16,7 +16,7 @@ import { readFileSync, readdirSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.js";
 import type { Repo } from "../domain/repo.js";
-import type { PolicyClause } from "../domain/types.js";
+import type { Comp, PolicyClause } from "../domain/types.js";
 import { importCatalog, type CatalogItem, type ImportResult } from "./catalogImport.js";
 
 export interface SellerProfile {
@@ -35,6 +35,15 @@ export interface Catalog {
   seller: SellerProfile;
   policies: PolicyClause[];
   items: CatalogItem[];
+  /**
+   * Recent comparable sales, keyed by SKU — the grounding for product research.
+   *
+   * Without these `ResearchService` has nothing to retrieve, so "is that a good
+   * price?" abstains on every real catalog and the comps evidence only ever
+   * appeared on the seeded demo. A catalog that ships market data is what makes
+   * the research path real rather than demonstrated.
+   */
+  comps?: (Comp & { sku: string })[];
 }
 
 export interface CatalogSummary {
@@ -122,6 +131,7 @@ export interface ApplyResult extends ImportResult {
 export async function applyCatalog(repo: Repo, catalog: Catalog): Promise<ApplyResult> {
   const imported = await importCatalog(repo, catalog.items);
   for (const p of catalog.policies) await repo.upsertPolicy(p);
+  for (const c of catalog.comps ?? []) await repo.insertComp(c);
 
   await repo.updateShow({ sellerHandle: catalog.seller.handle });
 

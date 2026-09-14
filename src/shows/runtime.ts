@@ -22,6 +22,7 @@ import { ActionProposer } from "../actions/proposer.js";
 import { MockMarketplace } from "../actions/marketplace/mock.js";
 import type { RemoteListing } from "../actions/marketplace/port.js";
 import { ResearchService } from "../research/research.js";
+import { SessionRecord, buildReport, type ShowReport } from "./sessionRecord.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
 import { Pipeline } from "../pipeline/pipeline.js";
 import { WhissleClient } from "../llm/whissle.js";
@@ -54,6 +55,8 @@ export class ShowRuntime {
   readonly executor: ActionExecutor;
   readonly proposer: ActionProposer;
   readonly research: ResearchService;
+  /** Persists chat + proposals so a report can be built after the fact. */
+  readonly record: SessionRecord;
   readonly showContext: ShowContextEngine;
   readonly pipeline: Pipeline;
   readonly market: MockMarketplace;
@@ -120,6 +123,7 @@ export class ShowRuntime {
 
     this.proposer = new ActionProposer(this.repo);
     this.research = new ResearchService(this.repo);
+    this.record = new SessionRecord(this.db, o.showId);
 
     this.showContext = new ShowContextEngine({
       llm: this.llm,
@@ -140,8 +144,15 @@ export class ShowRuntime {
       showContext: this.showContext,
       audit: this.audit,
       events: {
-        onChat: (m) => emit("chat", m),
-        onProposal: (p) => emit("proposal", p),
+        onChat: (m) => {
+          emit("chat", m);
+          // Fire-and-forget: a buyer's question must never wait on a write.
+          this.record.recordChat(m);
+        },
+        onProposal: (p) => {
+          emit("proposal", p);
+          this.record.recordProposal(p);
+        },
         onMetrics: (m) => emit("metrics", m),
         onListingChanged: (id) => {
           void this.repo.listing(id).then((l) => { if (l) emit("listing", l); });
@@ -334,6 +345,32 @@ export class ShowRuntime {
     await this.watcher?.stop().catch(() => {});
     this.watcher = null;
     this.started = false;
+  }
+
+  /**
+   * Close the session and leave a report behind.
+   *
+   * Generated once, at the end, and stored — a statement about a show that has
+   * finished, whose numbers must not drift afterwards. Built from the persisted
+   * chat and proposals rather than from memory, which is exactly why those are
+   * persisted at all.
+   */
+  async finishSession(): Promise<ShowReport | null> {
+    try {
+      const chain = await this.audit.verify();
+      const report = await buildReport(this.db, this.showId, { auditChain: chain });
+      await this.db.query(
+        `INSERT INTO show_reports (show_id, report) VALUES ($1, $2::jsonb)
+         ON CONFLICT (show_id) DO UPDATE SET report = EXCLUDED.report, generated_at = now()`,
+        [this.showId, JSON.stringify(report)],
+      );
+      await this.db.query("UPDATE shows SET status = 'ended' WHERE id = $1", [this.showId]);
+      return report;
+    } catch (e) {
+      // A report that cannot be built must not stop a session ending.
+      console.warn(`  could not build report for ${this.showId}: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /** The pool is process-wide now, not a file this show owns, so closing a

@@ -11,6 +11,8 @@ import { LADDER } from "../autonomy/ladder.js";
 import { discoverLiveShows } from "../ingest/ebaylive/discovery.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
 import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
+import { checkReadiness } from "../shows/readiness.js";
+import type { ShowReport } from "../shows/sessionRecord.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
 import { extractJsonObject } from "../compose/composer.js";
@@ -353,7 +355,45 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     };
   });
 
+  /** The report a finished session left behind. */
+  app.get<{ Params: { showId: string } }>("/api/shows/:showId/report", async (req, reply) => {
+    const r = await pgPool().query<{ report: unknown; generated_at: Date }>(
+      "SELECT report, generated_at FROM show_reports WHERE show_id = $1", [req.params.showId],
+    );
+    if (!r.rows[0]) return reply.code(404).send({ error: "no report for this show yet" });
+    return { ...(r.rows[0].report as object), generatedAt: r.rows[0].generated_at };
+  });
+
+  /** Every show that has a report — the "past shows" list. */
+  app.get("/api/reports", async () => {
+    const r = await pgPool().query<{ show_id: string; generated_at: Date; report: ShowReport }>(
+      "SELECT show_id, generated_at, report FROM show_reports ORDER BY generated_at DESC LIMIT 50",
+    );
+    return r.rows.map((x) => ({
+      showId: x.show_id,
+      generatedAt: x.generated_at,
+      title: x.report.title,
+      durationMin: x.report.durationMin,
+      questionsAsked: x.report.engagement.questionsAsked,
+      sent: x.report.engagement.sent,
+      blocked: x.report.safety.blocked,
+    }));
+  });
+
   app.get("/api/catalogs", async () => listCatalogs());
+
+  /**
+   * Is this catalog ready to run a show?
+   *
+   * Asked BEFORE monitoring starts, because a session that begins with half its
+   * grounding missing does not fail — it abstains on every question, which
+   * reads as a cautious model rather than an absent corpus.
+   */
+  app.get<{ Params: { id: string } }>("/api/catalogs/:id/readiness", async (req, reply) => {
+    const cat = getCatalog(req.params.id);
+    if (!cat) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
+    return checkReadiness(cat);
+  });
 
   app.post("/api/catalogs/reload", async () => {
     reloadCatalogs();
@@ -454,8 +494,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/detach", async (req, reply) => {
     try {
       kb.cancel(req.params.showId);
-      await shows.detach(req.params.showId);
-      return { ok: true, shows: await shows.list() };
+      const report = await shows.detach(req.params.showId);
+      return { ok: true, report, shows: await shows.list() };
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }
