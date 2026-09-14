@@ -276,6 +276,26 @@ export class Repo {
     );
   }
 
+  /**
+   * Give an observed lot a human name.
+   *
+   * Identity only — display name and description, the fields retrieval matches
+   * on. Never price, quantity, condition or certificate: a guess about WHICH
+   * item is recoverable, a guess about what it costs is not. Deliberately NOT
+   * routed through `mutateListing`, because naming a lot is not a change to
+   * what is being sold and should not bump the version the staleness guard
+   * reads.
+   */
+  async nameObservedLot(id: string, name: string, basis: string): Promise<void> {
+    await this.q(
+      `UPDATE listings SET short_name = $3, description = $4
+       WHERE show_id = $1 AND id = $2 AND external_ref IS NOT NULL`,
+      [this.showId, id, name.slice(0, 80),
+       `Identified from the show itself (${basis}) as: ${name}. ` +
+       "Price, availability and condition come from what the stream reported, not from this name."],
+    );
+  }
+
   // ── policies / comps / qa ─────────────────────────────────────────────────
   async upsertPolicy(p: PolicyClause): Promise<void> {
     await this.q(

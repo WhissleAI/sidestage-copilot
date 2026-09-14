@@ -22,6 +22,7 @@ import { ActionProposer } from "../actions/proposer.js";
 import { MockMarketplace } from "../actions/marketplace/mock.js";
 import type { RemoteListing } from "../actions/marketplace/port.js";
 import { ResearchService } from "../research/research.js";
+import { enrichLot, needsIdentity } from "../ingest/enrichLot.js";
 import { SessionRecord, buildReport, type ShowReport } from "./sessionRecord.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
 import { Pipeline } from "../pipeline/pipeline.js";
@@ -45,6 +46,10 @@ export interface ShowRuntimeOpts {
   /** Use this database instead of a per-show file (the seeded demo show). */
   dbPath?: string;
 }
+
+/** How long to let the host talk about a new lot before asking what it is. A
+ *  lot hits the screen before anyone describes it. */
+const NAME_AFTER_MS = 12_000;
 
 export class ShowRuntime {
   readonly showId: string;
@@ -163,6 +168,31 @@ export class ShowRuntime {
 
   /** Lot titles for the context engine, refreshed with the retriever's index. */
   private lots: { id: string; title: string }[] = [];
+  /** Lots already sent for naming, so a re-observation does not re-ask. */
+  private named = new Set<string>();
+
+  /**
+   * Name one observed lot from the show itself.
+   *
+   * Deferred a beat: a lot appears on screen before the host has said anything
+   * about it, and asking in that instant gets a name built from the previous
+   * lot's speech — confidently wrong, which is worse than unnamed.
+   */
+  private async nameLot(listingId: string, lot: { title: string; priceCents: number }): Promise<void> {
+    await new Promise((r) => setTimeout(r, NAME_AFTER_MS));
+    try {
+      const show = await this.repo.show();
+      const id = await enrichLot(this.llm, lot, this.showContext.current(), show.title);
+      if (!id) return;
+      await this.repo.nameObservedLot(listingId, id.name, id.basis);
+      await this.refreshIndex();
+      const named = await this.repo.listing(listingId);
+      if (named) this.o.events.emit(this.showId, "listing", named);
+      console.log(`  named ${listingId}: ${id.name} (${id.basis})`);
+    } catch {
+      /* a lot without a name still has a price; naming is an enhancement */
+    }
+  }
 
   /**
    * Everything the constructor cannot do because it needs the database.
@@ -296,12 +326,21 @@ export class ShowRuntime {
         // version bumps — which is exactly the input the staleness guard and the
         // version-keyed reply cache were built for, now driven by a real auction
         // rather than a scripted markdown.
-        const { listing, changed } = await this.repo.upsertObservedLot({
+        const { listing, changed, created } = await this.repo.upsertObservedLot({
           title: lot.title,
           priceCents: lot.priceCents,
           soldOut: lot.soldOut,
           highBidder: lot.highBidder,
         });
+
+        // eBay names lots "#007 - As seen on eBay LIVE", which tells a buyer's
+        // question nothing to match against. Ask the show what it is, ONCE per
+        // lot, from the host's speech and the camera — the two places the
+        // identity actually exists.
+        if (created && needsIdentity(lot.title) && !this.named.has(listing.id)) {
+          this.named.add(listing.id);
+          void this.nameLot(listing.id, lot);
+        }
         if (changed) {
           await this.refreshIndex();
           const prevPinned = (await this.repo.show()).pinnedListingId;

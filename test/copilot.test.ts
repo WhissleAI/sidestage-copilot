@@ -3,6 +3,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { needsIdentity } from "../src/ingest/enrichLot.js";
 import { prdMetrics } from "../src/shows/prdMetrics.js";
 import { promotionReadiness } from "../src/autonomy/promotion.js";
 import { db as rigPool } from "../src/db/pg.js";
@@ -791,4 +792,42 @@ test("promotion is never granted on too little evidence", async () => {
   assert.equal(ready.next, "L3_AUTO_REPLY");
   assert.equal(ready.ready, false);
   assert.ok(ready.criteria.every((c) => c.state !== "met" || c.showsSeen >= c.showsRequired));
+});
+
+// ── naming a lot the stream refused to name ────────────────────────────────
+//
+// eBay Live names lots for the seller automatically and the name carries no
+// product in it. There is no item link in the player either, so on a monitored
+// show the copilot has a price for something it cannot name — which is why a
+// buyer asking "how much for the Griffey" abstained while the Griffey was on
+// screen with a live price on it.
+
+test("a placeholder lot title is recognised as unnamed", async () => {
+  // All four are REAL titles observed on live eBay shows.
+  for (const t of [
+    "#034 - As seen on eBay LIVE on Bonkers Cards LIVE",
+    "#245 - DUNHILL-PART 2-09/13-Item shown on screen live",
+    "#120 - POKEMON CARD(S) - AS SEEN ON SCREEN - e",
+    "#007 -",
+  ]) {
+    assert.equal(needsIdentity(t), true, `"${t}" should need naming`);
+  }
+});
+
+test("a lot the seller actually named is left alone", async () => {
+  // Naming one of these could only make it worse.
+  for (const t of [
+    "Ken Griffey Jr. 1989 Upper Deck RC #1",
+    "Air Jordan 1 Retro High OG Chicago Reimagined",
+    "Louis Vuitton Nomade Keepall 45 brown leather",
+  ]) {
+    assert.equal(needsIdentity(t), false, `"${t}" is already named`);
+  }
+});
+
+test("a category label is not a name", async () => {
+  // "POKEMON CARD(S)" is a shelf, not a product: a buyer asking about a
+  // Charizard matches nothing in it.
+  assert.equal(needsIdentity("#88 - GRADED CARDS - vintage slabs"), true);
+  assert.equal(needsIdentity("#12 - MYSTERY BOX - sealed"), true);
 });
