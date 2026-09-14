@@ -217,7 +217,27 @@ export interface ShowContext {
   currentTopic: string;
   listingInFocus: string | null;
   recentPoints: string[];
+  /** The LLM's read of the host's manner, summarised from the transcript TEXT. */
   tone: string | null;
+  /**
+   * The host's voice right now, from Whissle's acoustic metadata head.
+   *
+   * Distinct from `tone` on purpose: `tone` is inferred from what was SAID,
+   * this is measured from HOW it was said. Carried as a distribution and used
+   * only when the head itself reports it as trusted — the gateway's own note
+   * puts accuracy on low-arousal states around 63%, so a bare label presented
+   * as fact would be a confident coin flip.
+   */
+  voice: SignalDistribution | null;
+  /**
+   * A one-line reading of what is ON SCREEN, from the show's video.
+   *
+   * Show context, never provenance. The host holding an item up answers "what's
+   * that one?" and nothing else in the system can — but a frame cannot
+   * establish a price, a quantity or a certificate, so this is never citable as
+   * a grounding fact. See `visual` in compose/prompts.ts.
+   */
+  onScreen: { text: string; at: string } | null;
   updatedAt: string;
 }
 

@@ -79,7 +79,10 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 <script>
 (function () {
   var API = location.origin;
-  var room = null, stream = null;
+  var room = null, stream = null, visualTimer = null;
+  /** How often a keyframe is offered to the copilot. Lots change on the order of
+   *  a minute; the server throttles again at 8s regardless. */
+  var VISUAL_EVERY_MS = 12000;
   var el = function (id) { return document.getElementById(id); };
   var params = new URLSearchParams(location.search);
   el("show").value = params.get("showId") || "";
@@ -122,11 +125,14 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 
     try {
       status("requesting tab audio…");
-      // Video is requested because Chrome will not offer tab AUDIO without it;
-      // the video track is stopped immediately and never published.
+      // Video is requested because Chrome will not offer tab AUDIO without it.
+      // We used to stop that track on arrival, which for a live SELLING show is
+      // the wrong instinct: the host is holding the item up to camera, and
+      // "what's that one?" is answerable from the frame and nothing else. It is
+      // kept now and sampled — see startVisual() below.
       stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       var audio = stream.getAudioTracks()[0];
-      stream.getVideoTracks().forEach(function (t) { t.stop(); });
+      var video = stream.getVideoTracks()[0] || null;
       if (!audio) {
         status("no audio track — did you tick “Share tab audio”?", "err");
         log("the picker returned video only; stop and retry with tab audio ticked");
@@ -194,6 +200,9 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       log("published host audio into room " + (s.room || "(unnamed)"));
       el("start").disabled = true; el("stop").disabled = false;
 
+      if (video) startVisual(showId, video);
+      else log("no video track — the copilot will hear the show but not see it");
+
       audio.onended = function () { log("tab sharing ended by the browser"); el("stop").click(); };
     } catch (e) {
       status("capture failed", "err");
@@ -201,7 +210,50 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
     }
   };
 
+  /**
+   * Sample the shared tab's video and send a keyframe to the copilot.
+   *
+   * Deliberately NOT every frame. A vision read costs a model call, and a live
+   * show's screen changes meaningfully on the order of lots, not frames — so
+   * this runs on a slow timer and downscales hard before encoding. The server
+   * throttles again on its own side, because a client's throttle is a request
+   * rather than a guarantee.
+   */
+  function startVisual(showId, track) {
+    var el2 = document.createElement("video");
+    el2.muted = true; el2.playsInline = true; el2.autoplay = true;
+    el2.srcObject = new MediaStream([track]);
+    var canvas = document.createElement("canvas");
+
+    visualTimer = setInterval(async function () {
+      try {
+        var w = el2.videoWidth, h = el2.videoHeight;
+        if (!w || !h) return;
+        // Long edge 640: enough for the model to read a shoe or a slab label,
+        // small enough that the frame is tens of KB rather than hundreds.
+        var scale = Math.min(1, 640 / Math.max(w, h));
+        canvas.width = Math.round(w * scale);
+        canvas.height = Math.round(h * scale);
+        canvas.getContext("2d").drawImage(el2, 0, 0, canvas.width, canvas.height);
+        var frame = canvas.toDataURL("image/jpeg", 0.7);
+
+        var r = await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/visual/frame", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ frame: frame })
+        });
+        var out = await r.json().catch(function () { return {}; });
+        if (out && out.onScreen) log("on camera: " + out.onScreen);
+      } catch (e) {
+        log("frame skipped: " + (e && e.message ? e.message : e));
+      }
+    }, VISUAL_EVERY_MS);
+
+    log("watching the show's video, one frame every " + (VISUAL_EVERY_MS / 1000) + "s");
+  }
+
   el("stop").onclick = async function () {
+    if (visualTimer) { clearInterval(visualTimer); visualTimer = null; }
     try { if (room) await room.disconnect(); } catch (e) {}
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     room = null; stream = null;

@@ -10,7 +10,8 @@
 //     leads; this only supplies what is true right now.
 
 import type { Fact } from "../retrieval/facts.js";
-import type { ShowContext, ShowState } from "../domain/types.js";
+import type { ShowContext, ShowState, SignalDistribution } from "../domain/types.js";
+import { prettyLabel } from "../ingest/signals.js";
 import type { ListingWithDescription } from "../domain/repo.js";
 import { formatMoney } from "../domain/money.js";
 
@@ -27,6 +28,25 @@ export interface ComposeInputs {
   abstain: boolean;
   /** Set when the item was inferred from the pinned lot rather than named. */
   viaAnaphora: boolean;
+}
+
+/**
+ * The host's voice as a DISTRIBUTION, with its own uncertainty attached.
+ *
+ * Whissle's own guidance on this head is that accuracy on low-arousal states
+ * tops out around 63%, so handing the model a bare label would launder a coin
+ * flip into a fact it then writes a reply around. Giving it the runner-up and
+ * the probability lets it weight the hint instead of obeying it — and the
+ * sentence says plainly what the signal is for.
+ */
+function voiceLine(v: SignalDistribution): string {
+  const pct = (p: number) => `${Math.round(p * 100)}%`;
+  const runnerUp = v.topK.find((k) => k.label !== v.topLabel);
+  const spread = runnerUp ? `, and could be ${prettyLabel(runnerUp.label)} (${pct(runnerUp.p)})` : "";
+  return (
+    `How the host SOUNDS, measured from the audio: ${prettyLabel(v.topLabel)} (${pct(v.topP)} confident${spread}). ` +
+    "Use this only to match the room's energy. It is never a reason to make a claim, and never something to mention."
+  );
 }
 
 export function buildContextBlock(i: ComposeInputs): string {
@@ -75,7 +95,19 @@ export function buildContextBlock(i: ComposeInputs): string {
   if (i.context) {
     lines.push(`The host is currently talking about: ${i.context.currentTopic}.`);
     if (i.context.recentPoints.length) lines.push(`What the host just said: ${i.context.recentPoints.join("; ")}.`);
-    if (i.context.tone) lines.push(`Host tone, from voice metadata: ${i.context.tone}.`);
+    // `tone` is inferred from the transcript text; `voice` is MEASURED from the
+    // audio. Labelled separately so the model does not treat a summary of what
+    // was said as evidence of how it was said.
+    if (i.context.tone) lines.push(`How the host is presenting, from the transcript: ${i.context.tone}.`);
+    if (i.context.voice) lines.push(voiceLine(i.context.voice));
+    if (i.context.onScreen) {
+      lines.push(
+        `On camera right now: ${i.context.onScreen.text}`,
+        "That is a reading of the VIDEO, not a catalog fact. Use it to tell WHICH item the buyer",
+        "means — never to state a price, a quantity, a size or a certificate. Those come from the",
+        "grounding facts below or they are not said at all.",
+      );
+    }
   }
   if (i.viaAnaphora) {
     lines.push(

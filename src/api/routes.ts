@@ -13,6 +13,7 @@ import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catal
 import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
+import { extractJsonObject } from "../compose/composer.js";
 import { meter } from "../llm/meter.js";
 import { WhissleBilling, spendWindow } from "../llm/billing.js";
 import { Accounts, canWrite, type Account } from "../auth/accounts.js";
@@ -25,6 +26,29 @@ import { WhissleSessions } from "../llm/sessions.js";
 import { db as pgPool } from "../db/pg.js";
 import { config } from "../config.js";
 import type { AppContext } from "./context.js";
+
+/** A keyframe is ~40-120 KB of base64 at the size we send. This is the ceiling
+ *  before the request is refused rather than paid for. */
+const MAX_FRAME_CHARS = 400_000;
+/** Server-side floor between vision reads, per show. The client throttles too,
+ *  but a client's throttle is a request, not a guarantee. */
+const VISUAL_MIN_GAP_MS = 8_000;
+const VISUAL_QUESTION =
+  "Look at this frame from the seller's live show. In ONE short line, say which item is " +
+  "being held up or shown on screen, using the catalog name if you recognise it. If no " +
+  "item is clearly visible, answer exactly: nothing clear.";
+const lastVisualRead = new Map<string, number>();
+
+/** The agent replies in the reply JSON shape; take the answer, drop the rest. */
+function readingText(raw: string): string {
+  const obj = extractJsonObject(raw);
+  const answer = obj && typeof (obj as { answer?: unknown }).answer === "string"
+    ? ((obj as { answer: string }).answer)
+    : raw;
+  const t = answer.trim();
+  if (!t || /^nothing clear\.?$/i.test(t)) return "";
+  return t;
+}
 
 export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const { hub, shows, kb } = ctx;
@@ -503,7 +527,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         at: new Date().toISOString(),
       };
 
-      target.showContext.push(text);
+      // The DISTRIBUTION goes into show context alongside the text, not just to
+      // the console. It used to stop at the UI: the panel rendered emotion and
+      // intent while the reply path saw only the words, so a measurement we were
+      // already paying for shaded nothing. `push` keeps it only while the head
+      // itself reports it trusted, and expires it after one utterance's worth.
+      target.showContext.push(text, segment.emotion);
       hub.emit("transcript", segment);
       return { ok: true, ...segment };
     } catch (e) {
@@ -512,6 +541,59 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   /** Force a knowledge-base sync for one show. */
+  /**
+   * One keyframe from the show's video, read into show context.
+   *
+   * The bridge already holds a video track — Chrome will not hand over tab
+   * AUDIO without it — and until now that track was stopped on arrival. For a
+   * live SELLING show that is the wrong instinct: the host is holding the item
+   * up to camera, and "what's that one?" is answerable from the frame and from
+   * nothing else in the system.
+   *
+   * Throttled hard, on the SERVER, because a client can be wrong or hostile and
+   * each read costs a vision call. The reading is show context and never a
+   * grounding fact — see the boundary enforced in compose/prompts.ts.
+   */
+  app.post<{ Params: { showId: string }; Body: { frame?: string } }>(
+    "/api/shows/:showId/visual/frame",
+    async (req, reply) => {
+      const dataUrl = (req.body?.frame || "").trim();
+      if (!dataUrl.startsWith("data:image/")) {
+        return reply.code(400).send({ error: "frame must be an image data URL" });
+      }
+      if (dataUrl.length > MAX_FRAME_CHARS) {
+        return reply.code(413).send({ error: `frame too large (${dataUrl.length} chars, cap ${MAX_FRAME_CHARS})` });
+      }
+      let target;
+      try {
+        target = rt(req.params.showId);
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+
+      const last = lastVisualRead.get(target.showId) ?? 0;
+      if (Date.now() - last < VISUAL_MIN_GAP_MS) {
+        return { ok: true, skipped: "throttled", nextInMs: VISUAL_MIN_GAP_MS - (Date.now() - last) };
+      }
+      lastVisualRead.set(target.showId, Date.now());
+
+      try {
+        const reading = await target.llm.readFrame(dataUrl, VISUAL_QUESTION);
+        // The agent answers in the reply JSON shape, because it is the same
+        // agent with the same persona. Take the answer and drop the rest.
+        const text = readingText(reading);
+        if (!text) return { ok: true, skipped: "no reading" };
+        target.showContext.setOnScreen(text);
+        hub.emit("context", { showId: target.showId, ...target.showContext.current() });
+        return { ok: true, onScreen: text };
+      } catch (e) {
+        // A failed vision call costs this frame and nothing else — the next one
+        // is seconds away and the reply path never depended on it.
+        return reply.code(502).send({ error: (e as Error).message });
+      }
+    },
+  );
+
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/kb-sync", async (req, reply) => {
     try {
       return await kb.syncShow(rt(req.params.showId));

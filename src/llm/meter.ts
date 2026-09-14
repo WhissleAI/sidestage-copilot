@@ -19,7 +19,7 @@
 // ORG-wide. If another app in the same workspace runs during the show, the
 // delta over-attributes. It is a bound, not an invoice.
 
-export type GatewayDoor = "chat_turn" | "utility_turn" | "voice_start" | "kb_upload" | "billing";
+export type GatewayDoor = "chat_turn" | "utility_turn" | "voice_start" | "kb_upload" | "billing" | "visual_read";
 
 export interface DoorStats {
   calls: number;
@@ -55,7 +55,7 @@ export interface MeterSnapshot {
   byShow: Record<string, { calls: number; failures: number; contextChars: number }>;
 }
 
-const DOORS: GatewayDoor[] = ["chat_turn", "utility_turn", "voice_start", "kb_upload", "billing"];
+const DOORS: GatewayDoor[] = ["chat_turn", "utility_turn", "voice_start", "kb_upload", "billing", "visual_read"];
 
 function blank(): DoorStats {
   return {

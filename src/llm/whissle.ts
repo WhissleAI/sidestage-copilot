@@ -207,6 +207,34 @@ export class WhissleClient implements LlmPort {
     return { url: d.url, token: d.token, room: d.room || "" };
   }
 
+  /**
+   * Ask the agent to read ONE frame of the show's video.
+   *
+   * Goes through the same `chat/turn` door as a reply — deliberately, because
+   * the agent already knows this seller's catalog, so "the pinned lot" and "a
+   * red high-top" resolve against the same knowledge the replies do. The
+   * gateway routes an `images` turn through its `analyze_image` tool, which is
+   * what makes this work on a text-first model.
+   *
+   * `store: false` — a frame reading is show context, not a conversation.
+   */
+  async readFrame(dataUrl: string, question: string, opts: { maxTokens?: number } = {}): Promise<string> {
+    if (!this.o.agentId) throw new LlmError(400, "no Whissle agent configured for this show");
+    const d = await this.post<{ reply?: string }>(
+      `/api/agents/${this.o.agentId}/chat/turn`,
+      {
+        message: question,
+        images: [dataUrl],
+        new_conversation: true,
+        store: false,
+        source: "api",
+        max_tokens: opts.maxTokens ?? 120,
+      },
+      { door: "visual_read", contextChars: dataUrl.length },
+    );
+    return (d.reply || "").trim();
+  }
+
   /** Upload a knowledge document (the catalog / policy corpus) to the agent. */
   async uploadKb(filename: string, content: string, mime = "text/markdown"): Promise<void> {
     const form = new FormData();

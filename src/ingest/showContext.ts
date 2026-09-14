@@ -12,7 +12,7 @@
 // it reads the latest snapshot synchronously, so a slow or failed summarisation
 // costs freshness, never latency.
 
-import type { ShowContext } from "../domain/types.js";
+import type { ShowContext, SignalDistribution } from "../domain/types.js";
 import type { LlmPort } from "../llm/types.js";
 import { extractJsonObject } from "../compose/composer.js";
 
@@ -27,6 +27,12 @@ export interface ShowContextOpts {
 
 interface Segment { text: string; at: number }
 
+/** How long an acoustic read stays usable. One utterance's worth: the host's
+ *  manner changes lot to lot, and a stale read is worse than none. */
+const VOICE_TTL_MS = 45_000;
+/** How long an on-screen reading stays usable. Lots move fast on a live show. */
+const ON_SCREEN_TTL_MS = 60_000;
+
 export class ShowContextEngine {
   private segs: Segment[] = [];
   private ctx: ShowContext = {
@@ -34,6 +40,8 @@ export class ShowContextEngine {
     listingInFocus: null,
     recentPoints: [],
     tone: null,
+    voice: null,
+    onScreen: null,
     updatedAt: new Date(0).toISOString(),
   };
   private timer: NodeJS.Timeout | null = null;
@@ -47,8 +55,16 @@ export class ShowContextEngine {
     this.refreshMs = o.refreshMs ?? 8_000;
   }
 
-  /** Feed a finalized transcript segment from the host's audio. */
-  push(text: string): void {
+  /**
+   * Feed a finalized transcript segment from the host's audio.
+   *
+   * `voice` is the acoustic distribution that arrived with it. It is kept
+   * separately from the text because it answers a different question — the text
+   * says what the host is selling, the distribution says whether they are
+   * excited about it — and because it is only worth carrying while it is fresh.
+   */
+  push(text: string, voice?: SignalDistribution | null): void {
+    if (voice !== undefined) this.setVoice(voice);
     const t = text.trim();
     if (!t) return;
     this.segs.push({ text: t, at: Date.now() });
@@ -56,10 +72,49 @@ export class ShowContextEngine {
     while (this.segs.length > 200 || (this.segs[0] && this.segs[0].at < cutoff)) this.segs.shift();
   }
 
+  /**
+   * The latest acoustic read, kept only while the head trusts it.
+   *
+   * An untrusted distribution is dropped rather than stored, so a reply is
+   * never shaded by a measurement the measurer disowns.
+   */
+  setVoice(voice: SignalDistribution | null): void {
+    this.ctx = { ...this.ctx, voice: voice?.trusted ? voice : null };
+    this.voiceAt = voice?.trusted ? Date.now() : 0;
+  }
+
+  private voiceAt = 0;
+
+  /** A one-line reading of what is on screen, from the show's video. */
+  setOnScreen(text: string): void {
+    const t = text.trim();
+    if (!t) return;
+    this.ctx = { ...this.ctx, onScreen: { text: t.slice(0, 240), at: new Date().toISOString() } };
+    this.onScreenAt = Date.now();
+    this.o.onUpdate?.(this.ctx);
+  }
+
+  private onScreenAt = 0;
+
+  /**
+   * Both live signals go stale fast, and stale is worse than absent here: a
+   * reply shaded by how the host sounded two minutes ago, or describing an item
+   * they have already sold and moved on from, is wrong in a way that is hard to
+   * see. So they expire rather than linger.
+   */
+  private freshen(): void {
+    const now = Date.now();
+    let next = this.ctx;
+    if (next.voice && now - this.voiceAt > VOICE_TTL_MS) next = { ...next, voice: null };
+    if (next.onScreen && now - this.onScreenAt > ON_SCREEN_TTL_MS) next = { ...next, onScreen: null };
+    this.ctx = next;
+  }
+
   /** The latest snapshot. Synchronous and never blocking — this is on the hot path. */
   current(): ShowContext {
+    this.freshen();
     return this.ctx;
-    }
+  }
 
   start(): void {
     if (this.timer) return;
@@ -102,6 +157,10 @@ export class ShowContextEngine {
         const validIds = new Set(lots.map((l) => l.id));
         const id = typeof p.listingId === "string" && validIds.has(p.listingId) ? p.listingId : null;
         this.ctx = {
+          // Spread FIRST so the summariser, which knows nothing about the live
+          // signals, cannot drop them by omission — the class of bug where a new
+          // field silently disappears every refresh tick.
+          ...this.ctx,
           currentTopic: str(p.currentTopic) || this.ctx.currentTopic,
           listingInFocus: id,
           recentPoints: Array.isArray(p.recentPoints)

@@ -35,9 +35,27 @@ the track immediately. For a *live selling* show that is the wrong instinct: the
 host is holding the item up to camera, and the single most common question —
 "what's that one?" — is answerable from the frame and from nothing else.
 
-**This is the cheapest high-value item on this list**: publish the track we
-already have, set `video_enabled`, and the visual reading joins the transcript in
-the same rolling context the replies are already grounded in.
+**DONE — and not the way this section proposed.** Publishing the track into the
+listen-only LiveKit session turned out to be the wrong route: the gateway's
+ambient loop writes its reading into `[VISUAL CONTEXT]` for the *next LLM turn*,
+and a listen-only session has no LLM turn, so the understanding would never come
+back to us. Server-side decode would also have needed `VIDEO_CONTEXT_URL` and
+the separate video sidecar.
+
+What actually works is smaller: the bridge keeps the track it already has,
+samples ONE downscaled keyframe every 12s, and posts it to
+`POST /api/shows/:id/visual/frame`. The backend asks the show's own agent
+through the normal `chat/turn` door with `images` — the gateway routes that to
+its `analyze_image` tool, which is what makes it work on a text-first model — and
+the one-line reading becomes show context beside the transcript. Zero gateway
+changes; measured on a live show, a frame read back as "Louis Vuitton tote".
+
+Both caveats from the original note survive as enforced rules rather than prose:
+the read is throttled server-side (8s floor, because a client's throttle is a
+request not a guarantee), and the reading is **never citable as provenance**.
+It tells the model WHICH item the buyer means; a price, a size or a certificate
+still has to come from a grounding fact or it is not said. Asserted in
+`copilot.test.ts`.
 
 Two honest caveats. The ambient loop is throttled and costs a vision call per
 interval, so it is a per-show setting, not a default. And a screen reading is a

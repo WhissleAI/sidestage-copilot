@@ -3,6 +3,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { ShowContextEngine } from "../src/ingest/showContext.js";
+import { buildContextBlock } from "../src/compose/prompts.js";
+import type { ShowContext, SignalDistribution, ShowState } from "../src/domain/types.js";
 import { rig, judge, PINNED } from "./helpers.js";
 import { admit, classify, isHype, RateLimiter } from "../src/ingest/classify.js";
 import { cacheKey, ReplyCache } from "../src/latency/cache.js";
@@ -502,3 +505,95 @@ test("a streamed reply is judged on the COMPLETE draft, never the partial", asyn
   assert.notEqual(onPartial.verdict, "allow");
   assert.equal(onComplete.verdict, "allow");
 });
+
+// ── live signals: what the host SOUNDS like, and what is ON CAMERA ──────────
+//
+// Both were being captured and thrown away. The emotion/intent distributions
+// reached the console and stopped there; the video track was stopped on arrival
+// because Chrome only hands over tab audio if you also ask for video. Both now
+// reach the reply — under strict limits, because neither is a catalog fact.
+
+function ctxWith(over: Partial<ShowContext>): ShowContext {
+  return {
+    currentTopic: "Air Jordan 1 Chicago", listingInFocus: null, recentPoints: [],
+    tone: null, voice: null, onScreen: null, updatedAt: new Date().toISOString(), ...over,
+  };
+}
+
+const DIST = (label: string, p: number, trusted = true): SignalDistribution => ({
+  topLabel: label, topP: p, topK: [{ label, p }, { label: "EMOTION_NEUTRAL", p: 1 - p }],
+  changed: false, prevLabel: null, heldMs: 1000, flips: 0, trusted,
+});
+
+test("an untrusted acoustic read never reaches the prompt", async () => {
+  // The head reports its own confidence. A reply shaded by a measurement the
+  // measurer disowns is worse than one shaded by nothing.
+  const engine = new ShowContextEngine({ llm: null as never, lotTitles: () => [] });
+  engine.setVoice(DIST("EMOTION_HAPPY", 0.9, false));
+  assert.equal(engine.current().voice, null);
+
+  engine.setVoice(DIST("EMOTION_HAPPY", 0.9, true));
+  assert.equal(engine.current().voice?.topLabel, "EMOTION_HAPPY");
+});
+
+test("the voice line carries its uncertainty, not a bare label", async () => {
+  const block = buildContextBlock({
+    show: DEMO_SHOW, pinned: null, context: ctxWith({ voice: DIST("EMOTION_HAPPY", 0.58) }),
+    seller: null, facts: [], abstain: false, viaAnaphora: false,
+  });
+  // A 58% read presented as "the host is happy" launders a coin flip into a
+  // fact. The runner-up and the percentage are what make it a hint.
+  assert.match(block, /happy \(58% confident/);
+  assert.match(block, /could be neutral/i);
+  assert.match(block, /never a reason to make a claim/i);
+});
+
+test("an on-camera reading is show context, never provenance", async () => {
+  const block = buildContextBlock({
+    show: DEMO_SHOW, pinned: null,
+    context: ctxWith({ onScreen: { text: "a red and white high-top sneaker", at: new Date().toISOString() } }),
+    seller: null, facts: [], abstain: false, viaAnaphora: false,
+  });
+  assert.match(block, /On camera right now: a red and white high-top sneaker/);
+  // The whole boundary: a frame can say WHICH item, never what it costs.
+  assert.match(block, /never to state a price, a quantity, a size or a certificate/i);
+});
+
+test("both live signals expire rather than linger", async () => {
+  // Stale is worse than absent here. A reply matching the energy the host had
+  // two minutes ago, or describing a lot they already sold, is wrong in a way
+  // that is hard to see.
+  const engine = new ShowContextEngine({ llm: null as never, lotTitles: () => [] });
+  engine.setVoice(DIST("EMOTION_HAPPY", 0.9));
+  engine.setOnScreen("a graded slab");
+  assert.ok(engine.current().voice);
+  assert.ok(engine.current().onScreen);
+
+  const realNow = Date.now;
+  Date.now = () => realNow() + 120_000;
+  try {
+    assert.equal(engine.current().voice, null, "acoustic read must expire");
+    assert.equal(engine.current().onScreen, null, "on-camera read must expire");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("a context refresh cannot drop the live signals by omission", async () => {
+  // The summariser knows nothing about voice or onScreen. Building the next
+  // context without spreading the previous one would silently delete both every
+  // refresh tick — a bug that looks like "the signal is flaky".
+  const engine = new ShowContextEngine({ llm: null as never, lotTitles: () => [] });
+  engine.setVoice(DIST("EMOTION_HAPPY", 0.9));
+  engine.setOnScreen("a graded slab");
+  engine.push("and this next one is a Griffey rookie");
+  assert.ok(engine.current().voice, "voice survived a transcript push");
+  assert.ok(engine.current().onScreen, "on-camera survived a transcript push");
+});
+
+const DEMO_SHOW: ShowState = {
+  id: "show_ep42", title: "Friday Night Grails — Ep. 42", sellerHandle: "@kicksbyrae",
+  startedAt: new Date().toISOString(), viewers: 247, pinnedListingId: null, lotQueue: [],
+  autonomyLevel: "L1_SUGGEST", undoWindowS: 90, source: "simulated", externalId: null,
+  readOnly: false, status: "live",
+};
