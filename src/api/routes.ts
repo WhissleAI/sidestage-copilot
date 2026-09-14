@@ -16,6 +16,12 @@ import { normalizeDistribution } from "../ingest/signals.js";
 import { meter } from "../llm/meter.js";
 import { WhissleBilling, spendWindow } from "../llm/billing.js";
 import { Accounts, canWrite, type Account } from "../auth/accounts.js";
+import {
+  SettingsStore, sanitize, merge, diffFromDefaults, invalidPatterns, pushLayerA,
+  type SettingsView,
+} from "../settings/store.js";
+import { policy, DEFAULT_POLICY } from "../guardrails/policy.js";
+import { WhissleSessions } from "../llm/sessions.js";
 import { db as pgPool } from "../db/pg.js";
 import { config } from "../config.js";
 import type { AppContext } from "./context.js";
@@ -67,6 +73,148 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   app.get("/api/auth/me", async (req) => ({ account: actorOf(req as object) }));
+
+  // ── analytics ─────────────────────────────────────────────────────────────
+  //
+  // Three questions a seller actually has, and the source that answers each:
+  //
+  //   did it help      our own Metrics — answered rate, time-to-answer, blocks
+  //   can I trust it   guard block rate per guard, rollbacks, chain integrity
+  //   what does it cost  the wallet, plus the agent's own per-turn trace
+  //
+  // The trace is the part that has never been surfaced. `/api/sessions` carries
+  // `agent_id` (the metering rows do not), so this is where per-agent
+  // attribution actually lives: which provider and model answered, whether it
+  // failed over, the latency and the tokens, per hop.
+  const sessionsApi = new WhissleSessions(config.whissle.base, config.whissle.apiKey);
+
+  app.get<{ Querystring: { showId?: string; days?: string } }>("/api/analytics", async (req, reply) => {
+    let target;
+    try {
+      target = rt(req.query.showId);
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+
+    // Everything in flight together: this page reads five sources and doing it
+    // sequentially is five round trips a seller waits through between lots.
+    const [metrics, chain, actions, walletR, usageR, agent] = await Promise.all([
+      target.pipeline.metrics(),
+      target.audit.verify(),
+      target.executor.list(500),
+      billing.wallet(),
+      billing.usage(days),
+      target.agentId
+        ? sessionsApi.activity(target.agentId, 25)
+        : Promise.resolve(null),
+    ]);
+
+    const wallet = walletR.ok ? walletR.value : null;
+    if (wallet) spendWindow.open(target.showId, wallet.balanceUsd);
+
+    return {
+      showId: target.showId,
+      agentId: target.agentId || null,
+      copilot: {
+        ...metrics,
+        // Integrity is part of "can I trust it", not a separate curiosity.
+        auditChain: chain,
+        actionsByStatus: actions.reduce<Record<string, number>>((acc, a) => {
+          acc[a.status] = (acc[a.status] ?? 0) + 1;
+          return acc;
+        }, {}),
+      },
+      agent,
+      cost: {
+        wallet,
+        walletError: walletR.ok ? null : walletR.error,
+        usage: usageR.ok ? usageR.value : null,
+        usageError: usageR.ok ? null : usageR.error,
+        meter: meter.snapshot(),
+        spend: wallet ? spendWindow.since(wallet.balanceUsd) : {},
+      },
+      policy: {
+        maxDiscountPct: policy().maxDiscountPct,
+        neverSayRules: policy().neverSay.length,
+        // The documented asymmetry, as a number: rules marked `unlessCertified`
+        // stay app-side because the gateway matcher has no catalog access.
+        armedOnAgent: policy().neverSay.filter((r) => !r.unlessCertified).length,
+      },
+    };
+  });
+
+  // ── settings ──────────────────────────────────────────────────────────────
+  //
+  // The guardrail policy is the whole of this surface, because it is the one
+  // setting where editing it visibly changes what the agent is ALLOWED to say —
+  // in this process on the next reply, and on the agent itself for every other
+  // channel it answers on.
+  const settings = new SettingsStore(pgPool());
+
+  /** The agents a save has to reach: one per catalog, and the active show's. */
+  const armTargets = async (): Promise<string[]> => {
+    const ids = new Set<string>();
+    for (const s of await shows.list()) if (s.agentId) ids.add(s.agentId);
+    for (const c of listCatalogs()) if (c.agentId) ids.add(c.agentId);
+    return [...ids];
+  };
+
+  const view = async (accountId: string | null, armed: SettingsView["armed"] = null): Promise<SettingsView> => {
+    const loaded = accountId ? await settings.load(accountId) : { overrides: {}, updatedAt: null };
+    const active = merge(loaded.overrides);
+    return {
+      policy: active,
+      defaults: DEFAULT_POLICY,
+      overrides: diffFromDefaults(active),
+      armed,
+      updatedAt: loaded.updatedAt,
+    };
+  };
+
+  app.get("/api/settings", async (req) => view(actorOf(req as object)?.id ?? null));
+
+  app.put<{ Body: unknown }>("/api/settings", async (req, reply) => {
+    const actor = mustWrite(req as object, reply);
+    if (!actor) return;
+
+    const overrides = sanitize(req.body);
+    // A seller-authored regex that does not compile would throw inside the
+    // policy guard, and a guard that throws returns `block` — every reply, until
+    // someone read the logs. Refuse it here, where it is a form error.
+    const bad = invalidPatterns(overrides);
+    if (bad.length) {
+      return reply.code(400).send({ error: "these patterns are not valid regular expressions", patterns: bad });
+    }
+
+    await settings.persist(actor.id, overrides);
+    // Layer B first: it is in-process and cannot fail, so the seller's own
+    // console is never checking against a policy it does not show.
+    const active = merge(overrides);
+    settings.activate(active);
+
+    // Layer A second, per agent, reporting rather than throwing — a gateway
+    // that refuses the push must not lose the edit.
+    const targets = await armTargets();
+    const reports = await Promise.all(
+      targets.map((id) => pushLayerA(config.whissle.base, config.whissle.apiKey, id)),
+    );
+    const armed = reports.find((r) => !r.ok) ?? reports[0] ?? null;
+
+    return view(actor.id, armed ?? null);
+  });
+
+  app.post("/api/settings/reset", async (req, reply) => {
+    const actor = mustWrite(req as object, reply);
+    if (!actor) return;
+    await settings.persist(actor.id, {});
+    settings.activate(DEFAULT_POLICY);
+    const targets = await armTargets();
+    const reports = await Promise.all(
+      targets.map((id) => pushLayerA(config.whissle.base, config.whissle.apiKey, id)),
+    );
+    return view(actor.id, reports.find((r) => !r.ok) ?? reports[0] ?? null);
+  });
 
   app.post<{ Body: { displayName?: string } }>("/api/auth/claim", async (req, reply) => {
     // "This is my show." Promotes the guest holding this session to operator.

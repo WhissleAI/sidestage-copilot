@@ -251,6 +251,20 @@ export class Pipeline {
 
     try {
       // 3. compose
+      // Stream the draft to the console while the guards wait for all of it.
+      // The p95 complaint is time-to-FIRST-TOKEN — an operator staring at a
+      // spinner for two seconds while a buyer waits — and that is what this
+      // fixes. Time-to-SEND is unchanged and must be: a partially generated
+      // reply has not been checked by anything.
+      let lastPartial = "";
+      const onPartial = previous ? undefined : (answerSoFar: string) => {
+        if (answerSoFar === lastPartial) return;
+        lastPartial = answerSoFar;
+        const streaming = { ...proposal, status: "drafting" as const, draft: answerSoFar };
+        this.proposals.set(proposal.id, streaming);
+        this.d.events.onProposal(streaming);
+      };
+
       const { draft, contextBlock } = await this.composer.draft(
         {
           show,
@@ -264,6 +278,7 @@ export class Pipeline {
         msg.author,
         msg.text,
         previous,
+        onPartial,
       );
       timer.mark("compose");
 

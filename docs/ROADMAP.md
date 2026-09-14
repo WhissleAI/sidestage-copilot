@@ -123,7 +123,7 @@ omission. `audit.actor_id` now references the account, and the console shows
 which it is acting as — amber "watching · take control" for a guest, the
 operator's name once claimed. Five contract tests cover the boundary.
 
-### 2.3 Settings
+### 2.3 Settings — **DONE**
 
 There is a real configuration surface hiding in the code with no UI:
 
@@ -138,7 +138,24 @@ The policy object is the interesting one, because editing it should visibly chan
 what the agent is allowed to say — Layer A re-pushed to the Whissle agent, Layer B
 re-read in process.
 
-### 2.4 Analytics, including Whissle agent statistics
+**Shipped, and it is the policy object only.** `/settings` edits the never-say
+list, the discount cap, the reply-length cap and the voice switches. A save is
+four steps, not a database write: persist the override, re-arm Layer B in this
+process, re-push Layer A to every catalog agent, and **read back** what the
+gateway says is armed. That last step is the one that matters — pushing config
+and assuming it took is how you end up believing in a guardrail that is not
+there, and the page shows `never_say_count: 15` straight from
+`/api/agents/{id}/guardrails` rather than echoing what was sent.
+
+The page also renders the asymmetry rather than hiding it: 17 rules are checked
+in Layer B, 15 are armed on the agent, and the two `unlessCertified` rules carry
+an `app-only` badge with the reason. Two guards on the input, both of which
+protect the reply path rather than the form: a seller-authored regex that does
+not compile is refused (a guard that throws returns `block` — every reply, until
+someone read the logs), and the discount cap is clamped, because a cap of 100%
+is not a setting, it is an outage.
+
+### 2.4 Analytics, including Whissle agent statistics — **DONE**
 
 You asked specifically what the agent knows and does. All of it exists and none
 of it is surfaced:
@@ -155,7 +172,18 @@ copilot help* (answered rate, time-to-answer, GMV per hour vs baseline), *can I
 trust it* (block rate per guard, rollbacks, replies I edited), and *what is it
 costing me* (tokens, calls, per-reply cost from the session trace).
 
-The PRD already defines these metrics; nothing renders them.
+**Shipped as `/analytics`, in exactly those three sections**, plus a fourth for
+what the agent itself did. The session trace was the unused source and is now the
+most useful thing on the page: per turn it names the provider and model that
+answered, whether it failed over, the latency and the tokens. Measured on the
+demo agent — 25 turns, p50 810 ms, p95 1549 ms, one model (`gpt-oss-120b` via
+`local`), 148.7k tokens. "The copilot is slow" and "hop 0 went to gpt-oss-120b,
+took 916 ms on 3,830 input tokens" are different sentences and only one of them
+is actionable.
+
+Audit-chain integrity is rendered *inside* "can I trust it" rather than beside it,
+because that is the question it answers. `stop_reason: max_tokens` is called out
+in amber: a truncated reply to a buyer is not a neutral fact.
 
 ---
 
@@ -166,7 +194,7 @@ From [`REVIEW.md`](REVIEW.md) §6, restated with status.
 | # | Ask | Status |
 |---|---|---|
 | **W-3** | Token streaming on `chat/turn` | **SHIPPED** — [gateway #1101](https://github.com/WhissleAI/whissle_gateway_backend/pull/1101) merged and deployed to AWS 2026-09-13. `POST /api/agents/{id}/chat/turn/stream` is live: `open` → (`delta`\|`tool`)* → `done`, where `done` carries the byte-identical body the JSON door returns. SideStage does not consume it yet — see §4 |
-| **W-8** | Attribute usage to an agent | **NEW.** `/api/orgs/{org}/usage/sessions` returns `agent_id: null` for every text session (checked across 100 sessions, 2026-09-13), and `/usage/events` carries no agent field at all. So the platform can bill an org but cannot answer "what did this agent cost", which is the question a seller asks. SideStage meters its own calls instead (`src/llm/meter.ts`) and says so on the panel rather than implying the number came from billing |
+| **W-8** | Attribute METERING to an agent | **NARROWER THAN FIRST FILED.** `/api/orgs/{org}/usage/sessions` returns `agent_id: null` for every text session and `/usage/events` carries no agent field — so the *metering* rows cannot be attributed. But `/api/sessions` **does** carry `agent_id` and accepts `?agent_id=`, and `/api/sessions/{id}/trace` gives per-hop provider, model, failover, latency and token usage. Per-agent attribution is therefore possible, just through the calls API rather than the billing API, and at the cost of an N+1 (list, then trace each). The ask is to carry `agent_id` on the usage rows so the two views agree; the analytics page uses the trace path in the meantime |
 | **W-1** | Per-agent KB namespacing | Worked around with one agent per catalog. Costs an agent per seller |
 | **W-2** | KB upsert by caller-supplied id | Replace-by-delete today; racy and slow as catalogs grow |
 | **W-4** | Conditional `content_guardrails` | Certificate-conditional rules stay app-side; documented asymmetry |
@@ -203,12 +231,24 @@ in the console, built on the wallet and usage endpoints plus this app's own
 meter. That is the answer to "how are we paying for Whissle agents" — and W-8
 above is what it ran into.
 
-**Still to consume W-3.** The streaming door is live but SideStage still calls
-the JSON door. Guardrails must see a COMPLETE draft before anything is sendable,
-so streaming cannot shorten time-to-*send*; what it shortens is time-to-*first-
-token* in the operator's view, which is the p95 complaint. That is a pipeline +
-SSE-relay change, and it is the top of the next list rather than a line item
-here.
+**W-3 is consumed.** `chatTurnStream` takes the streaming door and the pipeline
+re-emits the proposal as the answer forms, so the operator watches it arrive
+instead of a spinner. Three properties held deliberately:
+
+- **The guards still judge the COMPLETE draft.** `done` carries the
+  authoritative reply and that is what the chain runs on. Streaming shortens
+  time-to-first-token, never time-to-send — a partially generated reply has been
+  checked by nothing and must never be sendable. Asserted in `copilot.test.ts`.
+- **`done` wins over the deltas.** A stream that ends without it is an error, not
+  a reply assembled from fragments: answering from a partial accumulation hands
+  the guards a truncated draft that looks whole.
+- **404 falls back to the JSON door.** An older gateway in front of this app
+  should lose the narration, not the reply.
+
+Measured against production: first token at ~1.0 s on a reply that completes in
+~1.1 s. The honest caveat is that the gateway emits coarse deltas (2 for a short
+reply), so on one-sentence answers the win is small; it grows with the length of
+the reply.
 
 Items 1–4 are days. Items 5–8 are the difference between a challenge submission
 and a product, and should not be started before the submission is in.

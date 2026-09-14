@@ -36,6 +36,22 @@ rather than only the first to fire.
 
 ---
 
+## Editing them
+
+`/settings` in the console. A save does four things, in this order: persists the
+override, re-arms Layer B in this process, re-pushes Layer A to every catalog
+agent, and **reads back** what the gateway reports as armed. The read-back is
+not decoration — pushing config and assuming it took is how you end up believing
+in a guardrail that is not there.
+
+Two inputs are validated rather than trusted, and both protect the reply path
+rather than the form:
+
+- a regex that does not compile is refused, because `neverSayMatchers` builds it
+  with `new RegExp` and a guard that **throws returns `block`** (`chain.ts`) —
+  one bad pattern would silently block every reply until someone read the logs;
+- the discount cap is clamped to 50%, because a cap of 100% is not a setting.
+
 ## Two layers, one policy object
 
 `src/guardrails/policy.ts` is a single configurable object projected into two

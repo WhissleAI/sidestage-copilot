@@ -76,6 +76,110 @@ export class WhissleClient implements LlmPort {
     return (d.reply || "").trim();
   }
 
+  /**
+   * Stream a reply turn — gateway PR #1101, live on AWS since 2026-09-13.
+   *
+   * Wire contract: `open`, then (`delta` | `tool`)*, then `done`, where `done`
+   * carries the byte-identical JSON body the non-streaming door returns. So the
+   * authoritative answer is the one in `done`; the deltas are for the operator's
+   * eyes and are DISCARDED if `done` disagrees with them.
+   *
+   * Falls back to the JSON door on 404 — the streaming path is new, and an
+   * older gateway in front of this app should degrade to a slower reply rather
+   * than no reply.
+   */
+  async chatTurnStream(
+    message: string,
+    context: string,
+    onDelta: (text: string, full: string) => void,
+    opts: { maxTokens?: number } = {},
+  ): Promise<string> {
+    if (!this.o.agentId) throw new LlmError(400, "no Whissle agent configured for this show");
+    const body = {
+      message,
+      context,
+      new_conversation: true,
+      store: false,
+      source: "api",
+      ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+    };
+
+    const t0 = performance.now();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), this.o.timeoutMs ?? 12_000);
+    const done = (ok: boolean, status?: number, error?: string) =>
+      meter.record({
+        door: "chat_turn", ms: performance.now() - t0, ok, status, error,
+        showId: this.o.showId, contextChars: message.length + context.length,
+      });
+
+    try {
+      const r = await fetch(`${this.base}/api/agents/${this.o.agentId}/chat/turn/stream`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.o.apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify(body),
+        signal: ctl.signal,
+      });
+
+      if (r.status === 404) {
+        // No streaming door on this gateway. Not an error worth failing a reply
+        // over; take the JSON door and lose only the narration.
+        clearTimeout(timer);
+        return this.chatTurn(message, context, opts);
+      }
+      if (!r.ok || !r.body) {
+        const text = await safeText(r);
+        done(false, r.status, text.slice(0, 200));
+        throw new LlmError(r.status, text);
+      }
+
+      let full = "";
+      let final: string | null = null;
+      for await (const frame of sseFrames(r.body)) {
+        if (frame.event === "delta") {
+          const text = String((frame.data as { text?: unknown }).text ?? "");
+          if (!text) continue;
+          full += text;
+          // Never let a display callback take down a turn.
+          try {
+            onDelta(text, full);
+          } catch { /* the reply matters, the narration does not */ }
+        } else if (frame.event === "done") {
+          final = String((frame.data as { reply?: unknown }).reply ?? "").trim();
+        } else if (frame.event === "error") {
+          const msg = String((frame.data as { message?: unknown }).message ?? "stream failed");
+          done(false, 502, msg);
+          throw new LlmError(502, msg);
+        }
+      }
+
+      // `done` is the contract; the accumulated deltas are a best-effort echo of
+      // it. A stream that ended without `done` did not complete, and answering
+      // from a partial accumulation would hand the guards a truncated draft that
+      // looks whole.
+      if (final === null) {
+        done(false, 502, "stream ended without a done frame");
+        throw new LlmError(502, "stream ended without a done frame");
+      }
+      done(true, 200);
+      return final;
+    } catch (e) {
+      if (e instanceof LlmError) throw e;
+      if ((e as Error).name === "AbortError") {
+        done(false, 504, "gateway timeout");
+        throw new LlmError(504, "gateway timeout");
+      }
+      done(false, 0, (e as Error).message);
+      throw new LlmError(0, (e as Error).message);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async utilityTurn(system: string, user: string, opts: { maxTokens?: number } = {}): Promise<string> {
     const d = await this.post<{ reply?: string }>("/api/bench/agent-turn", {
       agent_id: this.o.agentId,
@@ -161,6 +265,48 @@ export class WhissleClient implements LlmPort {
     } finally {
       clearTimeout(t);
     }
+  }
+}
+
+/**
+ * Parse an SSE byte stream into `{event, data}` frames.
+ *
+ * Deliberately minimal and deliberately NOT a library: the only thing this has
+ * to get right is that a frame ends at a blank line and may span chunk
+ * boundaries — which is exactly the bug a hand-rolled `split("\n\n")` per chunk
+ * introduces, silently, only under load.
+ */
+async function* sseFrames(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<{ event: string; data: unknown }> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep: number;
+      while ((sep = buf.indexOf("\n\n")) !== -1) {
+        const block = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let event = "message";
+        const data: string[] = [];
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data.push(line.slice(5).trim());
+        }
+        if (!data.length) continue;
+        try {
+          yield { event, data: JSON.parse(data.join("\n")) };
+        } catch {
+          /* a frame we cannot parse is a frame we cannot act on */
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
   }
 }
 

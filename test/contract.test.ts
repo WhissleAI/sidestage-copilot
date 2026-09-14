@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/api/server.js";
 import type { AppContext } from "../src/api/context.js";
+import { policy, DEFAULT_POLICY, setPolicy } from "../src/guardrails/policy.js";
 import { get } from "node:http";
 
 let app: FastifyInstance;
@@ -41,6 +42,9 @@ after(async () => {
   // Both, in this order. Closing the HTTP server leaves the show runtimes and
   // their poll timers alive, which holds the event loop open and makes a suite
   // that has already passed look like it hung.
+  // Leave the module policy as we found it: it is process-wide state and a
+  // later suite in the same run would otherwise inherit a test's edit.
+  setPolicy(null);
   await app.close();
   await ctx.stop();
 });
@@ -237,6 +241,99 @@ describe("who is allowed to act", () => {
     });
     assert.equal(claimed.json().account.kind, "seller");
     assert.equal(claimed.json().account.displayName, "Rae");
+  });
+});
+
+describe("settings change what the guards enforce", () => {
+  test("a save re-arms Layer B in this process", async () => {
+    // The point of the settings surface: editing it changes what the NEXT
+    // reply is checked against, not just what a form displays.
+    const before = (await app.inject({ method: "GET", url: "/api/settings", headers: auth })).json();
+    assert.equal(before.policy.maxDiscountPct, 15);
+
+    const saved = await app.inject({
+      method: "PUT", url: "/api/settings",
+      headers: { ...auth, "content-type": "application/json" },
+      payload: { maxDiscountPct: 7 },
+    });
+    assert.equal(saved.statusCode, 200);
+    assert.equal(saved.json().policy.maxDiscountPct, 7);
+    // Layer B is the live module, not a copy of the response body.
+    assert.equal(policy().maxDiscountPct, 7);
+
+    await app.inject({ method: "POST", url: "/api/settings/reset", headers: auth });
+    assert.equal(policy().maxDiscountPct, 15);
+  });
+
+  test("a regex that does not compile is refused, not stored", async () => {
+    // `neverSayMatchers` compiles these with `new RegExp`, and a guard that
+    // THROWS returns block (chain.ts) — so an unvalidated bad pattern would
+    // silently block every reply until someone read the logs.
+    const r = await app.inject({
+      method: "PUT", url: "/api/settings",
+      headers: { ...auth, "content-type": "application/json" },
+      payload: { neverSay: [{ pattern: "a(b", regex: true, why: "broken" }] },
+    });
+    assert.equal(r.statusCode, 400);
+    assert.match(r.json().error, /not valid regular expressions/);
+    assert.equal(policy().neverSay.length, DEFAULT_POLICY.neverSay.length);
+  });
+
+  test("unknown keys are dropped rather than merged into the policy", async () => {
+    const r = await app.inject({
+      method: "PUT", url: "/api/settings",
+      headers: { ...auth, "content-type": "application/json" },
+      payload: { maxDiscountPct: 9, iAmNotASetting: true },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal("iAmNotASetting" in r.json().policy, false);
+    await app.inject({ method: "POST", url: "/api/settings/reset", headers: auth });
+  });
+
+  test("the discount cap is bounded — a typo must not disable a guard", async () => {
+    const r = await app.inject({
+      method: "PUT", url: "/api/settings",
+      headers: { ...auth, "content-type": "application/json" },
+      payload: { maxDiscountPct: 900 },
+    });
+    assert.equal(r.json().policy.maxDiscountPct, 50);
+    await app.inject({ method: "POST", url: "/api/settings/reset", headers: auth });
+  });
+
+  test("a guest cannot change the guardrails", async () => {
+    const guest = (await app.inject({ method: "POST", url: "/api/auth/guest" })).json();
+    const r = await app.inject({
+      method: "PUT", url: "/api/settings",
+      headers: { authorization: `Bearer ${guest.token}`, "content-type": "application/json" },
+      payload: { maxDiscountPct: 50 },
+    });
+    assert.equal(r.statusCode, 403);
+  });
+});
+
+describe("analytics", () => {
+  test("answers the three questions the page asks", async () => {
+    const r = await app.inject({ method: "GET", url: "/api/analytics", headers: auth });
+    assert.equal(r.statusCode, 200);
+    const a = r.json();
+    // did it help
+    for (const k of ["answeredRate", "latency", "cacheHitRate", "guardBlocks"]) {
+      assert.ok(k in a.copilot, `copilot is missing ${k}`);
+    }
+    // can I trust it — chain integrity travels WITH the metrics, not beside them
+    assert.equal(typeof a.copilot.auditChain.ok, "boolean");
+    assert.equal(typeof a.copilot.auditChain.height, "number");
+    // the documented asymmetry, as a number a reviewer can check
+    assert.ok(a.policy.armedOnAgent <= a.policy.neverSayRules);
+    // what it costs
+    assert.ok("meter" in a.cost);
+  });
+
+  test("an unknown showId 404s", async () => {
+    const r = await app.inject({
+      method: "GET", url: "/api/analytics?showId=nope", headers: auth,
+    });
+    assert.equal(r.statusCode, 404);
   });
 });
 

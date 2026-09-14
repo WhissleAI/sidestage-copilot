@@ -9,7 +9,7 @@ import { cacheKey, ReplyCache } from "../src/latency/cache.js";
 import { decideAction, decideReply } from "../src/autonomy/ladder.js";
 import { ActionProposer } from "../src/actions/proposer.js";
 import { extractMoneyCents, formatMoney } from "../src/domain/money.js";
-import { extractJsonObject, normalizeFactId, parseDraft } from "../src/compose/composer.js";
+import { extractJsonObject, normalizeFactId, parseDraft, partialAnswer } from "../src/compose/composer.js";
 import { toContentGuardrails, toActionPolicy, policy } from "../src/guardrails/policy.js";
 import { buildRegenerateBlock } from "../src/compose/prompts.js";
 import { normalizeDistribution } from "../src/ingest/signals.js";
@@ -452,4 +452,53 @@ test("item descriptions survive a catalog that is not sneaker-shaped", async () 
   assert.ok(!/Topps Topps/.test(ident!.text), `brand duplicated into model: ${ident!.text}`);
   assert.ok(!/size ,/.test(ident!.text), `dangling empty size: ${ident!.text}`);
   assert.ok(!/colorway/i.test(ident!.text), `"colorway" is wrong for a card: ${ident!.text}`);
+});
+
+// ── streaming (W-3) ─────────────────────────────────────────────────────────
+//
+// The gateway's streaming door hands back the reply a piece at a time, but the
+// reply is JSON — so a partial stream is partial JSON, and showing it to a
+// seller verbatim would put `{"answer":"The Air Jo` on screen. `partialAnswer`
+// reads whatever of the answer STRING has arrived, which is the only part of
+// the payload a human can read mid-flight.
+
+test("partialAnswer reads the answer out of half-written JSON", async () => {
+  assert.equal(partialAnswer(""), "");
+  assert.equal(partialAnswer('{"ans'), "", "nothing to show before the key lands");
+  assert.equal(partialAnswer('{"answer":"The Air Jo'), "The Air Jo");
+  assert.equal(
+    partialAnswer('{"answer":"They are $412.00.","claims":[]}'),
+    "They are $412.00.",
+    "stops at the closing quote rather than running into the claims",
+  );
+});
+
+test("partialAnswer survives escapes split across chunks", async () => {
+  // A chunk boundary can fall between a backslash and the character it escapes.
+  // Treating the dangling backslash as literal would show a stray "\" and then
+  // silently swallow the next character when the rest arrived.
+  assert.equal(partialAnswer('{"answer":"line one\\'), "line one");
+  assert.equal(partialAnswer('{"answer":"line one\\nline two'), "line one\nline two");
+  assert.equal(partialAnswer('{"answer":"he said \\"hi'), 'he said "hi', "an escaped quote does not end the answer");
+});
+
+test("a streamed reply is judged on the COMPLETE draft, never the partial", async () => {
+  // The safety property of W-3: streaming shortens time-to-first-token in the
+  // operator's view and never time-to-send. A partially generated reply has
+  // been checked by nothing, so it must never be sendable.
+  const r = await rig();
+  const partial = "The Chicago Reimagined is $3";       // a truncated price
+  const complete = "The Chicago Reimagined is $412.00.";
+
+  const onPartial = await judge(r, "how much for the chicagos", partial, [
+    { text: partial, factId: `listing:${PINNED}#price` },
+  ]);
+  const onComplete = await judge(r, "how much for the chicagos", complete, [
+    { text: complete, factId: `listing:${PINNED}#price` },
+  ]);
+
+  // $3 is not a price any fact states, so the partial WOULD be blocked — which
+  // is exactly why the chain runs once, at the end, on the whole thing.
+  assert.notEqual(onPartial.verdict, "allow");
+  assert.equal(onComplete.verdict, "allow");
 });

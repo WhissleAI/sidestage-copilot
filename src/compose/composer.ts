@@ -36,10 +36,30 @@ export class Composer {
     question: string,
     /** The reply the seller rejected, when this is a regenerate. */
     previous?: string,
+    /**
+     * Called with the reply as it generates.
+     *
+     * The model is asked for JSON, so a partial stream is partial JSON — not
+     * something to show a seller verbatim. `partialAnswer` pulls whatever of the
+     * `answer` string has arrived, which is the only part of the payload that is
+     * human-readable mid-flight. When it returns nothing, nothing is shown; a
+     * progress indicator beats a bracket.
+     */
+    onPartial?: (answerSoFar: string) => void,
   ): Promise<{ draft: Draft; contextBlock: string }> {
     const base = buildContextBlock(inputs);
     const contextBlock = previous ? buildRegenerateBlock(base, previous) : base;
-    const raw = await this.llm.chatTurn(buildUserMessage(author, question), contextBlock, { maxTokens: REPLY_MAX_TOKENS });
+    const msg = buildUserMessage(author, question);
+
+    // Stream when someone is watching; take the plain door when nobody is, so a
+    // bench run and a regenerate do not pay for narration they discard.
+    const raw = onPartial
+      ? await this.llm.chatTurnStream(msg, contextBlock, (_d, full) => {
+          const partial = partialAnswer(full);
+          if (partial) onPartial(partial);
+        }, { maxTokens: REPLY_MAX_TOKENS })
+      : await this.llm.chatTurn(msg, contextBlock, { maxTokens: REPLY_MAX_TOKENS });
+
     return { draft: parseDraft(raw), contextBlock };
   }
 
@@ -56,6 +76,37 @@ export class Composer {
     );
     return parseDraft(raw);
   }
+}
+
+/**
+ * The `answer` string out of a half-written JSON object.
+ *
+ * The reply arrives as `{"answer":"…","claims":[…]}`, so until the closing quote
+ * lands there is no parseable object — but the answer text itself is readable
+ * from the first token. This reads it out of the partial buffer, unescaping the
+ * few sequences that can appear mid-string, and returns "" when the buffer has
+ * not reached the answer yet.
+ */
+export function partialAnswer(buf: string): string {
+  const at = buf.indexOf('"answer"');
+  if (at === -1) return "";
+  const open = buf.indexOf('"', buf.indexOf(":", at) + 1);
+  if (open === -1) return "";
+
+  let out = "";
+  for (let i = open + 1; i < buf.length; i++) {
+    const c = buf[i];
+    if (c === "\\") {
+      const n = buf[i + 1];
+      if (n === undefined) break;          // escape split across chunks
+      out += n === "n" ? "\n" : n === "t" ? "\t" : n;
+      i++;
+      continue;
+    }
+    if (c === '"') break;                  // the answer closed
+    out += c;
+  }
+  return out;
 }
 
 export function parseDraft(raw: string): Draft {
