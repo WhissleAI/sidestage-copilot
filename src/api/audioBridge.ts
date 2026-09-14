@@ -80,6 +80,9 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 (function () {
   var API = location.origin;
   var room = null, stream = null, visualTimer = null, visualEl = null;
+  var levelCtx = null, levelTimer = null, levelPost = null, levelWindow = [];
+  /** ~10 Hz. Fine enough to show a pause, coarse enough to stay cheap. */
+  var LEVEL_EVERY_MS = 100;
   /** How often a keyframe is offered to the copilot. Lots change on the order of
    *  a minute; the server throttles again at 8s regardless. */
   var VISUAL_EVERY_MS = 12000;
@@ -111,6 +114,11 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       intent: pending.intent,
       speechRate: pending.speechRate
     };
+    // The loudness while this was being said. Drained, so two utterances never
+    // claim the same audio.
+    body.levels = levelWindow.splice(0, levelWindow.length).map(function (v) {
+      return Math.round(v * 100) / 100;
+    });
     pending = { emotion: null, intent: null, speechRate: null };
     await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/transcript", {
       method: "POST",
@@ -203,12 +211,66 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       if (video) startVisual(showId, video);
       else log("no video track — the copilot will hear the show but not see it");
 
+      startLevels(showId, audio);
+
       audio.onended = function () { log("tab sharing ended by the browser"); el("stop").click(); };
     } catch (e) {
       status("capture failed", "err");
       log(String(e && e.message ? e.message : e));
     }
   };
+
+  /**
+   * Measure the show's loudness off the track we are already publishing.
+   *
+   * The console draws a timeline of the host's audio, and a timeline built from
+   * the transcript alone freezes whenever nobody is recognised as speaking —
+   * which on a selling show is most of the interesting moments, because the
+   * pause while the host waits for bids IS the signal.
+   *
+   * Time-domain RMS, not an FFT. We have the samples, so loudness over time is
+   * something we can honestly measure; frequency bins are not, and drawing bins
+   * we never computed would be a picture of nothing.
+   */
+  function startLevels(showId, audioTrack) {
+    try {
+      levelCtx = new (window.AudioContext || window.webkitAudioContext)();
+      var src = levelCtx.createMediaStreamSource(new MediaStream([audioTrack]));
+      var analyser = levelCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      src.connect(analyser);
+      var buf = new Float32Array(analyser.fftSize);
+      var pending = [];
+
+      levelTimer = setInterval(function () {
+        analyser.getFloatTimeDomainData(buf);
+        var sum = 0;
+        for (var i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        var rms = Math.sqrt(sum / buf.length);
+        // Perceptual, not linear: speech sits in a narrow band of raw RMS and a
+        // linear strip reads as a flat line with occasional spikes.
+        var v = Math.min(1, Math.max(0, (20 * Math.log10(rms + 1e-7) + 60) / 60));
+        pending.push(Math.round(v * 100) / 100);
+        levelWindow.push(v);
+        if (levelWindow.length > 600) levelWindow.shift();
+      }, LEVEL_EVERY_MS);
+
+      // Batched: one request a second rather than ten.
+      levelPost = setInterval(function () {
+        if (!pending.length) return;
+        var batch = pending.splice(0, pending.length);
+        fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/levels", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ levels: batch })
+        }).catch(function () {});
+      }, 1000);
+
+      log("measuring loudness at " + Math.round(1000 / LEVEL_EVERY_MS) + " Hz");
+    } catch (e) {
+      log("level metering unavailable: " + (e && e.message ? e.message : e));
+    }
+  }
 
   /**
    * Sample the shared tab's video and send a keyframe to the copilot.
@@ -301,6 +363,10 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
   el("stop").onclick = async function () {
     if (visualTimer) { clearInterval(visualTimer); visualTimer = null; }
     if (visualEl) { try { visualEl.remove(); } catch (e) {} visualEl = null; }
+    if (levelTimer) { clearInterval(levelTimer); levelTimer = null; }
+    if (levelPost) { clearInterval(levelPost); levelPost = null; }
+    if (levelCtx) { try { levelCtx.close(); } catch (e) {} levelCtx = null; }
+    levelWindow = [];
     try { if (room) await room.disconnect(); } catch (e) {}
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     room = null; stream = null;

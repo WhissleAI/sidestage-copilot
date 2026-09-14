@@ -528,7 +528,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    */
   app.post<{
     Params: { showId: string };
-    Body: { text?: string; emotion?: unknown; intent?: unknown; speechRate?: number; final?: boolean };
+    Body: { text?: string; emotion?: unknown; intent?: unknown; speechRate?: number; final?: boolean; levels?: unknown };
   }>("/api/shows/:showId/audio/transcript", async (req, reply) => {
     const text = (req.body?.text || "").trim();
     if (!text) return reply.code(400).send({ error: "text is required" });
@@ -545,6 +545,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         intent: normalizeDistribution(req.body?.intent as never),
         speechRate: typeof req.body?.speechRate === "number" ? req.body.speechRate : null,
         at: new Date().toISOString(),
+        // The loudness envelope the bridge measured while this was being said.
+        // Bounded: a long utterance must not put a thousand floats on the wire.
+        levels: Array.isArray(req.body?.levels)
+          ? (req.body.levels as unknown[])
+              .slice(-240)
+              .map((n) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0))
+          : null,
       };
 
       // The DISTRIBUTION goes into show context alongside the text, not just to
@@ -574,6 +581,36 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * each read costs a vision call. The reading is show context and never a
    * grounding fact — see the boundary enforced in compose/prompts.ts.
    */
+  /**
+   * The show's loudness, independent of any utterance.
+   *
+   * The transcript only exists where words were recognised, so a strip built
+   * from it alone freezes during a pause and looks like a dead capture. This
+   * keeps the timeline honest through silence — and silence on a selling show
+   * is information: it is the host waiting for bids.
+   */
+  app.post<{ Params: { showId: string }; Body: { levels?: unknown } }>(
+    "/api/shows/:showId/audio/levels",
+    async (req, reply) => {
+      const raw = Array.isArray(req.body?.levels) ? (req.body.levels as unknown[]) : null;
+      if (!raw) return reply.code(400).send({ error: "levels must be an array" });
+      try {
+        const target = rt(req.params.showId);
+        const levels = raw
+          .slice(-240)
+          .map((n) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0));
+        // Straight to the console. Deliberately NOT persisted: this is a
+        // 10 Hz waveform whose only consumer is a strip showing the last two
+        // minutes, and writing it would be the highest-volume table in the
+        // database in exchange for nothing anyone reads later.
+        hub.emit("levels", { showId: target.showId, at: new Date().toISOString(), levels });
+        return { ok: true, n: levels.length };
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+    },
+  );
+
   app.post<{ Params: { showId: string }; Body: { frame?: string } }>(
     "/api/shows/:showId/visual/frame",
     async (req, reply) => {

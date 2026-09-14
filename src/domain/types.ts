@@ -226,6 +226,29 @@ export interface TranscriptSegment {
   intent: SignalDistribution | null;
   speechRate: number | null;
   at: string;
+  /**
+   * Loudness envelope for this utterance — RMS per ~100ms, 0..1.
+   *
+   * Measured in the bridge off the same audio track it publishes, because the
+   * transcript alone cannot show a pause, an emphasis or a room going quiet,
+   * and those are exactly what an operator scanning a show reads for. Not a
+   * spectrogram: we have the time-domain signal, not an FFT, and drawing bins
+   * we never computed would be a picture of nothing.
+   */
+  levels: number[] | null;
+}
+
+/**
+ * A slice of the show's loudness, independent of any utterance.
+ *
+ * The transcript only exists where words were recognised; the strip has to keep
+ * moving through silence too, or a quiet stretch looks like a dead capture.
+ */
+export interface AudioLevels {
+  showId: string;
+  at: string;
+  /** RMS per ~100ms window, 0..1. */
+  levels: number[];
 }
 
 export interface ShowContext {

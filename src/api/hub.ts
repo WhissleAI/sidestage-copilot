@@ -14,7 +14,10 @@ export type EventName =
   // console can watch one show or all of them from a single stream.
   | "shows" | "show" | "source"
   // Host speech from the listen-only Whissle session, with its voice metadata.
-  | "transcript";
+  | "transcript"
+  // The show's loudness envelope, ~10 Hz. High volume, never persisted — its
+  // only consumer is a strip showing the last couple of minutes.
+  | "levels";
 
 interface Client {
   id: number;
