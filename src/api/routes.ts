@@ -1508,7 +1508,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * lot on screen, and a catalog with no show has nothing to listen to — so the
    * setup screen asks for both and this is the one call it makes.
    */
-  app.post<{ Body: { eventId?: string; url?: string; title?: string; host?: string; catalogId?: string } }>(
+  app.post<{ Body: { eventId?: string; url?: string; title?: string; host?: string; catalogId?: string; allowUnprepared?: boolean } }>(
     "/api/shows/attach",
     async (req, reply) => {
       const actor = mustWrite(req as object, reply, "attach a show");
@@ -1538,6 +1538,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         await preparer.drop(eventId!).catch(() => {});
         preparedCatalogId = null;
         prepared = null; // its agent went with it; the attach below mints a fresh one
+      }
+      // Preparing is where a show's catalog and knowledge base come from. An
+      // attach without it minted an agent with an empty knowledge base and the
+      // copilot started from nothing — so preparation is the door now, unless
+      // the caller brings a catalog of its own or says it knows what it is doing.
+      if (!prepared && !req.body?.catalogId && !req.body?.allowUnprepared) {
+        return reply.code(409).send({
+          error: "prepare the agent for this show first — that is where its catalog and knowledge base are built",
+          code: "prepare-first",
+          eventId: eventId ?? null,
+        });
       }
       const catalogId = (req.body?.catalogId || preparedCatalogId || "").trim();
       const catalog = catalogId ? getCatalog(catalogId) : null;

@@ -246,8 +246,9 @@ yours: register with any email and a password, or use the shared reviewer accoun
 the submission. The path that exercises the core loop, in order:
 
 1. **Home → Discover** lists eBay Live shows on air right now (read through the house session;
-   the badge says when the grid was last read). **Monitor** one — the busiest is best — and the
-   console opens on it. A show you do not own is monitored **read-only**: every buyer question
+   the badge says when the grid was last read). **Prepare agent** on one — the busiest is best —
+   which builds the show's catalog and its own agent (about a minute), then **Monitor**, and the
+   console opens on it. Preparing is mandatory: an attach without it answers 409. A show you do not own is monitored **read-only**: every buyer question
    is classified, grounded, drafted and guarded, and a reply is sent to the record and the
    audit chain rather than to eBay, which exposes no chat-post API either way.
 2. In the **console**: J/K move the queue, Enter sends, E edits (an edited draft is re-guarded
