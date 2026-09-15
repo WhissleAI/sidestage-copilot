@@ -191,6 +191,7 @@ export class Preparer {
               state: "queued",
               condition: /new/i.test(r.condition ?? "") ? "DS" : "USED",
               ...(r.imageUrl ? { imageUrl: r.imageUrl } : {}),
+              ...(r.itemWebUrl ? { url: r.itemWebUrl } : {}),
             });
           }
         } else {

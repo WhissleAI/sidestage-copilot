@@ -270,6 +270,7 @@ export function toEvidence(f: Fact, score: number): Evidence {
     score: Number(score.toFixed(3)),
   };
   if (f.listingVersion !== undefined) e.listingVersion = f.listingVersion;
+  if (f.url) e.url = f.url;
   return e;
 }
 

@@ -435,10 +435,26 @@ Stated plainly, because these are the things a reviewer would otherwise find.
     It can only cite that evidence, but it is still a model writing prose: read the counts first.
     The platform's own end-of-session summary is pulled beside it when the gateway produced one,
     matched by room and then by agent and time window — the report says which.
-16. **Host distributions are probability mass, and the head is honest about arousal.** "Excited
-    41%" on the report is 41% of the mass across every utterance, not "excited 41% of the time",
-    and the gateway's own note says the emotion head degrades on low-arousal states. Both are
-    printed on the surface rather than smoothed away.
+16. **Host distributions describe the seller's delivery, not sentiment.** The emotion and intent
+    heads measure the host. Read as sentiment they say nothing; read as a trajectory of delivery
+    — explaining, asking the room, driving the sale; calm, steady, high energy; rising or
+    settling — they say how the seller worked the show. `src/ingest/hostStyle.ts` turns them
+    into that: a style line in the reply context ("match that delivery, never a reason to make a
+    claim"), a "How the host worked the show" section with a two-minute trajectory on the report,
+    and a line in the agent's conclusion. "Excited 41%" is still 41% of the mass across every
+    utterance, not "excited 41% of the time", and the head degrades on low-arousal states; both
+    stay printed on the surface. Pace is estimated from word count over utterance timing when the
+    gateway sends no `words_per_minute`, which it did not on 2026-09-15.
+19. **What the host says is evidence.** An utterance from the last two minutes that shares a
+    content word or a number with the question becomes a citable `host:` fact beside the catalog's
+    (`src/retrieval/hostFacts.ts`; "10men" and "ten men" are normalised to meet). It carries no
+    listing price and no version, so the price guard keeps its own rules; the reply says "the host
+    just said". Until 2026-09-15 "10men slides?" was deferred while the transcript held the answer.
+20. **Cost is per seller, on a shared key.** The backend holds one Whissle key, so the wallet is
+    shared and its balance is not shown. A seller's Cost page sums their own shows: the wallet's
+    movement while a show ran alone counts as that show's spend; a show that overlapped another is
+    priced by its metered calls at the average cost per call learned from the shows that ran alone
+    (`GET /api/cost`, `show_costs.account_id`). Every figure names its basis.
 17. **One Whissle agent per stream, and the workspace caps agents at fifty.** A show's agent is
     retired a day after its report (`src/llm/agentGc.ts`, every six hours), a preparation nobody
     attached is dropped after two days, and hitting the cap triggers one retirement pass and one

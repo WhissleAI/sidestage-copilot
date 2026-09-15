@@ -36,6 +36,8 @@ import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
 import { admit, classify, classifySpeechAct, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
+import { hostFacts } from "../retrieval/hostFacts.js";
+import { toEvidence, type RetrievalResult } from "../retrieval/retriever.js";
 import { LatencyTracker, SpanTimer } from "../latency/spans.js";
 import { cacheKey, ReplyCache } from "../latency/cache.js";
 import { decideAction, decideReply } from "../autonomy/ladder.js";
@@ -270,6 +272,7 @@ export class Pipeline {
 
     // 1. retrieve (local, no network)
     const r = this.d.retriever.retrieve(msg.text, { pinnedId: show.pinnedListingId });
+    this.addHostFacts(msg.text, r);
     // "Is that a good price?" and "how does it compare to the other one?" are
     // market questions, and the comps that answer them were already on disk —
     // the reply path just never asked. Research is a local query costing
@@ -555,6 +558,7 @@ export class Pipeline {
     const started = Date.now();
     const show = await this.d.repo.show();
     const r = this.d.retriever.retrieve(question, { pinnedId: show.pinnedListingId });
+    this.addHostFacts(question, r);
 
     const { draft } = await this.composer.draft(
       {
@@ -600,6 +604,28 @@ export class Pipeline {
    *  and every one of them used to live in memory (and in every `hello`).
    *  Settled proposals beyond the newest 400 are dropped; the record in
    *  Postgres is the durable copy. */
+  /**
+   * What the host just said, as citable evidence beside the catalog's facts.
+   * Only utterances that share a content word or a number with the question,
+   * from the last two minutes, never more than three. A question the catalog
+   * could not ground but the host just answered is no longer an abstention.
+   */
+  private addHostFacts(question: string, r: RetrievalResult): void {
+    const segs = this.d.showContext.recent(120_000);
+    if (!segs.length) return;
+    const hf = hostFacts(question, segs);
+    if (!hf.length) return;
+    for (const f of hf) {
+      if (r.facts.some((x) => x.factId === f.factId)) continue;
+      r.facts.push(f);
+      r.evidence.push(toEvidence(f, 0.6));
+    }
+    if (r.abstain) {
+      r.abstain = false;
+      r.mode = "hybrid";
+    }
+  }
+
   private evict(): void {
     if (this.proposals.size <= 400) return;
     const settled = [...this.proposals.values()]

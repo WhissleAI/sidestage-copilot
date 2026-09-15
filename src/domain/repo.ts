@@ -27,7 +27,7 @@ interface ListingRow {
   id: string; sku: string; title: string; short_name: string; brand: string; model: string; colorway: string;
   size: string; condition: string; price_cents: number; floor_price_cents: number;
   cost_cents: number; qty: number; sold_this_show: number; views: number; state: string;
-  pinned: boolean; version: number; image_url: string; shipping_profile: string;
+  pinned: boolean; version: number; image_url: string; url?: string | null; shipping_profile: string;
   authenticated: boolean; cert_id: string | null; description: string; updated_at: string;
   external_ref: string | null; observed_at: string | null;
 }
@@ -46,7 +46,7 @@ function toListing(r: ListingRow): ListingWithDescription {
     priceCents: r.price_cents, floorPriceCents: r.floor_price_cents, costCents: r.cost_cents,
     qty: r.qty, soldThisShow: r.sold_this_show, views: r.views,
     state: r.state as Listing["state"], pinned: r.pinned, version: r.version,
-    imageUrl: r.image_url, shippingProfile: r.shipping_profile,
+    imageUrl: r.image_url, url: r.url ?? null, shippingProfile: r.shipping_profile,
     authenticated: r.authenticated, certId: r.cert_id, description: r.description,
     externalRef: r.external_ref, updatedAt: r.updated_at,
   };
@@ -160,23 +160,24 @@ export class Repo {
     sku: string; title: string; shortName: string; brand: string; model: string; colorway: string;
     size: string; condition: Listing["condition"]; priceCents: number; floorPriceCents: number;
     costCents: number; qty: number; state: Listing["state"]; shippingProfile: string;
-    authenticated: boolean; certId: string | null; description: string; imageUrl: string;
+    authenticated: boolean; certId: string | null; description: string; imageUrl: string; url?: string | null;
   }): Promise<ListingWithDescription> {
     const id = `lst_${createHash("sha1").update(i.sku).digest("hex").slice(0, 12)}`;
     const r = await this.q<ListingRow>(`
       INSERT INTO listings (show_id, id, sku, title, short_name, brand, model, colorway, size, condition,
         price_cents, floor_price_cents, cost_cents, qty, sold_this_show, views, state, pinned,
-        version, image_url, shipping_profile, authenticated, cert_id, description, updated_at)
+        version, image_url, shipping_profile, authenticated, cert_id, description, updated_at, url)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, 0, 0, $15, FALSE,
-        1, $16, $17, $18, $19, $20, $21)
+        1, $16, $17, $18, $19, $20, $21, $22)
       ON CONFLICT (show_id, id) DO UPDATE SET
         title = EXCLUDED.title, price_cents = EXCLUDED.price_cents, qty = EXCLUDED.qty,
+        url = COALESCE(EXCLUDED.url, listings.url),
         version = listings.version + 1, updated_at = EXCLUDED.updated_at
       RETURNING *`,
       [this.showId, id, i.sku, i.title, i.shortName, i.brand, i.model, i.colorway, i.size, i.condition,
        i.priceCents, i.floorPriceCents, i.costCents, i.qty, i.state,
-       i.imageUrl, i.shippingProfile, i.authenticated, i.certId, i.description, new Date().toISOString()],
+       i.imageUrl, i.shippingProfile, i.authenticated, i.certId, i.description, new Date().toISOString(), i.url || null],
     );
     return toListing(r.rows[0]!);
   }

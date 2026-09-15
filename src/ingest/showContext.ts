@@ -13,6 +13,7 @@
 // costs freshness, never latency.
 
 import type { ShowContext, SignalDistribution } from "../domain/types.js";
+import { styleOf, type StyleSample } from "./hostStyle.js";
 import type { LlmPort } from "../llm/types.js";
 import { extractJsonObject } from "../compose/composer.js";
 
@@ -32,6 +33,8 @@ interface Segment { text: string; at: number }
 const VOICE_TTL_MS = 45_000;
 /** How long an on-screen reading stays usable. Lots move fast on a live show. */
 const ON_SCREEN_TTL_MS = 60_000;
+/** How much of the host's recent delivery describes their style right now. */
+const STYLE_WINDOW_MS = 5 * 60_000;
 
 export class ShowContextEngine {
   private segs: Segment[] = [];
@@ -41,6 +44,7 @@ export class ShowContextEngine {
     recentPoints: [],
     tone: null,
     voice: null,
+    style: null,
     onScreen: null,
     updatedAt: new Date(0).toISOString(),
   };
@@ -63,11 +67,16 @@ export class ShowContextEngine {
    * says what the host is selling, the distribution says whether they are
    * excited about it — and because it is only worth carrying while it is fresh.
    */
-  push(text: string, voice?: SignalDistribution | null): void {
+  push(text: string, voice?: SignalDistribution | null, intent?: SignalDistribution | null, extra: { level?: number | null; wpm?: number | null } = {}): void {
     if (voice !== undefined) this.setVoice(voice);
     const t = text.trim();
     if (!t) return;
-    this.segs.push({ text: t, at: Date.now() });
+    const now = Date.now();
+    this.segs.push({ text: t, at: now });
+    // The style history keeps every trusted read: the voice heads describe
+    // the seller's delivery, and delivery is what a reply should match.
+    this.styleSamples.push({ at: now, emotion: voice?.trusted ? voice : null, intent: intent ?? null, level: extra.level ?? null, wpm: extra.wpm ?? null });
+    while (this.styleSamples.length > 400 || (this.styleSamples[0] && this.styleSamples[0].at < now - STYLE_WINDOW_MS)) this.styleSamples.shift();
     const cutoff = Date.now() - this.windowMs * 2;
     while (this.segs.length > 200 || (this.segs[0] && this.segs[0].at < cutoff)) this.segs.shift();
   }
@@ -84,6 +93,13 @@ export class ShowContextEngine {
   }
 
   private voiceAt = 0;
+  private styleSamples: StyleSample[] = [];
+
+  /** The host's utterances from the last `ms`, oldest first, for evidence. */
+  recent(ms: number): { text: string; at: number; seq: number }[] {
+    const since = Date.now() - ms;
+    return this.segs.filter((s) => s.at >= since).map((s) => ({ text: s.text, at: s.at, seq: s.at }));
+  }
 
   /** A one-line reading of what is on screen, from the show's video. */
   setOnScreen(text: string): void {
@@ -113,6 +129,11 @@ export class ShowContextEngine {
   /** The latest snapshot. Synchronous and never blocking — this is on the hot path. */
   current(): ShowContext {
     this.freshen();
+    const since = Date.now() - STYLE_WINDOW_MS;
+    const style = styleOf(this.styleSamples.filter((s) => s.at >= since));
+    if ((style?.label ?? null) !== (this.ctx.style?.label ?? null) || (style?.detail ?? null) !== (this.ctx.style?.detail ?? null)) {
+      this.ctx = { ...this.ctx, style };
+    }
     return this.ctx;
   }
 

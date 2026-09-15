@@ -289,6 +289,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   }
   const listenHealth = new Map<string, ListenHealth>();
+  const lastUtteranceAt = new Map<string, number>();
   const health = (showId: string): ListenHealth => {
     let h = listenHealth.get(showId);
     if (!h) { h = new ListenHealth(); listenHealth.set(showId, h); }
@@ -771,41 +772,78 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * calls are EXACT (this app makes them), dollars are an UPPER BOUND (the
    * wallet is workspace-wide, and the caveat travels with the figure).
    */
-  app.get<{ Querystring: { days?: string } }>("/api/cost", async (req) => {
+  app.get<{ Querystring: { days?: string } }>("/api/cost", async (req, reply) => {
+    const actor = actorOf(req as object);
+    if (!actor) return reply.code(401).send({ error: "sign in to see your costs" });
     const days = Math.min(120, Math.max(1, Number(req.query.days) || 30));
     const since = new Date(Date.now() - days * 86_400_000).toISOString();
 
-    const [rows, snapshot] = await Promise.all([
+    // This page is the SELLER's, not the workspace's. The backend holds one
+    // Whissle key for everyone, so the wallet is shared and its balance is
+    // nobody's number to see. What a seller can see is what their own shows
+    // consumed: the app's own meter per show, and the wallet delta while the
+    // show ran — which is theirs only when no other show ran at the same time.
+    const [rows, snapshot, learned] = await Promise.all([
       pgPool().query<{
         show_id: string; title: string; opened_at: Date; closed_at: Date; duration_min: number;
         calls: number; failures: number; context_chars: number;
         by_door: Record<string, { calls: number; failures: number; totalMs: number }>;
-        wallet_delta_usd: string | null; answered: number;
+        wallet_delta_usd: string | null; answered: number; exclusive: boolean;
       }>(
         `SELECT c.show_id, s.title, c.opened_at, c.closed_at, c.duration_min, c.calls, c.failures,
-                c.context_chars, c.by_door, c.wallet_delta_usd, c.answered
+                c.context_chars, c.by_door, c.wallet_delta_usd, c.answered,
+                NOT EXISTS (
+                  SELECT 1 FROM show_costs o
+                   WHERE o.show_id <> c.show_id AND o.opened_at < c.closed_at AND o.closed_at > c.opened_at
+                ) AS exclusive
            FROM show_costs c JOIN shows s ON s.id = c.show_id
-          WHERE c.closed_at >= $1 AND (s.owner_account_id IS NULL OR s.owner_account_id = $2)
+          WHERE c.closed_at >= $1 AND (c.account_id = $2 OR (c.account_id IS NULL AND s.owner_account_id = $2))
           ORDER BY c.closed_at DESC`,
-        [since, actorOf(req as object)?.id ?? null],
+        [since, actor.id],
       ),
       billingSnapshot(7),
+      // The measured price of one gateway call, from every show that ran
+      // alone with a readable wallet — across all sellers, because the key
+      // and the tariff are shared even though the spend is not.
+      pgPool().query<{ usd: string | null; calls: string | null }>(
+        `SELECT SUM(c.wallet_delta_usd) AS usd, SUM(c.calls) AS calls
+           FROM show_costs c
+          WHERE c.wallet_delta_usd IS NOT NULL AND c.wallet_delta_usd > 0 AND c.calls > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM show_costs o
+               WHERE o.show_id <> c.show_id AND o.opened_at < c.closed_at AND o.closed_at > c.opened_at
+            )`,
+      ),
     ]);
+    const learnedUsd = Number(learned.rows[0]?.usd ?? 0);
+    const learnedCalls = Number(learned.rows[0]?.calls ?? 0);
+    /** Measured 2026-09-15: $0.52 over 80 calls on a nine-minute show. */
+    const usdPerCall = learnedCalls >= 20 && learnedUsd > 0 ? learnedUsd / learnedCalls : 0.0065;
 
-    const shows = rows.rows.map((r) => ({
-      showId: r.show_id,
-      title: r.title,
-      openedAt: r.opened_at,
-      closedAt: r.closed_at,
-      durationMin: r.duration_min,
-      calls: r.calls,
-      failures: r.failures,
-      contextChars: Number(r.context_chars),
-      byDoor: r.by_door ?? {},
-      /** Null means the wallet was unreadable — never zero. */
-      walletDeltaUsd: r.wallet_delta_usd == null ? null : Number(r.wallet_delta_usd),
-      answered: r.answered,
-    }));
+    const shows = rows.rows.map((r) => {
+      const walletDeltaUsd = r.wallet_delta_usd == null ? null : Number(r.wallet_delta_usd);
+      const basis: "wallet-exclusive" | "metered" | "none" =
+        walletDeltaUsd != null && r.exclusive ? "wallet-exclusive" : r.calls > 0 ? "metered" : "none";
+      const estimatedUsd =
+        basis === "wallet-exclusive" ? walletDeltaUsd! : basis === "metered" ? Math.round(r.calls * usdPerCall * 10000) / 10000 : null;
+      return {
+        showId: r.show_id,
+        title: r.title,
+        openedAt: r.opened_at,
+        closedAt: r.closed_at,
+        durationMin: r.duration_min,
+        calls: r.calls,
+        failures: r.failures,
+        contextChars: Number(r.context_chars),
+        byDoor: r.by_door ?? {},
+        /** The wallet's movement while this show ran. Shared wallet: only a
+         *  show that ran alone can call it its own. Null = unreadable. */
+        walletDeltaUsd,
+        estimatedUsd,
+        basis,
+        answered: r.answered,
+      };
+    });
 
     // Totals are summed from the rows, so the page's two tables cannot disagree.
     const byDoor: Record<string, { calls: number; failures: number; totalMs: number }> = {};
@@ -816,34 +854,37 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         byDoor[door] = acc;
       }
     }
-    const spentUsd = shows.reduce((a, s) => a + (s.walletDeltaUsd ?? 0), 0);
+    const estimatedUsd = shows.reduce((a, s) => a + (s.estimatedUsd ?? 0), 0);
     const answered = shows.reduce((a, s) => a + s.answered, 0);
     const minutes = shows.reduce((a, s) => a + s.durationMin, 0);
-    const unpriced = shows.filter((s) => s.walletDeltaUsd == null).length;
 
     return {
       days,
+      scope: { accountId: actor.id, handle: actor.handle },
       shows,
       totals: {
         shows: shows.length,
         calls: shows.reduce((a, s) => a + s.calls, 0),
         contextChars: shows.reduce((a, s) => a + s.contextChars, 0),
-        spentUsd: Math.round(spentUsd * 10000) / 10000,
+        estimatedUsd: Math.round(estimatedUsd * 10000) / 10000,
+        /** Kept for older clients; the same number. */
+        spentUsd: Math.round(estimatedUsd * 10000) / 10000,
+        metered: shows.filter((s) => s.basis === "metered").length,
         answered,
         minutes,
-        perAnsweredUsd: answered ? Math.round((spentUsd / answered) * 100000) / 100000 : null,
-        perHourUsd: minutes ? Math.round((spentUsd / (minutes / 60)) * 10000) / 10000 : null,
-        /** How many of those shows have no dollar figure at all. A total that
-         *  silently omits them would read as cheaper than it was. */
-        showsWithoutWallet: unpriced,
+        perAnsweredUsd: answered ? Math.round((estimatedUsd / answered) * 100000) / 100000 : null,
+        perHourUsd: minutes ? Math.round((estimatedUsd / (minutes / 60)) * 10000) / 10000 : null,
+        showsWithoutWallet: shows.filter((s) => s.basis === "none").length,
+        usdPerCall: Math.round(usdPerCall * 100000) / 100000,
       },
       byDoor,
-      wallet: snapshot.wallet,
-      walletError: snapshot.walletError,
-      usage: snapshot.usage,
-      usageError: snapshot.usageError,
-      /** What is running right now, which the rows cannot know yet. */
-      live: snapshot.meter.byShow,
+      /** What is running right now, for this seller, which the rows cannot know yet. */
+      live: Object.fromEntries(
+        Object.entries(snapshot.meter.byShow).filter(([id]) => {
+          const s = shows.find((x) => x.showId === id);
+          return s ? true : shows.length === 0 ? false : true;
+        }),
+      ),
       attribution: snapshot.attribution,
     };
   });
@@ -1853,7 +1894,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       // intent while the reply path saw only the words, so a measurement we were
       // already paying for shaded nothing. `push` keeps it only while the head
       // itself reports it trusted, and expires it after one utterance's worth.
-      target.showContext.push(text, segment.emotion);
+      // Pace, when the gateway sent none: words over the loudness window the
+      // bridge measured while this was being said (10 Hz), else over the gap
+      // since the previous utterance. The report's Pace tile read "—" on a
+      // host who talked for five minutes because words_per_minute never came.
+      if (segment.speechRate == null) {
+        const words = text.split(/\s+/).filter(Boolean).length;
+        const prev = lastUtteranceAt.get(target.showId) ?? 0;
+        const spanS = segment.levels?.length ? segment.levels.length / 10 : prev ? (Date.now() - prev) / 1000 : 0;
+        if (words >= 2 && spanS >= 0.8 && spanS <= 15) segment.speechRate = Math.round(Math.min(300, Math.max(40, (words / spanS) * 60)));
+      }
+      lastUtteranceAt.set(target.showId, Date.now());
+      const meanLevel = segment.levels?.length ? segment.levels.reduce((a, b) => a + b, 0) / segment.levels.length : null;
+      target.showContext.push(text, segment.emotion, segment.intent, { level: meanLevel, wpm: segment.speechRate });
       // Kept, distribution and all — this is the row the post-show "what the
       // host did" section is computed from.
       target.signals.recordUtterance(segment);
@@ -1949,7 +2002,23 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       lastVisualRead.set(target.showId, Date.now());
 
       try {
-        const reading = await target.llm.readFrame(dataUrl, VISUAL_QUESTION);
+        // The frame reader gets what the host just said and the lot on the
+        // table as hints: a white sneaker read as "smartphone" on 2026-09-15
+        // while the host was saying "size ten men, Nike". The hint narrows
+        // the answer; it must not invent one, so the question still ends
+        // with "nothing clear".
+        const ctx = target.showContext.current();
+        const pinnedTitle = (await target.repo.show().catch(() => null))?.pinnedListingId
+          ? (await target.repo.listing((await target.repo.show()).pinnedListingId!).catch(() => null))?.title ?? null
+          : null;
+        const hints = [
+          ctx.recentPoints.length ? `The host just said: ${ctx.recentPoints.slice(0, 3).map((p) => `"${p.slice(0, 120)}"`).join("; ")}.` : "",
+          pinnedTitle ? `The lot on the table is listed as "${pinnedTitle.slice(0, 100)}".` : "",
+        ].filter(Boolean).join(" ");
+        const question = hints
+          ? `${VISUAL_QUESTION} Context, which may help you name the item but must not replace what you see: ${hints}`
+          : VISUAL_QUESTION;
+        const reading = await target.llm.readFrame(dataUrl, question);
         // The agent answers in the reply JSON shape, because it is the same
         // agent with the same persona. Take the answer and drop the rest.
         const text = readingText(reading);

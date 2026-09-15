@@ -65,6 +65,8 @@ export interface Listing {
    *  evidence carries the version it was read at, and PriceGuard compares. */
   version: number;
   imageUrl: string;
+  /** The listing on eBay, when the catalog knows it. Null for an observed lot. */
+  url?: string | null;
   shippingProfile: string;
   authenticated: boolean;
   certId: string | null;
@@ -86,7 +88,7 @@ export interface ChatMessage {
   proposalId?: string;
 }
 
-export type EvidenceSource = "listing" | "policy" | "catalog" | "qa" | "market";
+export type EvidenceSource = "listing" | "policy" | "catalog" | "qa" | "market" | "host";
 
 export interface Evidence {
   /** Stable, addressable id: `listing:lst_aj1_10#price`, `policy:shipping#intl`, … */
@@ -97,6 +99,8 @@ export interface Evidence {
   score: number;
   /** Present on listing-derived facts. The staleness key. */
   listingVersion?: number;
+  /** The listing on eBay, when the catalog knows it. */
+  url?: string;
 }
 
 export interface GuardResult {
@@ -266,6 +270,9 @@ export interface ShowContext {
   currentTopic: string;
   listingInFocus: string | null;
   recentPoints: string[];
+  /** How the host has been working the room over the last few minutes —
+   *  delivery, not sentiment. From the voice heads (src/ingest/hostStyle.ts). */
+  style?: { label: string; detail: string } | null;
   /** The LLM's read of the host's manner, summarised from the transcript TEXT. */
   tone: string | null;
   /**

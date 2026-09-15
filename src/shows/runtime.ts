@@ -642,13 +642,13 @@ export class ShowRuntime {
 
     await this.db.query(
       `INSERT INTO show_costs
-         (show_id, opened_at, duration_min, calls, failures, context_chars, by_door, wallet_delta_usd, answered)
-       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)
+         (show_id, opened_at, duration_min, calls, failures, context_chars, by_door, wallet_delta_usd, answered, account_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)
        ON CONFLICT (show_id) DO UPDATE SET
          closed_at = now(), duration_min = EXCLUDED.duration_min, calls = EXCLUDED.calls,
          failures = EXCLUDED.failures, context_chars = EXCLUDED.context_chars,
          by_door = EXCLUDED.by_door, wallet_delta_usd = EXCLUDED.wallet_delta_usd,
-         answered = EXCLUDED.answered`,
+         answered = EXCLUDED.answered, account_id = COALESCE(EXCLUDED.account_id, show_costs.account_id)`,
       [
         this.showId,
         report.startedAt,
@@ -659,6 +659,7 @@ export class ShowRuntime {
         JSON.stringify(mine.byDoor),
         spent,
         report.engagement.answered,
+        this.ownerAccountId,
       ],
     );
   }

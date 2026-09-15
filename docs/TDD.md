@@ -156,6 +156,16 @@ with **Reciprocal Rank Fusion** (k=60).
   listing's own shipping line above the governing clause. Fields in `POLICY_LED` now let the
   clause lead. R@1 0.737 → 0.842.
 
+**The host as a source.** `src/retrieval/hostFacts.ts` turns the last two minutes of transcript
+into citable `host:` facts when an utterance shares a content word or a number with the question
+(numbers spelled out and glued tokens are normalised: "ten men" meets "10men"). They are appended
+to the retrieval result in `Pipeline.addHostFacts` with evidence score 0.6, lift an abstention,
+render in the context block as `[host:…] (the host said, 40s ago) "…"`, and the composer is told to
+say "the host just said". A host fact carries no `numericCents` and no listing version, so the
+price guard still measures any money amount against the listing facts. Style — from
+`src/ingest/hostStyle.ts` over the same signals — enters the block as one line about delivery and
+is never grounds for a claim.
+
 **Abstention** is driven by *slot resolution failing*, with a weak-BM25 backstop — **not** by a
 similarity threshold, because measured over the labelled set ungrounded questions score BM25
 2.6–5.7 and grounded ones 2.0–10.7. Those distributions overlap almost completely. A confidence

@@ -353,7 +353,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
         if (!w || !h) return;
         // Long edge 640: enough for the model to read a shoe or a slab label,
         // small enough that the frame is tens of KB rather than hundreds.
-        var scale = Math.min(1, 640 / Math.max(w, h));
+        var scale = Math.min(1, 960 / Math.max(w, h));
         canvas.width = Math.round(w * scale);
         canvas.height = Math.round(h * scale);
         var cx = canvas.getContext("2d");
@@ -365,7 +365,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
         // paragraph about how dark it is — which then becomes "show context".
         if (isBlank(cx, canvas)) { return; }
 
-        var frame = canvas.toDataURL("image/jpeg", 0.7);
+        var frame = canvas.toDataURL("image/jpeg", 0.8);
 
         var r = await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/visual/frame", {
           method: "POST",

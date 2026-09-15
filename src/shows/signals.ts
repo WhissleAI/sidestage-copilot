@@ -16,6 +16,7 @@ import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Pool } from "../db/pg.js";
 import type { SignalDistribution, TranscriptSegment } from "../domain/types.js";
+import { styleOf, trajectoryOf, type HostStyle, type StyleBucket, type StyleSample } from "../ingest/hostStyle.js";
 
 const ROOT = resolve(process.env.SHOW_MEDIA_DIR || "./data/shows");
 
@@ -73,6 +74,10 @@ export interface HostSummary {
   /** Loudest and quietest ten-second stretches, as offsets — where to jump. */
   loudestAtMs: number | null;
   quietestAtMs: number | null;
+  /** The seller's delivery, summarised: what the voice heads are FOR. */
+  style: HostStyle | null;
+  /** Two-minute buckets of delivery over the show. */
+  trajectory: StyleBucket[];
 }
 
 function mass(dists: (SignalDistribution | null)[]): { label: string; share: number }[] {
@@ -241,7 +246,18 @@ export class SessionSignals {
     const u = await this.utterances(showId);
     if (!u.length) return null;
 
+    // Speech rate: what the gateway reported, else estimated from each
+    // utterance's word count over the gap since the previous one (the
+    // gateway's words_per_minute signal never arrived on 2026-09-15, and the
+    // report said "—" for pace on a host who talked for five minutes).
     const rates = u.map((x) => x.speechRate).filter((x): x is number => typeof x === "number" && x > 0);
+    if (!rates.length) {
+      for (let i = 1; i < u.length; i++) {
+        const gapS = (u[i]!.offsetMs - u[i - 1]!.offsetMs) / 1000;
+        const words = u[i]!.text.split(/\s+/).filter(Boolean).length;
+        if (gapS >= 0.8 && gapS <= 15 && words >= 2) rates.push(Math.min(300, Math.max(40, (words / gapS) * 60)));
+      }
+    }
     const sorted = [...rates].sort((a, b) => a - b);
     const medianRate = sorted.length
       ? sorted.length % 2
@@ -267,7 +283,16 @@ export class SessionSignals {
       if (!quietest || v < quietest.v) quietest = { v, at: x.offsetMs };
     }
 
+    const samples: StyleSample[] = u.map((x) => ({
+      at: x.offsetMs,
+      emotion: x.emotion,
+      intent: x.intent,
+      level: x.levels?.length ? x.levels.reduce((a, b) => a + b, 0) / x.levels.length : null,
+      wpm: x.speechRate,
+    }));
     return {
+      style: styleOf(samples),
+      trajectory: trajectoryOf(samples, 0),
       utterances: u.length,
       speakingSpanS: Math.max(0, Math.round((u[u.length - 1]!.offsetMs - u[0]!.offsetMs) / 1000)),
       intent: mass(u.map((x) => x.intent)),

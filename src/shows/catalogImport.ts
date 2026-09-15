@@ -39,6 +39,8 @@ export interface CatalogItem {
   authenticated?: boolean;
   certId?: string | null;
   description?: string;
+  /** The listing's page on eBay, when known. */
+  url?: string;
   imageUrl?: string;
 }
 
@@ -117,6 +119,7 @@ function normalize(r: CatalogItem): Required<Omit<CatalogItem, "certId">> & { ce
     certId: r.certId ?? null,
     description: String(r.description || ""),
     imageUrl: String(r.imageUrl || ""),
+    url: String(r.url || ""),
   };
 }
 

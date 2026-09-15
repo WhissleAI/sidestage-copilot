@@ -78,6 +78,9 @@ export function buildContextBlock(i: ComposeInputs): string {
     "- Put ids ONLY in the `claims` array. NEVER write a fact id inside `answer` —",
     "  the buyer sees `answer`, and an id in it looks like a system error.",
     "- If the facts do not answer the question, say the host will cover it shortly. Do not guess.",
+    "- A fact whose id starts with host: is what the host just said on air, transcribed. You may answer",
+    "  from it and cite it, and say so (\"the host just said…\"). Never present a number the host said",
+    "  as the listing's price: prices come from listing facts only.",
     "",
   );
 
@@ -99,6 +102,12 @@ export function buildContextBlock(i: ComposeInputs): string {
     // audio. Labelled separately so the model does not treat a summary of what
     // was said as evidence of how it was said.
     if (i.context.tone) lines.push(`How the host is presenting, from the transcript: ${i.context.tone}.`);
+    if (i.context.style) {
+      lines.push(
+        `How the host has been working the room over the last few minutes (delivery, not buyer sentiment): ${i.context.style.label} — ${i.context.style.detail}. ` +
+          "Match that delivery in length and energy. It is never a reason to make a claim.",
+      );
+    }
     if (i.context.voice) lines.push(voiceLine(i.context.voice));
     if (i.context.onScreen) {
       lines.push(
@@ -124,7 +133,7 @@ export function buildContextBlock(i: ComposeInputs): string {
   if (i.facts.length) {
     for (const f of i.facts) {
       const stamp = f.listingVersion !== undefined ? ` (listing version ${f.listingVersion})` : "";
-      lines.push(`[${f.factId}]${stamp} ${f.text}`);
+      lines.push(f.source === "host" ? `[${f.factId}] (${f.label}) "${f.text}"` : `[${f.factId}]${stamp} ${f.text}`);
     }
   } else {
     lines.push("(none — nothing in the catalog or policy corpus matched this question)");

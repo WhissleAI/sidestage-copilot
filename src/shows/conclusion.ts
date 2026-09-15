@@ -121,6 +121,18 @@ function evidenceText(e: ConclusionEvidence): string {
       `intent ${pct(h.intent)}; emotion ${pct(h.emotion)}; ` +
       `median speech rate ${h.medianSpeechRate ?? "unknown"} wpm; ${h.emotionFlips} emotion flips.`,
     );
+    if (h.style) {
+      lines.push(`HOST STYLE (delivery, not buyer sentiment): ${h.style.label} — ${h.style.detail}.`);
+    }
+    if (h.trajectory?.length > 1) {
+      lines.push(
+        "HOST TRAJECTORY (2-minute buckets: energy 0..1, top intent): " +
+          h.trajectory.map((b) => {
+            const top = Object.entries(b.intent).sort((x, y) => y[1] - x[1])[0];
+            return `${Math.round(b.offsetMs / 60000)}m ${b.energy.toFixed(2)}${top ? ` ${top[0]}` : ""}`;
+          }).join("; ") + ".",
+      );
+    }
   } else lines.push("HOST SIGNALS: none — host audio was not captured.");
   if (e.said.length) {
     lines.push("HOST SAID (sample):");

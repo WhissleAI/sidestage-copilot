@@ -32,6 +32,8 @@ export interface Fact {
   /** For availability facts: the exact quantity the text asserts. */
   qty?: number;
   policyTopic?: string;
+  /** The listing on eBay, for a listing-derived fact whose catalog knows it. */
+  url?: string;
   /** Precomputed at index build. */
   tokens: string[];
   vector: SparseVec;
@@ -78,6 +80,12 @@ function itemName(l: ListingWithDescription): string {
 }
 
 export function listingFacts(l: ListingWithDescription): Fact[] {
+  const facts = listingFactsBare(l);
+  if (l.url) for (const f of facts) f.url = l.url;
+  return facts;
+}
+
+function listingFactsBare(l: ListingWithDescription): Fact[] {
   const name = itemName(l);
   // The chip label has to say WHICH listing, or a reply grounded across several
   // lots renders as five identical "Listing - shipping" chips and the operator
