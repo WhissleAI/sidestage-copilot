@@ -86,8 +86,11 @@ cmd_deploy() {
   # to ubuntu for the sync and back to the container afterwards.
   $SSH "sudo chown -R ubuntu:ubuntu /opt/sidestage"
   rsync -az --delete -e "ssh -i $PEM -o StrictHostKeyChecking=accept-new" \
-    --exclude node_modules --exclude .git --exclude .tmp --exclude 'data/shows' --exclude 'data/ebay-profile' \
+    --exclude node_modules --exclude .git --exclude .tmp --exclude 'data/shows' --exclude 'data/ebay-profile' --exclude 'fixtures/catalogs/ebay-*' \
     ./ "ubuntu@$IP:/opt/sidestage/"
+  # `fixtures/catalogs/ebay-*.json` are written BY THE APP on the box when a show is
+  # prepared; with --delete, syncing that directory wiped them on every deploy and
+  # left prepared_shows rows pointing at catalogs that no longer existed.
   # The app runs as the image's pwuser (uid 1001); rsync leaves files owned by
   # ubuntu (1000). Hand the writable directories over before starting.
   $SSH "cd /opt/sidestage && sudo mkdir -p data/shows fixtures/catalogs && sudo chown -R 1001:1001 data fixtures/catalogs && printf 'SITE_ADDRESS=%s\nEBAY_DISCOVERY_PROXY=%s\n' '$SITE' '${EBAY_DISCOVERY_PROXY:-}' > .deploy.env && sudo docker compose --env-file .deploy.env up -d --build --remove-orphans && sudo docker compose ps"

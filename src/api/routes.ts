@@ -9,7 +9,7 @@ import type { FastifyInstance } from "fastify";
 import type { AutonomyLevel } from "../domain/types.js";
 import { LADDER } from "../autonomy/ladder.js";
 import { discoverLiveShows, discoverSellerShows, parseEventId } from "../ingest/ebaylive/discovery.js";
-import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid } from "../sellers/following.js";
+import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid, rememberGrid } from "../sellers/following.js";
 import { Preparer } from "../shows/prepareEvent.js";
 import { sessionStatus } from "../ingest/ebaylive/session.js";
 import { BudgetWatch, budgetState, setBudgetWatch } from "../llm/budget.js";
@@ -493,7 +493,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             { showId, spentUsd: state.spentUsd, capUsd: state.capUsd, basis: "wallet-delta upper bound" },
           )
           .then((e) => hub.emit("audit", { showId, ...e }))
-          .catch(() => {});
+          .catch((e) => console.warn(`  audit: budget-cap entry for ${showId} not written — ${(e as Error).message}`));
       },
     ),
   );
@@ -939,6 +939,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     try {
       const limit = Math.min(30, Number(req.query.limit) || 12);
       const { shows, reason, session } = await discoverLiveShows({ limit });
+      if (reason === "ok") rememberGrid(shows);
       // The reason travels with the list. "Nobody is on air" and "sign in to
       // eBay first" are both empty grids and completely different instructions.
       return { shows, reason, session };
@@ -1286,13 +1287,25 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       // and mint a second agent with an empty knowledge base — so the operator
       // did the preparation and then watched the copilot start from nothing.
       const eventId = parseEventId(input);
-      const prepared = eventId ? await preparer.get(eventId).catch(() => null) : null;
+      let prepared = eventId ? await preparer.get(eventId).catch(() => null) : null;
       // The live grid we already read knows this show's real title and host;
       // the player page's own <title> is generic. Without this a show attached
       // by link was called "eBay Live 47tK1SX0VsiHEXN1" for its whole life.
       const seen = eventId ? cachedDiscovery().shows.find((s) => s.eventId === eventId) : undefined;
 
-      const catalogId = (req.body?.catalogId || prepared?.catalogId || "").trim();
+      let preparedCatalogId = prepared?.catalogId ?? null;
+      if (preparedCatalogId && !getCatalog(preparedCatalogId)) {
+        // The preparation's catalog file is gone (a deploy once wiped every
+        // app-written catalog on the box). A stale preparation must not stop a
+        // seller attaching to a live show: forget it, say so, and attach the
+        // way an unprepared show attaches — its own agent, grounded from the
+        // stream — rather than answering 400 to a perfectly good link.
+        console.warn(`  attach: prepared catalog ${preparedCatalogId} for ${eventId} is missing — dropping the preparation`);
+        await preparer.drop(eventId!).catch(() => {});
+        preparedCatalogId = null;
+        prepared = null; // its agent went with it; the attach below mints a fresh one
+      }
+      const catalogId = (req.body?.catalogId || preparedCatalogId || "").trim();
       const catalog = catalogId ? getCatalog(catalogId) : null;
       if (catalogId && !catalog) return reply.code(400).send({ error: `unknown catalog "${catalogId}"` });
 
@@ -1487,7 +1500,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         .query("UPDATE shows SET listen_room = $2, listen_started_at = now() WHERE id = $1", [
           target.showId, session.room || null,
         ])
-        .catch(() => {});
+        // Without this row the report cannot find the platform session that
+        // holds the host's emotion and intent — worth a line in the log.
+        .catch((e) => console.warn(`  listen: room for ${target.showId} not recorded — ${(e as Error).message}`));
       return session;
     } catch (e) {
       return reply.code(502).send({ error: (e as Error).message });

@@ -181,7 +181,11 @@ export async function analyticsOverview(d: Pool, days: number): Promise<Analytic
       answered,
       sent: sum(reported, (r) => r.report.engagement.sent),
       answeredRate: questions ? answered / questions : 0,
-      medianOfMediansMs: median(reported.map((r) => r.report.engagement.medianLatencyMs)),
+      // A show that drafted nothing has no median, not a median of zero; four
+      // such shows next to one real one used to read as "0ms" here.
+      medianOfMediansMs: median(
+        reported.map((r) => r.report.engagement.medianLatencyMs).filter((ms) => ms > 0),
+      ),
       worstP95Ms: Math.max(0, ...reported.map((r) => r.report.engagement.p95LatencyMs)),
       cacheHitRate: reported.length
         ? sum(reported, (r) => r.report.engagement.cacheHitRate) / reported.length

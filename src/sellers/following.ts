@@ -89,6 +89,21 @@ export async function liveGrid(opts: { force?: boolean } = {}): Promise<Discover
 
 
 /**
+ * A grid someone else just read is a grid worth keeping.
+ *
+ * The Discover tab's own read went through `/api/shows/discover` and straight
+ * back to the browser; the cache the attach path consults for a show's real
+ * title and host never saw it, so a show attached seconds after being found
+ * was still called "eBay Live <id>". Remember every successful read.
+ */
+export function rememberGrid(shows: DiscoveredShow[]): void {
+  if (!shows.length) return;
+  grid = shows;
+  gridAt = Date.now();
+  lastEmptyReason = null;
+}
+
+/**
  * The grid we already have, in the shape the home surface wants.
  *
  * Same cache, same rule — it never starts a read. The reason travels with it

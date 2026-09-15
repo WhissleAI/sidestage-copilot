@@ -49,7 +49,7 @@ export class SessionRecord {
         [this.showId, m.id, m.author, m.text, m.at, m.intent, m.speechAct ?? null,
          m.admitted, m.dropReason ?? null],
       )
-      .catch(() => {});
+      .catch((e) => console.warn(`  record: chat ${m.id} not written — ${(e as Error).message}`));
   }
 
   /**
@@ -90,8 +90,14 @@ export class SessionRecord {
     if (p.status === "drafting") return;
     void this.d
       .query(
+        // Twenty columns for twenty values. Migration 005 added decided_at and
+        // edited to the VALUES but not to this list; Postgres refused every
+        // write with "more expressions than target columns", the catch below
+        // was silent, and every report and the whole of Analytics carried
+        // zero drafted replies for as long as it stayed that way.
         `INSERT INTO reply_proposals (show_id, id, message_id, author, question, draft, sent_text,
-           status, verdict, confidence, repaired, abstained, latency_ms, cache_hit, guards, evidence, intent, at)
+           status, verdict, confidence, repaired, abstained, latency_ms, cache_hit, guards, evidence, intent, at,
+           decided_at, edited)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18,$19,$20)
          ON CONFLICT (show_id, id) DO UPDATE SET
            draft = EXCLUDED.draft, sent_text = EXCLUDED.sent_text, status = EXCLUDED.status,
@@ -114,7 +120,9 @@ export class SessionRecord {
           Boolean(p.sentText && p.sentText.trim() !== (p.draft ?? "").trim()),
         ],
       )
-      .catch(() => {});
+      // Fire-and-forget is right; silent is not. A record that quietly fails
+      // is how a whole night of drafts went missing from every report.
+      .catch((e) => console.warn(`  record: proposal ${p.id} not written — ${(e as Error).message}`));
   }
 }
 
