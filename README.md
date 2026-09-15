@@ -241,10 +241,28 @@ lets a seller consent to their own listings; `EBAY_TOKEN_KEY` seals those tokens
 `EBAY_DELETION_VERIFICATION_TOKEN` + `EBAY_DELETION_ENDPOINT` answer eBay's account-deletion
 challenge, which a production keyset requires. See `.env.example`.
 
-Reviewers: a scoped key has been shared with the submission. If you do not have one,
-`npm test` and `npm run eval` still run in full — they cover retrieval, all six guardrails,
-two-phase commit, rollback, idempotency, the audit chain, tenancy and the eBay adapter —
-and the recorded walkthrough shows the live reply path.
+**Reviewers.** The hosted prototype at https://sidestage.whissle.ai needs no credential of
+yours: register with any email and a password, or use the shared reviewer account named in
+the submission. The path that exercises the core loop, in order:
+
+1. **Home → Discover** lists eBay Live shows on air right now (read through the house session;
+   the badge says when the grid was last read). **Monitor** one — the busiest is best — and the
+   console opens on it. A show you do not own is monitored **read-only**: every buyer question
+   is classified, grounded, drafted and guarded, and a reply is sent to the record and the
+   audit chain rather than to eBay, which exposes no chat-post API either way.
+2. In the **console**: J/K move the queue, Enter sends, E edits (an edited draft is re-guarded
+   at send), X dismisses; the pills on each card are the six guards; the inspector (I) shows
+   the facts a claim cites. ⌘J asks the research card a question about the lot on screen.
+3. **End session** builds the report: answered rate, time to answer, blocked replies with the
+   guard that blocked them, the audit chain, and the timeline of what was on screen.
+4. **Settings → Dry run** puts any question through the same pipeline and guards against the
+   catalog as it stands, without a show. **Analytics** and **Cost** roll finished shows up.
+
+Locally, `DEMO_SHOW=1 npm run dev` runs the scripted show (deterministic, no eBay), and
+`npm run demo:stale-price` forces the mid-show markdown that `PriceGuard` must catch. The
+live reply path needs a Whissle workspace key (`WHISSLE_API_KEY`, `wsk_…`); `npm test` and
+`npm run eval` do not — they cover retrieval, all six guardrails, two-phase commit, rollback,
+idempotency, the audit chain, tenancy and the eBay adapter from fixtures.
 
 ## Accounts and tenancy
 
