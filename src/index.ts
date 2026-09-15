@@ -12,6 +12,8 @@ import { buildApp } from "./api/server.js";
 import { db as pgPool } from "./db/pg.js";
 import { startFollowingPoller } from "./sellers/following.js";
 import { startBudgetWatch, stopBudgetWatch } from "./llm/budget.js";
+import { retireStaleAgents, startAgentGc } from "./llm/agentGc.js";
+import { onAgentCap } from "./llm/streamAgent.js";
 
 async function main(): Promise<void> {
   const { app, ctx } = await buildApp();
@@ -26,6 +28,9 @@ async function main(): Promise<void> {
   // Same reason: the cap is only real if something reads the wallet while the
   // show runs, and a wallet read is a gateway round trip the tests must not make.
   startBudgetWatch();
+  // Agents are capped per workspace; finished shows give theirs back.
+  const stopAgentGc = startAgentGc(pgPool());
+  onAgentCap(() => retireStaleAgents(pgPool(), { reportAgeH: 1, preparedAgeH: 24 }));
 
   const rows = await ctx.shows.list();
   console.log(
@@ -43,6 +48,7 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     stopFollowing();
+    stopAgentGc();
     stopBudgetWatch();
     await ctx.stop();
     await app.close();

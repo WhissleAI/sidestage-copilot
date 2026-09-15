@@ -112,13 +112,16 @@ export function rememberGrid(shows: DiscoveredShow[]): void {
  */
 export function cachedDiscovery(): {
   shows: DiscoveredShow[];
-  reason: "ok" | "no-session" | "stale-session" | "signed-out" | "blocked" | "stale";
+  reason: "ok" | "pending" | "no-session" | "stale-session" | "signed-out" | "blocked" | "stale";
   session: ReturnType<typeof sessionStatus>;
 } {
   const session = sessionStatus();
   const fresh = Date.now() - gridAt < GRID_TTL_MS;
   if (!session.present) return { shows: [], reason: "no-session", session };
   if (lastEmptyReason === "signed-out") return { shows: [], reason: "signed-out", session };
+  // Never read since this process started is not "refused": the poller's
+  // first read is a minute out. Say pending, and the tab polls until it lands.
+  if (!gridAt && !lastEmptyReason) return { shows: [], reason: "pending", session };
   if (fresh) return { shows: grid, reason: "ok", session };
   // Cached but old: hand back what we have and say it is stale rather than
   // showing an empty grid to someone whose last read found twelve shows.

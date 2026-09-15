@@ -96,9 +96,18 @@ function showPreamble(s: StreamAgentSpec): string {
 }
 
 /** Create an agent that belongs to this show. */
+/**
+ * Something that can make room when the workspace's agent cap is hit —
+ * registered by the server (it needs the database); absent in tests.
+ */
+let makeRoom: (() => Promise<unknown>) | null = null;
+export function onAgentCap(fn: () => Promise<unknown>): void {
+  makeRoom = fn;
+}
+
 export async function createStreamAgent(s: StreamAgentSpec): Promise<string> {
   const handle = s.seller?.handle || s.host || "the seller";
-  const created = await call<{ id: string }>("POST", "/api/agents", {
+  const create = () => call<{ id: string }>("POST", "/api/agents", {
     // Named for the show so an operator looking at the Whissle console can tell
     // what a given agent is for, and so an orphan is recognisable as one.
     name: `SideStage · ${s.showTitle}`.slice(0, 80),
@@ -116,6 +125,16 @@ export async function createStreamAgent(s: StreamAgentSpec): Promise<string> {
       { name: "read_url", enabled: true },
     ],
   });
+  let created: { id: string };
+  try {
+    created = await create();
+  } catch (e) {
+    // The workspace caps agents at fifty. Retire what is finished and try
+    // once more before telling the operator to go and delete things by hand.
+    if (!/limit of \d+ agents|429/.test(String((e as Error).message)) || !makeRoom) throw e;
+    await makeRoom().catch(() => undefined);
+    created = await create();
+  }
 
   // Layer A, armed at creation rather than on a later save: a show that starts
   // before anyone opens the settings page is still guarded.
