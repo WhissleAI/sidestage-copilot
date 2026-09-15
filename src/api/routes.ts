@@ -43,6 +43,8 @@ import { challengeResponse, honourDeletion, parseNotice, verifyNotification } fr
 import { createReadStream, existsSync } from "node:fs";
 import { db as pgPool } from "../db/pg.js";
 import { config } from "../config.js";
+import { WhissleClient } from "../llm/whissle.js";
+import { describeFrames, describing } from "../shows/frameDescriber.js";
 import { SendRefused } from "../pipeline/pipeline.js";
 import type { AppContext } from "./context.js";
 
@@ -255,6 +257,43 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // same tables for the report. Media reads below do not need a live runtime —
   // a report is read after the show is gone.
   const signals = new SessionSignals(pgPool());
+
+  /**
+   * Per-show health of the host-audio path. Three clocks: the last loud level
+   * frame, the last transcript, the last audio chunk. Loud for a while with no
+   * transcript is `stalled`; the first transcript after that is `ok` again.
+   */
+  const STALL_MS = 45_000;
+  class ListenHealth {
+    private loudSince = 0;
+    private lastLoud = 0;
+    private lastTranscript = 0;
+    private state: "ok" | "stalled" = "ok";
+    reset(): void { this.loudSince = 0; this.lastLoud = 0; this.lastTranscript = Date.now(); this.state = "ok"; }
+    touch(what: "loud" | "transcript" | "audio"): void {
+      const now = Date.now();
+      if (what === "loud") { if (!this.loudSince || now - this.lastLoud > 10_000) this.loudSince = now; this.lastLoud = now; }
+      if (what === "transcript") { this.lastTranscript = now; this.loudSince = 0; }
+    }
+    check(emit: (state: "ok" | "stalled", detail: string) => void): void {
+      const now = Date.now();
+      const quiet = now - (this.lastTranscript || now);
+      const loudFor = this.loudSince ? now - this.loudSince : 0;
+      if (this.state === "ok" && loudFor > STALL_MS && quiet > STALL_MS) {
+        this.state = "stalled";
+        emit("stalled", `audio has been live for ${Math.round(loudFor / 1000)}s with no transcript for ${Math.round(quiet / 1000)}s`);
+      } else if (this.state === "stalled" && quiet < 5_000) {
+        this.state = "ok";
+        emit("ok", "transcript resumed");
+      }
+    }
+  }
+  const listenHealth = new Map<string, ListenHealth>();
+  const health = (showId: string): ListenHealth => {
+    let h = listenHealth.get(showId);
+    if (!h) { h = new ListenHealth(); listenHealth.set(showId, h); }
+    return h;
+  };
   // Audio chunks arrive as raw bytes, not JSON. Registered once; the route
   // caps the size.
   for (const mime of ["audio/webm", "audio/ogg", "audio/mp4", "application/octet-stream"]) {
@@ -1658,6 +1697,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       // summary and its per-agent session list all belonged to the wrong
       // agent, and the report could never find them.
       const session = await target.llm.startListenSession();
+      health(target.showId).reset();
+      hub.emit("listen", { showId: target.showId, at: new Date().toISOString(), state: "ok", detail: "listen session started" });
       await pgPool()
         .query("UPDATE shows SET listen_room = $2, listen_started_at = now() WHERE id = $1", [
           target.showId, session.room || null,
@@ -1678,7 +1719,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * upload replaces itself. Kept beside the transcript on the same clock, so
    * the report can play the show back against what was said and shown.
    */
-  app.post<{ Params: { showId: string }; Querystring: { seq?: string; durationMs?: string } }>(
+  app.post<{ Params: { showId: string }; Querystring: { seq?: string; durationMs?: string; run?: string } }>(
     "/api/shows/:showId/audio/chunk",
     async (req, reply) => {
       if (!policy().ingest.hostAudio) {
@@ -1686,6 +1727,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       }
       const seq = Number(req.query.seq);
       const durationMs = Number(req.query.durationMs);
+      // `run` identifies one bridge page load; with it a retry replaces its own
+      // row. Without it (an older bridge) every upload is a new chunk.
+      const run = typeof req.query.run === "string" ? req.query.run.slice(0, 40) : "";
       if (!Number.isInteger(seq) || seq < 0) return reply.code(400).send({ error: "seq must be a non-negative integer" });
       if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 120_000) {
         return reply.code(400).send({ error: "durationMs must be between 1 and 120000" });
@@ -1699,7 +1743,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         return reply.code(404).send({ error: (e as Error).message });
       }
       const mime = (req.headers["content-type"] || "audio/webm").split(";")[0]!.trim();
-      const row = await target.signals.recordAudio(target.showId, seq, body, { durationMs, mime });
+      const row = await target.signals.recordAudio(target.showId, run ? `${run}:${seq}` : null, body, { durationMs, mime });
+      listenHealth.get(target.showId)?.touch("audio");
       return { ok: true, seq: row.seq, offsetMs: row.offsetMs, bytes: row.bytes };
     },
   );
@@ -1720,9 +1765,29 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       showId: id,
       host,
       utterances,
-      frames: frames.map((f) => ({ seq: f.seq, at: f.at, offsetMs: f.offsetMs, reading: f.reading, bytes: f.bytes })),
+      frames: frames.map((f) => ({ seq: f.seq, at: f.at, offsetMs: f.offsetMs, reading: f.reading, description: f.description, bytes: f.bytes })),
       audio: audio.map((a) => ({ seq: a.seq, at: a.at, offsetMs: a.offsetMs, durationMs: a.durationMs, bytes: a.bytes, mime: a.mime })),
+      describing: describing(id),
     };
+  });
+
+  /**
+   * Describe this show's frames for the timeline, in the background. Runs on
+   * its own after a detach; this is for shows that ended before descriptions
+   * existed, or whose describer was interrupted. Needs the show's agent, which
+   * agent GC retires a day after the report.
+   */
+  app.post<{ Params: { showId: string } }>("/api/shows/:showId/timeline/describe", async (req, reply) => {
+    const row = await pgPool().query<{ agent_id: string | null }>("SELECT agent_id FROM shows WHERE id = $1", [req.params.showId]);
+    if (!row.rowCount) return reply.code(404).send({ error: `no show ${req.params.showId}` });
+    const agentId = row.rows[0]!.agent_id || config.whissle.agentId;
+    if (!agentId) return reply.code(409).send({ error: "this show has no agent left to read its frames" });
+    if (describing(req.params.showId)) return { ok: true, describing: true };
+    const reader = new WhissleClient({ baseUrl: config.whissle.base, apiKey: config.whissle.apiKey, agentId, showId: req.params.showId });
+    void describeFrames(req.params.showId, signals, reader).then((r) =>
+      console.log(`  frames: ${req.params.showId} described ${r.described}, skipped ${r.skipped}`),
+    );
+    return { ok: true, describing: true };
   });
 
   app.get<{ Params: { showId: string; seq: string } }>("/api/shows/:showId/media/frames/:seq", async (req, reply) => {
@@ -1793,6 +1858,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       // host did" section is computed from.
       target.signals.recordUtterance(segment);
       hub.emit("transcript", segment);
+      health(target.showId).touch("transcript");
+      health(target.showId).check((state, detail) =>
+        hub.emit("listen", { showId: target.showId, at: new Date().toISOString(), state, detail }),
+      );
       return { ok: true, ...segment };
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
@@ -1836,6 +1905,16 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // minutes, and writing it would be the highest-volume table in the
         // database in exchange for nothing anyone reads later.
         hub.emit("levels", { showId: target.showId, at: new Date().toISOString(), levels });
+        // Loud audio with no transcript is the signature of a listen session
+        // that has stopped transcribing while the bridge is still publishing
+        // — measured on 2026-09-15: ninety seconds of speech-level chunks
+        // after the last utterance. The console is told, and the bridge
+        // reconnects; neither can see it from the transcript alone.
+        const loud = levels.length ? levels.reduce((a, b) => a + b, 0) / levels.length : 0;
+        if (loud > 0.25) health(target.showId).touch("loud");
+        health(target.showId).check((state, detail) =>
+          hub.emit("listen", { showId: target.showId, at: new Date().toISOString(), state, detail }),
+        );
         return { ok: true, n: levels.length };
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });

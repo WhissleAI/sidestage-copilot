@@ -60,13 +60,33 @@ describe("signals", () => {
     assert.equal((await sig.recordFrame(r.showId, "nonsense", "x")), null);
   });
 
-  test("an audio chunk re-sent under the same seq replaces itself", async () => {
-    await sig.recordAudio(r.showId, 3, Buffer.from("aaaa"), { durationMs: 10_000, mime: "audio/webm" });
-    await sig.recordAudio(r.showId, 3, Buffer.from("bbbbbb"), { durationMs: 9_800, mime: "audio/webm" });
-    const a = await sig.audio(r.showId);
+  test("an audio chunk re-sent under the same run key replaces itself; a new run appends", async () => {
+    // The bridge numbers chunks from 0 on every page load. Before 2026-09-15
+    // the row was keyed on that number, so a bridge reopened mid-show wrote
+    // its chunk 0 over the show's first ten seconds. Numbering is the
+    // server's now; the run key only identifies a retry.
+    await sig.recordAudio(r.showId, "runA:3", Buffer.from("aaaa"), { durationMs: 10_000, mime: "audio/webm" });
+    await sig.recordAudio(r.showId, "runA:3", Buffer.from("bbbbbb"), { durationMs: 9_800, mime: "audio/webm" });
+    let a = await sig.audio(r.showId);
     assert.equal(a.length, 1);
     assert.equal(a[0]!.bytes, 6);
     assert.equal(a[0]!.durationMs, 9_800);
+    // A reopened bridge starts its count again: same client seq, new run.
+    const second = await sig.recordAudio(r.showId, "runB:3", Buffer.from("cc"), { durationMs: 10_000, mime: "audio/webm" });
+    a = await sig.audio(r.showId);
+    assert.equal(a.length, 2);
+    assert.equal(second.seq, a[0]!.seq + 1);
+    // An old bridge with no run key never overwrites anything either.
+    await sig.recordAudio(r.showId, null, Buffer.from("d"), { durationMs: 10_000, mime: "audio/webm" });
+    assert.equal((await sig.audio(r.showId)).length, 3);
+  });
+
+  test("a frame can be described after the fact", async () => {
+    const png = "data:image/png;base64," + Buffer.from("frame").toString("base64");
+    const f = await sig.recordFrame(r.showId, png, "White Nike sneaker");
+    await sig.describe(r.showId, f!.seq, "A white Nike Air Force 1, men's size 10, held to camera; the card reads $58.");
+    const got = (await sig.frames(r.showId)).find((x) => x.seq === f!.seq);
+    assert.match(got!.description ?? "", /size 10/);
   });
 
   test("the host summary sums probability mass, not top labels", async () => {

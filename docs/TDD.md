@@ -103,9 +103,17 @@ lines in the per-turn context block the agent drafts from (`buildContextBlock` i
 
 **What a show leaves behind** (`src/shows/sessionRecord.ts`, `signals.ts`): chat messages with
 their admission verdict, every reply proposal with its guards and decision, actions, the audit
-chain, the host transcript with emotion and intent distributions, the frames the agent read and
-ten-second audio chunks — all in Postgres (media bytes on disk under `SHOW_MEDIA_DIR`), all
-deleted with the show. **Divergence, historical:** the proposal INSERT did not run until
+chain, the host transcript with emotion and intent distributions, the frames the agent read (with
+the twelve-word live reading and, after the show, a two-sentence description from the same agent
+— `src/shows/frameDescriber.ts`, one per distinct moment, at most 40) and ten-second audio chunks
+numbered by the server (`SessionSignals.recordAudio`; the bridge's own count is only a retry key)
+— all in Postgres (media bytes on disk under `SHOW_MEDIA_DIR`), all deleted with the show.
+**Listen-session health** is judged from the same feeds: the levels route marks the last loud
+frame, the transcript route the last utterance, and loud audio with no transcript for 45 s emits
+`listen: stalled` to the console while the bridge reconnects (`startStallWatch` in
+`src/api/audioBridge.ts`). Measured 2026-09-15: a session stopped transcribing with speech still
+flowing; the gateway lists no `bench-` listen sessions at all, so there is nothing upstream to
+reconcile against yet. **Divergence, historical:** the proposal INSERT did not run until
 2026-09-15, so reports generated before that date carry no drafted replies.
 
 ## 2. Catalog grounding

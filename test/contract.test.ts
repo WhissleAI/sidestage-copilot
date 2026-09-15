@@ -693,16 +693,25 @@ describe("what a show leaves behind", () => {
     assert.ok("record" in body && "signals" in body && "report" in body);
   });
 
-  test("an audio chunk is kept under its seq and served back", async () => {
+  test("an audio chunk is numbered by the server and served back", async () => {
     const showId = ctx.shows.get().showId;
     process.env.SHOW_MEDIA_DIR = ".tmp/test-media";
+    // The bridge's own count (seq=7) is only a retry key; the show's numbering
+    // is the server's, so a bridge reopened mid-show cannot overwrite the
+    // first minutes of a show with its new chunk 0.
     const r = await inject({
-      method: "POST", url: `/api/shows/${showId}/audio/chunk?seq=7&durationMs=10000`,
+      method: "POST", url: `/api/shows/${showId}/audio/chunk?seq=7&run=t1&durationMs=10000`,
       headers: { "content-type": "audio/webm" }, payload: Buffer.from("opusopus"),
     });
     assert.equal(r.statusCode, 200, r.body);
-    assert.equal(r.json().seq, 7);
-    const back = await inject({ method: "GET", url: `/api/shows/${showId}/media/audio/7` });
+    const seq = r.json().seq as number;
+    assert.ok(Number.isInteger(seq) && seq >= 0);
+    const again = await inject({
+      method: "POST", url: `/api/shows/${showId}/audio/chunk?seq=7&run=t1&durationMs=10000`,
+      headers: { "content-type": "audio/webm" }, payload: Buffer.from("opusopus"),
+    });
+    assert.equal(again.json().seq, seq, "a retry keeps its number");
+    const back = await inject({ method: "GET", url: `/api/shows/${showId}/media/audio/${seq}` });
     assert.equal(back.statusCode, 200);
     assert.equal(back.headers["content-type"], "audio/webm");
     assert.equal(back.body, "opusopus");

@@ -36,6 +36,13 @@ test("classify routes the live-chat question vocabulary", async () => {
   assert.equal(classify("chicago reimagined vs the 2015 which is better"), "comparison");
   assert.equal(classify("LETS GOOO"), "hype");
   assert.equal(classify("W"), "hype");
+  // A bare attribute is a question about the item, not a cheer. "Orange" in a
+  // gem show on 2026-09-15 fell through to hype and got the hype placeholder.
+  assert.equal(classify("Orange"), "availability");
+  assert.equal(classify("the bigger one"), "availability");
+  assert.equal(classify("size 10"), "sizing");
+  assert.equal(classify("large pls"), "availability");
+  assert.equal(classify("fire"), "hype");
 });
 
 test("hype detection keeps reactions out of the reply queue", async () => {

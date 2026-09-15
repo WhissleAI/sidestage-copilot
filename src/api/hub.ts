@@ -21,6 +21,10 @@ export type EventName =
   // What this show has cost against the seller's cap, and whether the cap has
   // stopped the copilot. Polled server-side; the console never computes it.
   | "budget"
+  // The listen session's health as the backend sees it: `stalled` when loud
+  // audio keeps arriving but no transcript has for a while, `ok` when it
+  // resumes, `reconnecting` when the bridge is minting a new session.
+  | "listen"
   // Host speech from the listen-only Whissle session, with its voice metadata.
   | "transcript"
   /** A frame the agent read was kept; the console can show it in the timeline. */

@@ -46,7 +46,30 @@ export function classify(text: string): ChatIntent {
   if (!t) return "other";
   if (isHype(t)) return "hype";
   for (const [intent, re] of CUES) if (re.test(t)) return intent;
+  // "Orange", "large", "size 10", "the bigger one": a buyer naming an
+  // attribute with no verb is asking whether it comes that way. Measured on
+  // 2026-09-15 — "Orange" during a gem show fell through to hype and got the
+  // hype placeholder instead of a look at the lot.
+  if (isBareAttribute(t)) return "availability";
   return t.includes("?") || INTERROGATIVE.test(t) ? "other" : "hype";
+}
+
+const ATTRIBUTE_WORDS = new Set([
+  "orange", "red", "blue", "green", "black", "white", "pink", "purple", "yellow", "gold", "silver",
+  "brown", "grey", "gray", "teal", "navy", "beige", "cream", "tan", "clear", "rainbow", "multicolor",
+  "small", "medium", "large", "xs", "s", "m", "l", "xl", "xxl", "xxxl", "big", "bigger", "biggest",
+  "smaller", "smallest", "larger", "largest", "tiny", "huge", "mini", "size", "sz", "mens", "womens",
+  "kids", "youth", "raw", "polished", "tumbled", "rough", "matte", "glossy",
+]);
+
+/** Every word is an attribute (or a size number), and there are at most four. */
+export function isBareAttribute(text: string): boolean {
+  const words = text.toLowerCase().replace(/[^a-z0-9\s.]/g, " ").trim().split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 4) return false;
+  const filler = new Set(["the", "a", "an", "one", "in", "any", "that", "this", "ones", "pls", "please"]);
+  const core = words.filter((w) => !filler.has(w));
+  if (!core.length) return false;
+  return core.every((w) => ATTRIBUTE_WORDS.has(w) || /^\d{1,2}(?:\.5)?$/.test(w));
 }
 
 export function isHype(text: string): boolean {

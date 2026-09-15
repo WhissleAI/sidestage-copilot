@@ -82,6 +82,15 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
   var room = null, stream = null, visualTimer = null, visualEl = null;
   var levelCtx = null, levelTimer = null, levelPost = null, levelWindow = [];
   var recorder = null, chunkSeq = 0, chunkStartedAt = 0;
+  // One id per page load: the server numbers chunks and uses this to tell a
+  // retry (replace) from a reopened bridge (append).
+  var RUN = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  // Transcript watchdog. The listen session can stop transcribing while the
+  // audio it is fed is still speech (measured 2026-09-15: ninety seconds of
+  // speech-level chunks after the last utterance). Loud audio with no final
+  // transcript for this long → reconnect, at most a few times a session.
+  var STALL_MS = 45000, lastFinalAt = 0, loudSince = 0, stallTimer = null, reconnects = 0, MAX_RECONNECTS = 5;
+  var listenShowId = null, listenAudio = null;
   /** How long each kept audio chunk is. Ten seconds is short enough that a
    *  failed upload loses little and long enough that a two-hour show is 720
    *  files, not 7,200. */
@@ -172,42 +181,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       //   { type:"user-transcription", data:{ text, final } }
       //   { type:"server-message", data:{ kind:"signal", type:"emotion",
       //       data:{ top_k:[…], top_label, top_p, changed, prev_label, flips } } }
-      room.on(LivekitClient.RoomEvent.DataReceived, function (payload) {
-        var msg;
-        try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch (e) { return; }
-        var t = msg.type || "";
-        var d = msg.data || {};
-
-        if (/transcription|transcript/i.test(t)) {
-          var text = d.text || (d.data && d.data.text) || "";
-          if (text && d.final !== false) { log("host: " + text); postTranscript(showId, text); }
-          return;
-        }
-
-        if (t === "server-message" && d.kind === "signal") {
-          if (d.type === "emotion") { pending.emotion = d.data; note("emotion", d.data); }
-          else if (d.type === "intent") { pending.intent = d.data; note("intent", d.data); }
-          else if (d.data && typeof d.data.words_per_minute === "number") pending.speechRate = d.data.words_per_minute;
-          return;
-        }
-
-        // Older gateways emitted a flat metadata frame.
-        if (/metadata/i.test(t)) {
-          if (d.emotion) pending.emotion = d.emotion;
-          if (d.intent) pending.intent = d.intent;
-          if (typeof d.speech_rate === "number") pending.speechRate = d.speech_rate;
-        }
-      });
-
-      function note(kind, dist) {
-        if (!dist) return;
-        var top = dist.top_label || dist.label || "?";
-        var p = typeof dist.top_p === "number" ? " " + dist.top_p.toFixed(2) : "";
-        var flip = dist.changed ? "  FLIP from " + (dist.prev_label || "?") : "";
-        log(kind + ": " + top + p + flip);
-      }
-
-      room.on(LivekitClient.RoomEvent.Disconnected, function () { status("disconnected", "err"); log("room disconnected"); });
+      wireRoom(room, showId);
 
       await room.connect(s.url, s.token);
       await room.localParticipant.publishTrack(audio, { name: "host-audio", source: LivekitClient.Track.Source.Microphone });
@@ -215,6 +189,8 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       status("capturing — host speech is feeding the copilot", "on");
       log("published host audio into room " + (s.room || "(unnamed)"));
       el("start").disabled = true; el("stop").disabled = false;
+      listenShowId = showId; listenAudio = audio; lastFinalAt = Date.now(); loudSince = 0;
+      startStallWatch();
 
       if (video) startVisual(showId, video);
       else log("no video track — the copilot will hear the show but not see it");
@@ -273,7 +249,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 
     function post(seq, blob, durationMs, attempt) {
       attempt = attempt || 0;
-      fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/chunk?seq=" + seq + "&durationMs=" + durationMs, {
+      fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/chunk?seq=" + seq + "&run=" + RUN + "&durationMs=" + durationMs, {
         method: "POST",
         headers: Object.assign({ "content-type": blob.type || "audio/webm" }, AUTH),
         body: blob
@@ -325,6 +301,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
         pending.push(Math.round(v * 100) / 100);
         levelWindow.push(v);
         if (levelWindow.length > 600) levelWindow.shift();
+        if (v > 0.25) { if (!loudSince) loudSince = Date.now(); } else if (loudSince && Date.now() - loudSince < 3000) loudSince = 0;
       }, LEVEL_EVERY_MS);
 
       // Batched: one request a second rather than ten.
@@ -432,12 +409,90 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
     }
   }
 
+  /**
+   * Loud audio, no transcript, for STALL_MS: the session has gone deaf. Mint a
+   * new listen session and republish the same track; the console keeps its
+   * strip and the recorder keeps its chunks, because neither depends on the
+   * room. Bounded so a gateway that is truly down does not get hammered.
+   */
+  function wireRoom(r, showId) {
+    r.on(LivekitClient.RoomEvent.DataReceived, function (payload) {
+      var msg;
+      try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch (e) { return; }
+      var t = msg.type || "";
+      var d = msg.data || {};
+
+      if (/transcription|transcript/i.test(t)) {
+        var text = d.text || (d.data && d.data.text) || "";
+        if (text && d.final !== false) { lastFinalAt = Date.now(); loudSince = 0; log("host: " + text); postTranscript(showId, text); }
+        return;
+      }
+
+      if (t === "server-message" && d.kind === "signal") {
+        if (d.type === "emotion") { pending.emotion = d.data; note("emotion", d.data); }
+        else if (d.type === "intent") { pending.intent = d.data; note("intent", d.data); }
+        else if (d.data && typeof d.data.words_per_minute === "number") pending.speechRate = d.data.words_per_minute;
+        return;
+      }
+
+      // Older gateways emitted a flat metadata frame.
+      if (/metadata/i.test(t)) {
+        if (d.emotion) pending.emotion = d.emotion;
+        if (d.intent) pending.intent = d.intent;
+        if (typeof d.speech_rate === "number") pending.speechRate = d.speech_rate;
+      }
+    });
+
+    function note(kind, dist) {
+      if (!dist) return;
+      var top = dist.top_label || dist.label || "?";
+      var p = typeof dist.top_p === "number" ? " " + dist.top_p.toFixed(2) : "";
+      var flip = dist.changed ? "  FLIP from " + (dist.prev_label || "?") : "";
+      log(kind + ": " + top + p + flip);
+    }
+
+    r.on(LivekitClient.RoomEvent.Disconnected, function () { status("disconnected", "err"); log("room disconnected"); });
+  }
+
+  function startStallWatch() {
+    if (stallTimer) clearInterval(stallTimer);
+    stallTimer = setInterval(async function () {
+      if (!room || !listenShowId || !listenAudio) return;
+      var now = Date.now();
+      var loudFor = loudSince ? now - loudSince : 0;
+      var quiet = now - lastFinalAt;
+      if (loudFor < STALL_MS || quiet < STALL_MS) return;
+      if (reconnects >= MAX_RECONNECTS) { status("transcript stalled — reconnect limit reached, stop and start again", "err"); return; }
+      reconnects++;
+      log("transcript stalled " + Math.round(quiet / 1000) + "s while audio is live — reconnecting the listen session (" + reconnects + "/" + MAX_RECONNECTS + ")");
+      status("transcript stalled — reconnecting…", "err");
+      try {
+        var old = room; room = null;
+        try { await old.disconnect(); } catch (e) {}
+        var r = await fetch(API + "/api/shows/" + encodeURIComponent(listenShowId) + "/audio/session", { method: "POST", headers: AUTH });
+        var s = await r.json();
+        if (!r.ok) { log("reconnect failed: " + (s.error || ("HTTP " + r.status))); return; }
+        var next = new LivekitClient.Room({ adaptiveStream: false, dynacast: false });
+        wireRoom(next, listenShowId);
+        await next.connect(s.url, s.token);
+        await next.localParticipant.publishTrack(listenAudio, { name: "host-audio", source: LivekitClient.Track.Source.Microphone });
+        room = next; lastFinalAt = Date.now(); loudSince = 0;
+        status("capturing — host speech is feeding the copilot (reconnected)", "on");
+        log("reconnected into room " + (s.room || "(unnamed)"));
+      } catch (e) {
+        log("reconnect failed: " + String(e && e.message ? e.message : e));
+      }
+    }, 5000);
+  }
+
   el("stop").onclick = async function () {
     if (recorder) { var r = recorder; recorder = null; try { if (r.state === "recording") r.stop(); } catch (e) {} }
     if (visualTimer) { clearInterval(visualTimer); visualTimer = null; }
     if (visualEl) { try { visualEl.remove(); } catch (e) {} visualEl = null; }
     if (levelTimer) { clearInterval(levelTimer); levelTimer = null; }
     if (levelPost) { clearInterval(levelPost); levelPost = null; }
+    if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+    listenShowId = null; listenAudio = null;
     if (levelCtx) { try { levelCtx.close(); } catch (e) {} levelCtx = null; }
     levelWindow = [];
     try { if (room) await room.disconnect(); } catch (e) {}

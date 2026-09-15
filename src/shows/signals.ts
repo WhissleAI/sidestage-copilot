@@ -26,6 +26,8 @@ export interface FrameRow {
   path: string;
   bytes: number;
   reading: string;
+  /** The fuller post-show reading (src/shows/frameDescriber.ts); null until written. */
+  description: string | null;
 }
 
 export interface AudioRow {
@@ -138,29 +140,51 @@ export class SessionSignals {
     return {
       seq: r.rows[0]!.seq, at: at.toISOString(),
       offsetMs: at.getTime() - (await this.startedAt(showId)),
-      path: file, bytes: buf.length, reading,
+      path: file, bytes: buf.length, reading, description: null,
     };
   }
 
   /** One chunk of the host's audio. `seq` comes from the bridge, so a retried
    *  upload replaces rather than duplicates. */
+  /** The post-show description of one frame. */
+  async describe(showId: string, seq: number, description: string): Promise<void> {
+    await this.d.query("UPDATE show_frames SET description = $3 WHERE show_id = $1 AND seq = $2", [showId, seq, description]);
+  }
+
+  /**
+   * One chunk of the host's audio. The sequence number is assigned HERE, not by
+   * the bridge: a bridge page reopened mid-show restarts its own count at 0,
+   * and keying on that overwrote the first minutes of a show with the next
+   * ones. `clientKey` (bridge run + its chunk number) is what makes a retry
+   * replace its own row instead of appending a duplicate.
+   */
   async recordAudio(
     showId: string,
-    seq: number,
+    clientKey: string | null,
     buf: Buffer,
     opts: { durationMs: number; mime: string },
   ): Promise<AudioRow> {
     const at = new Date();
+    const offsetMs = Math.max(0, at.getTime() - opts.durationMs - (await this.startedAt(showId)));
+    const existing = clientKey
+      ? await this.d.query<{ seq: number }>("SELECT seq FROM show_audio WHERE show_id = $1 AND client_key = $2", [showId, clientKey])
+      : null;
+    let seq: number;
+    if (existing?.rowCount) {
+      seq = existing.rows[0]!.seq;
+    } else {
+      const next = await this.d.query<{ seq: number }>("SELECT COALESCE(MAX(seq), -1) + 1 AS seq FROM show_audio WHERE show_id = $1", [showId]);
+      seq = Number(next.rows[0]!.seq);
+    }
     const file = join(this.dir(showId, "audio"), `${String(seq).padStart(6, "0")}.webm`);
     writeFileSync(file, buf);
-    const offsetMs = Math.max(0, at.getTime() - opts.durationMs - (await this.startedAt(showId)));
     await this.d.query(
-      `INSERT INTO show_audio (show_id, seq, at, offset_ms, duration_ms, path, bytes, mime)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `INSERT INTO show_audio (show_id, seq, at, offset_ms, duration_ms, path, bytes, mime, client_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (show_id, seq) DO UPDATE SET
          at = EXCLUDED.at, offset_ms = EXCLUDED.offset_ms, duration_ms = EXCLUDED.duration_ms,
-         path = EXCLUDED.path, bytes = EXCLUDED.bytes, mime = EXCLUDED.mime`,
-      [showId, seq, at.toISOString(), offsetMs, opts.durationMs, file, buf.length, opts.mime],
+         path = EXCLUDED.path, bytes = EXCLUDED.bytes, mime = EXCLUDED.mime, client_key = EXCLUDED.client_key`,
+      [showId, seq, at.toISOString(), offsetMs, opts.durationMs, file, buf.length, opts.mime, clientKey],
     );
     return { seq, at: at.toISOString(), offsetMs, durationMs: opts.durationMs, path: file, bytes: buf.length, mime: opts.mime };
   }
@@ -183,8 +207,8 @@ export class SessionSignals {
 
   async frames(showId: string): Promise<FrameRow[]> {
     const started = await this.startedAt(showId);
-    const r = await this.d.query<{ seq: number; at: string; path: string; bytes: number; reading: string }>(
-      "SELECT seq, at, path, bytes, reading FROM show_frames WHERE show_id = $1 ORDER BY at",
+    const r = await this.d.query<{ seq: number; at: string; path: string; bytes: number; reading: string; description: string | null }>(
+      "SELECT seq, at, path, bytes, reading, description FROM show_frames WHERE show_id = $1 ORDER BY at",
       [showId],
     );
     return r.rows.map((x) => ({ ...x, offsetMs: new Date(x.at).getTime() - started }));

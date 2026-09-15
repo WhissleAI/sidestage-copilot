@@ -18,6 +18,7 @@ import { db } from "../db/pg.js";
 import type { EventHub, EventName } from "../api/hub.js";
 import type { SellerGuardrailPolicy } from "../guardrails/policy.js";
 import { ShowRuntime } from "./runtime.js";
+import { describeFrames } from "./frameDescriber.js";
 import type { ShowReport } from "./sessionRecord.js";
 import { parseEventId } from "../ingest/ebaylive/discovery.js";
 
@@ -182,6 +183,11 @@ export class ShowRegistry {
     // it was, and returned so the console can show it instead of dropping the
     // operator back to an empty launcher with nothing to read.
     const report = await rt.finishSession();
+    // The timeline's fuller frame readings, in the background, with the
+    // show's own agent while it still exists. Never delays the detach.
+    void describeFrames(showId, rt.signals, rt.llm)
+      .then((r) => { if (r.described) console.log(`  ${showId}: described ${r.described} frames for the timeline`); })
+      .catch((e) => console.warn(`  ${showId}: frame descriptions failed — ${(e as Error).message}`));
     this.runtimes.delete(showId);
     if (this.activeShowId === showId) this.activeShowId = null;
     await rt.close().catch(() => {});
