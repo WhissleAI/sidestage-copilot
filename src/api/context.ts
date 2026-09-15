@@ -11,6 +11,15 @@ import { db as pgPool, migrate, closeDb } from "../db/pg.js";
 import { applyCatalog, getCatalog } from "../shows/catalogs.js";
 import { seed, DEMO_SHOW_ID as SEED_SHOW } from "../db/seed.js";
 
+/**
+ * `DEMO_SHOW=1` runs the scripted show; the test suite gets it unconditionally
+ * because a deterministic fixture is exactly what a test wants. Everywhere else
+ * an empty product says it is empty.
+ */
+function demoWanted(): boolean {
+  return process.env.DEMO_SHOW === "1" || process.env.NODE_ENV === "test";
+}
+
 export interface AppContext {
   hub: EventHub;
   shows: ShowRegistry;
@@ -30,13 +39,19 @@ export async function buildContext(): Promise<AppContext> {
   const pool = pgPool();
   await migrate(pool);
 
-  // The demo show is provisioned on an empty database so a fresh clone has
-  // something real to open — the walkthrough, the stale-price failure path and
-  // the whole write/rollback spike all run on it.
-  const seeded = await pool.query<{ c: number }>(
-    "SELECT COUNT(*)::int AS c FROM listings WHERE show_id = $1", [SEED_SHOW],
-  );
-  if ((seeded.rows[0]?.c ?? 0) === 0) await seed(pool);
+  // The simulated show is a scripted animation: seeded buyers, seeded lots, a
+  // queue that fills whether or not anything is connected. It is genuinely
+  // useful for the walkthrough, the stale-price failure path and the
+  // write/rollback spike — and genuinely misleading as the thing a seller finds
+  // when they open the product, because it is indistinguishable from a working
+  // show. So it is opt-in, and `npm run seed` is still there for anyone who
+  // wants it back by hand.
+  if (demoWanted()) {
+    const seeded = await pool.query<{ c: number }>(
+      "SELECT COUNT(*)::int AS c FROM listings WHERE show_id = $1", [SEED_SHOW],
+    );
+    if ((seeded.rows[0]?.c ?? 0) === 0) await seed(pool);
+  }
 
   if (!hasWhissleCreds()) {
     console.warn(
@@ -66,7 +81,7 @@ export async function buildContext(): Promise<AppContext> {
     kb,
 
     async start() {
-      await shows.ensureDemo();
+      if (demoWanted()) await shows.ensureDemo();
       heartbeat = setInterval(() => hub.heartbeat(), 20_000);
 
       // ── resume what was being monitored ─────────────────────────────────

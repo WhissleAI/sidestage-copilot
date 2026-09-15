@@ -41,6 +41,7 @@ import { decideAction, decideReply } from "../autonomy/ladder.js";
 import { ActionExecutor } from "../actions/executor.js";
 import { ActionProposer } from "../actions/proposer.js";
 import type { AuditLog } from "../actions/audit.js";
+import { isOverBudget } from "../llm/budget.js";
 
 export interface PipelineEvents {
   onChat(m: ChatMessage): void;
@@ -64,6 +65,9 @@ export interface PipelineDeps {
   audit: AuditLog;
   events: PipelineEvents;
 }
+
+/** Said the same way in the firehose, in the report and in the audit entry. */
+const BUDGET_REASON = "this show reached its spend cap — the copilot stopped drafting";
 
 export class Pipeline {
   private composer: Composer;
@@ -93,7 +97,14 @@ export class Pipeline {
   }
 
   // ── entry point ───────────────────────────────────────────────────────────
-  async ingest(incoming: IncomingMessage): Promise<ChatMessage> {
+  /**
+   * @param opts.force  Draft for this message even though the admission gate
+   *   would have dropped it. The operator asked for it explicitly — the gate is
+   *   right about nearly everything and wrong about some, and without this it
+   *   is unarguable rather than merely strict. The override is recorded on the
+   *   message so a gate miss stays visible in the report.
+   */
+  async ingest(incoming: IncomingMessage, opts: { force?: boolean } = {}): Promise<ChatMessage> {
     const timer = new SpanTimer();
     const intent = classify(incoming.text);
     // The second axis: what KIND of utterance this is, on the same vocabulary
@@ -104,7 +115,16 @@ export class Pipeline {
     const show = await this.d.repo.show();
     const level = show.autonomyLevel;
     const observing = level === "L0_OBSERVE";
-    const decision = admit(incoming.text, intent, observing ? false : this.rate.tryAdmit(), speechAct);
+    // The spend cap is the hardest gate there is: it outranks the operator's
+    // own override, because "answer this one anyway" is a request to spend and
+    // the cap is the seller's standing answer to that request.
+    const capped = isOverBudget(this.d.repo.showId);
+    const natural = admit(incoming.text, intent, observing ? false : this.rate.tryAdmit(), speechAct);
+    const decision = capped
+      ? { admitted: false, reason: BUDGET_REASON }
+      : opts.force
+        ? { admitted: true, reason: undefined }
+        : natural;
     timer.mark("admit");
 
     const msg: ChatMessage = {
@@ -115,7 +135,18 @@ export class Pipeline {
       intent,
       speechAct,
       admitted: decision.admitted,
-      ...(decision.reason ? { dropReason: observing ? "autonomy is L0 — observing only" : decision.reason } : {}),
+      ...(decision.reason
+        ? {
+            dropReason: capped
+              ? BUDGET_REASON
+              : observing
+                ? "autonomy is L0 — observing only"
+                : decision.reason,
+          }
+        : {}),
+      ...(!capped && opts.force && !natural.admitted
+        ? { dropReason: `answered anyway — the gate said: ${natural.reason ?? "dropped"}` }
+        : {}),
     };
 
     // Operational signals come from EVERY real question, including the ones the
@@ -201,7 +232,8 @@ export class Pipeline {
       /\b(good (?:price|deal)|worth it|going for|market value|overpriced|fair price|too much)\b/i.test(msg.text);
     if (!wants) return [];
 
-    const card = await this.d.research.run(msg.text, pinnedId);
+    // A buyer is waiting on this one; the market lookup gets the short budget.
+    const card = await this.d.research.run(msg.text, pinnedId, { caller: "reply" });
     const seen = new Set(already.map((e) => e.factId));
     return card.evidence.filter((e) => !seen.has(e.factId));
   }
@@ -451,6 +483,68 @@ export class Pipeline {
     const prev = (await this.d.repo.show()).autonomyLevel;
     await this.d.repo.updateShow({ autonomyLevel: level });
     await this.d.audit.append("autonomy_changed", "seller", `autonomy ${prev} to ${level}`, { from: prev, to: level });
+  }
+
+  /**
+   * What would it say, if a buyer asked this right now?
+   *
+   * The same retrieval, the same composer, the same six guards, against the
+   * catalog as it stands — and nothing is sent, queued, cached or counted. A
+   * guardrail edit used to be testable only on a live buyer, which is the worst
+   * possible place to discover that a regex blocks every reply.
+   */
+  async dryRun(question: string): Promise<{
+    question: string;
+    answer: string;
+    evidence: Evidence[];
+    guards: ReplyProposal["guards"];
+    verdict: ReplyProposal["verdict"];
+    confidence: number;
+    abstained: boolean;
+    latencyMs: number;
+  }> {
+    const started = Date.now();
+    const show = await this.d.repo.show();
+    const r = this.d.retriever.retrieve(question, { pinnedId: show.pinnedListingId });
+
+    const { draft } = await this.composer.draft(
+      {
+        show,
+        pinned: show.pinnedListingId ? await this.d.repo.listing(show.pinnedListingId) : null,
+        context: this.d.showContext.current(),
+        seller: this.d.seller?.() ?? null,
+        facts: r.facts,
+        abstain: r.abstain,
+        viaAnaphora: r.slots.viaAnaphora,
+      },
+      "dry-run",
+      question,
+    );
+
+    const [listings, policies] = await Promise.all([this.d.repo.listings(), this.d.repo.policies()]);
+    const chain = runChain(
+      {
+        draft,
+        question,
+        facts: r.facts,
+        factById: new Map(r.facts.map((f) => [f.factId, f])),
+        currentListings: new Map(listings.map((l) => [l.id, l])),
+        slots: r.slots,
+        policies,
+      },
+      { evidenceQuality: r.evidence[0]?.score ?? 0, abstained: r.abstain },
+    );
+
+    return {
+      question,
+      answer: draft.answer,
+      evidence: r.evidence,
+      guards: chain.guards,
+      verdict: chain.verdict,
+      confidence: chain.confidence,
+      abstained: r.abstain,
+      latencyMs: Date.now() - started,
+    };
   }
 
   list(): ReplyProposal[] {

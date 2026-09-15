@@ -375,11 +375,19 @@ const CASES: GuardCase[] = [
     // Regression: found against a live eBay Live show. The guard read the $9.95
     // shipping charge as an item-price commitment and blocked a correct reply.
     name: "quotes a SHIPPING charge, not an item price",
-    question: "how much for the pandas",
+    // Asks about shipping too, so the shipping POLICY is retrieved into
+    // evidence. Retrieval for a bare price question does not pull it, and a
+    // $9.95 with no shipping clause in evidence is rightly a commitment the
+    // guard refuses — that is the fabricated-fact failure, not a regression.
+    question: "how much for the pandas and whats shipping",
     answer: "The Panda Dunks are $128.00 and ship USPS Ground Advantage at a flat $9.95.",
     claims: [
       { text: "they are $128.00", factId: "listing:lst_dunk_panda_11#price" },
-      { text: "ships Ground Advantage at a flat $9.95", factId: "listing:lst_dunk_panda_11#shipping" },
+      // The seller's POLICY says this, not the listing. The listing-level
+      // shipping fact this once cited was synthesised from a default profile —
+      // the same synthesis that had the copilot quoting $9.95 to a gemstone
+      // show with no shipping policy at all — and no longer exists.
+      { text: "ships Ground Advantage at a flat $9.95", factId: "policy:pol_ship_domestic" },
     ],
     expect: "allow",
   },

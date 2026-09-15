@@ -9,12 +9,23 @@
 
 import { config } from "./config.js";
 import { buildApp } from "./api/server.js";
+import { db as pgPool } from "./db/pg.js";
+import { startFollowingPoller } from "./sellers/following.js";
+import { startBudgetWatch, stopBudgetWatch } from "./llm/budget.js";
 
 async function main(): Promise<void> {
   const { app, ctx } = await buildApp();
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
   await ctx.start();
+
+  // Keeps the live grid warm for anyone following a seller. Started here and
+  // not in `buildApp` on purpose: the test suite should neither drive a headless
+  // browser nor depend on eBay answering.
+  const stopFollowing = startFollowingPoller(pgPool());
+  // Same reason: the cap is only real if something reads the wallet while the
+  // show runs, and a wallet read is a gateway round trip the tests must not make.
+  startBudgetWatch();
 
   const rows = await ctx.shows.list();
   console.log(
@@ -31,6 +42,8 @@ async function main(): Promise<void> {
   );
 
   const shutdown = async () => {
+    stopFollowing();
+    stopBudgetWatch();
     await ctx.stop();
     await app.close();
     process.exit(0);

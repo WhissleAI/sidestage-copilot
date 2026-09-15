@@ -322,7 +322,7 @@ export class Repo {
   async insertComp(c: Comp & { sku: string }): Promise<void> {
     await this.q(
       "INSERT INTO comps (show_id, sku, title, sold_price_cents, sold_at, condition, size) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-      [this.showId, c.sku, c.title, c.soldPriceCents, c.soldAt, c.condition, c.size],
+      [this.showId, c.sku, c.title, c.priceCents, c.soldAt, c.condition, c.size],
     );
   }
 
@@ -332,7 +332,9 @@ export class Repo {
       [this.showId, sku],
     );
     return r.rows.map((x) => ({
-      title: x.title, soldPriceCents: x.sold_price_cents, soldAt: x.sold_at,
+      // Rows in this table are seeded SALES. Anything sourced live from eBay is
+      // an asking price and never lands here.
+      title: x.title, priceCents: x.sold_price_cents, soldAt: x.sold_at, basis: "sold" as const,
       condition: x.condition, size: x.size,
     }));
   }
@@ -363,9 +365,19 @@ export class Repo {
         lot_queue, autonomy_level, undo_window_s, source, external_id, read_only, status, catalog_id)
       VALUES ($1, $2, $3, $4, $5, 0, NULL, '[]'::jsonb, $6, $7, $8, $9, $10, 'live', $11)
       ON CONFLICT (id) DO UPDATE SET
-        title = EXCLUDED.title, seller_handle = EXCLUDED.seller_handle,
+        -- Re-attaching a show that ended is a new session on the same row:
+        -- it goes back on air with a fresh clock. It used to keep 'ended', so
+        -- the Shows list showed a watched show as finished and a restart never
+        -- resumed it.
+        status = 'live', started_at = EXCLUDED.started_at,
+        -- Keep what the row already knows when the new attach knows less: a
+        -- prepared title over the "eBay Live <id>" placeholder, and a catalog
+        -- over the NULL an attach-by-link arrives with. Both used to be wiped.
+        title = CASE WHEN EXCLUDED.title LIKE 'eBay Live %' THEN shows.title ELSE EXCLUDED.title END,
+        catalog_id = COALESCE(EXCLUDED.catalog_id, shows.catalog_id),
+        seller_handle = EXCLUDED.seller_handle,
         source = EXCLUDED.source, external_id = EXCLUDED.external_id,
-        read_only = EXCLUDED.read_only, catalog_id = EXCLUDED.catalog_id`,
+        read_only = EXCLUDED.read_only`,
       [s.id, s.ownerAccountId ?? null, s.title, s.sellerHandle, new Date().toISOString(),
        s.autonomyLevel, s.undoWindowS, s.source, s.externalId ?? null, s.readOnly ?? false,
        s.catalogId ?? null],

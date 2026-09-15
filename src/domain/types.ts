@@ -170,7 +170,18 @@ export interface ActionProposal {
 export type AuditKind =
   | "action_proposed" | "action_preflight_failed" | "action_committed"
   | "action_failed" | "action_rolled_back" | "reply_sent" | "reply_blocked"
-  | "autonomy_changed";
+  | "autonomy_changed"
+  // The seller's own spend cap stopping the copilot. It belongs in the chain
+  // for the same reason a block does: it changed what the copilot did.
+  | "budget_cap_reached"
+  // The operator saying a sent reply was wrong. In the chain because "who said
+  // so, and when" is exactly what the chain is for — and because this is the
+  // only source the accuracy number has.
+  | "reply_flagged_wrong"
+  // The operator naming the lot on screen. Placeholder titles are guessed from
+  // speech and camera; when that guesses wrong, every answer after it is wrong,
+  // and a human correction is the one input that fixes all of them at once.
+  | "lot_corrected";
 
 export interface AuditEntry {
   seq: number;
@@ -279,12 +290,30 @@ export interface ShowContext {
   updatedAt: string;
 }
 
+/**
+ * What a comparable price IS, which is not a detail.
+ *
+ * `sold` is what someone paid. `asking` is what someone is hoping for. They
+ * move differently and a seller prices against them differently — asking prices
+ * skew high because the optimistic listings are the ones still sitting there.
+ * eBay's sold data (Marketplace Insights) is a limited-release API this
+ * application is not approved for, so live comps are asking prices, and every
+ * surface that renders one says which it is looking at rather than letting a
+ * field name called `soldPriceCents` decide.
+ */
+export type CompBasis = "sold" | "asking";
+
 export interface Comp {
   title: string;
-  soldPriceCents: number;
-  soldAt: string;
+  /** What this comparable is priced at, on the basis named below. */
+  priceCents: number;
+  /** When it sold. Null for an active listing, which has not. */
+  soldAt: string | null;
   condition: string;
   size: string;
+  basis: CompBasis;
+  /** The listing itself, when it is one we can link to. */
+  url?: string;
 }
 
 export interface ResearchCard {
@@ -293,6 +322,11 @@ export interface ResearchCard {
   headline: string;
   comps: Comp[];
   medianCents: number;
+  /** What `medianCents` is a median OF. "none" when nothing was found — which
+   *  is a finding, not a zero. */
+  marketBasis: CompBasis | "none";
+  /** Where the comps came from, said out loud on the card. */
+  marketSource: "ebay-sold" | "ebay-active" | "seeded" | "checking" | "none";
   suggestion: string;
   specDiff?: { attribute: string; ours: string; theirs: string }[];
   latencyMs: number;

@@ -91,7 +91,7 @@ export class ActionProposer {
 
       // Target the market median when there is one, but never below the floor,
       // and never more than the policy cap off the current price.
-      const comps = (await this.repo.comps(l.sku)).map((c) => c.soldPriceCents);
+      const comps = (await this.repo.comps(l.sku)).map((c) => c.priceCents);
       const med = median(comps);
       const capFloor = Math.ceil(l.priceCents * (1 - policy().maxDiscountPct / 100));
       const target = Math.max(l.floorPriceCents, capFloor, med || 0);

@@ -13,8 +13,18 @@ export type EventName =
   // Multi-show additions. Every payload above now also carries `showId`, so a
   // console can watch one show or all of them from a single stream.
   | "shows" | "show" | "source"
+  // NOT named `error`: EventSource dispatches a server event named "error" to
+  // the client's own `onerror` handler, which is its transport-failure hook. A
+  // console told "no show is being monitored" therefore tore down a perfectly
+  // healthy stream and reconnected, forever.
+  | "stream_error"
+  // What this show has cost against the seller's cap, and whether the cap has
+  // stopped the copilot. Polled server-side; the console never computes it.
+  | "budget"
   // Host speech from the listen-only Whissle session, with its voice metadata.
   | "transcript"
+  /** A frame the agent read was kept; the console can show it in the timeline. */
+  | "frame"
   // The show's loudness envelope, ~10 Hz. High volume, never persisted — its
   // only consumer is a strip showing the last couple of minutes.
   | "levels";
@@ -22,7 +32,8 @@ export type EventName =
 interface Client {
   id: number;
   reply: FastifyReply;
-  /** Only events for this show reach this client. */
+  /** Only events for this show reach this client. Empty while the console is
+   *  connected but following nothing — it still gets `shows` and heartbeats. */
   showId: string;
 }
 
@@ -34,6 +45,13 @@ export class EventHub {
     const id = this.nextId++;
     this.clients.set(id, { id, reply, showId });
     return id;
+  }
+
+  /** Point an existing client at a show. A stream opens before it knows which
+   *  show it is following — sometimes before there is one. */
+  retarget(id: number, showId: string): void {
+    const c = this.clients.get(id);
+    if (c) c.showId = showId;
   }
 
   remove(id: number): void {

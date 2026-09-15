@@ -17,7 +17,33 @@
 // the point is to let someone open the console and see a live show working —
 // not to build a sign-up flow nobody asked for.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
+
+const scrypt = promisify(scryptCb) as (pw: string, salt: string, len: number, opts: { N: number; r: number; p: number; maxmem: number }) => Promise<Buffer>;
+
+/** scrypt, N=2^14 (16 MB per hash) — memory-hard, no native dependency, and
+ *  the parameters travel in the hash so they can be raised later without a
+ *  reset. `maxmem` is explicit: Node refuses anything past 32 MB by default. */
+const SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16).toString("hex");
+  const key = await scrypt(password, salt, 64, SCRYPT);
+  return `scrypt$${SCRYPT.N}$${salt}$${key.toString("hex")}`;
+}
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [algo, n, salt, hex] = stored.split("$");
+  if (algo !== "scrypt" || !salt || !hex) return false;
+  const key = await scrypt(password, salt, 64, { ...SCRYPT, N: Number(n) || SCRYPT.N });
+  const want = Buffer.from(hex, "hex");
+  return key.length === want.length && timingSafeEqual(key, want);
+}
+
+export class AuthError extends Error {
+  constructor(message: string, public status = 400) {
+    super(message);
+  }
+}
 import type { Pool } from "../db/pg.js";
 
 export type AccountKind = "guest" | "seller";
@@ -27,6 +53,7 @@ export interface Account {
   kind: AccountKind;
   handle: string;
   displayName: string;
+  email?: string | null;
 }
 
 export interface Session {
@@ -69,6 +96,40 @@ export class Accounts {
 
   /** Promote a guest to the operator role. The console's "this is my show"
    *  step; there is no password because there is nothing yet to protect. */
+  /**
+   * Register a seller. Email is the identity, the handle is derived from it
+   * for the places that show a short name, and the account is a seller from
+   * the first request — there is nothing to claim.
+   */
+  async register(email: string, password: string, displayName: string): Promise<Session> {
+    const e = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) throw new AuthError("that does not look like an email address");
+    if (password.length < 8) throw new AuthError("use at least 8 characters for the password");
+    const exists = await this.d.query("SELECT 1 FROM accounts WHERE lower(email) = $1", [e]);
+    if (exists.rowCount) throw new AuthError("an account with that email already exists — sign in instead", 409);
+    const id = `acc_${randomBytes(8).toString("hex")}`;
+    const handle = e.split("@")[0]!.replace(/[^a-z0-9._-]/g, "").slice(0, 40) || "seller";
+    const name = (displayName || handle).trim().slice(0, 80);
+    await this.d.query(
+      "INSERT INTO accounts (id, kind, handle, display_name, email, password_hash) VALUES ($1, 'seller', $2, $3, $4, $5)",
+      [id, handle, name, e, await hashPassword(password)],
+    );
+    return this.openSession({ id, kind: "seller", handle, displayName: name, email: e });
+  }
+
+  /** One message for a wrong email and a wrong password: which one was wrong is not information to hand out. */
+  async login(email: string, password: string): Promise<Session> {
+    const e = email.trim().toLowerCase();
+    const r = await this.d.query<AccountRow & { password_hash: string | null }>(
+      "SELECT * FROM accounts WHERE lower(email) = $1", [e],
+    );
+    const row = r.rows[0];
+    if (!row?.password_hash || !(await verifyPassword(password, row.password_hash))) {
+      throw new AuthError("email or password is wrong", 401);
+    }
+    return this.openSession(toAccount(row));
+  }
+
   async promoteToSeller(accountId: string, displayName: string): Promise<Account | null> {
     const r = await this.d.query<AccountRow>(
       "UPDATE accounts SET kind = 'seller', display_name = $2 WHERE id = $1 RETURNING *",
@@ -112,10 +173,10 @@ export class Accounts {
   }
 }
 
-interface AccountRow { id: string; kind: string; handle: string; display_name: string }
+interface AccountRow { id: string; kind: string; handle: string; display_name: string; email?: string | null }
 
 const toAccount = (r: AccountRow): Account => ({
-  id: r.id, kind: r.kind as AccountKind, handle: r.handle, displayName: r.display_name || r.handle,
+  id: r.id, kind: r.kind as AccountKind, handle: r.handle, displayName: r.display_name || r.handle, email: r.email ?? null,
 });
 
 /** Can this actor change anything? A guest watches; only a seller acts. */

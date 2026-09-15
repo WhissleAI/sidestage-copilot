@@ -26,7 +26,13 @@ export const config = {
    * boundary by scoping rather than by filesystem (see db/pg.ts).
    */
   databaseUrl:
-    process.env.DATABASE_URL || "postgres://localhost:5432/sidestage",
+    // The suite gets its own database. Reading DATABASE_URL there meant every
+    // test run wrote chat, proposals and follow rows into whatever the dev
+    // server was serving — and once the console started rehydrating chat, those
+    // rows showed up in the firehose as if a buyer had typed them.
+    process.env.NODE_ENV === "test"
+      ? process.env.TEST_DATABASE_URL || "postgres://localhost:5432/sidestage_test"
+      : process.env.DATABASE_URL || "postgres://localhost:5432/sidestage",
   /** Seller catalogs the operator picks from when starting a session. */
   catalogsDir: resolve(process.env.CATALOGS_DIR || "./fixtures/catalogs"),
   /** Each watched show costs a browser page; cap it. */
@@ -36,6 +42,39 @@ export const config = {
     apiKey: process.env.WHISSLE_API_KEY || "",
     agentId: process.env.WHISSLE_AGENT_ID || "",
     base: (process.env.WHISSLE_BASE || "https://aws-gateway-backend.whissle.ai/bot").replace(/\/$/, ""),
+  },
+
+  /**
+   * The eBay developer application, for the READ APIs an app token reaches.
+   *
+   * `sandbox` and `production` are different hosts AND different credentials —
+   * a sandbox key against the production host is a 401 with a message that does
+   * not say so. Anything touching a seller's own listings needs a USER token
+   * (authorisation-code grant), which these three values cannot mint.
+   */
+  ebay: {
+    env: (process.env.EBAY_ENV || "sandbox") === "production" ? "production" : "sandbox",
+    // Blank under test, deliberately. The suite must not reach eBay: the
+    // sandbox answers in 0.7–4.6 seconds, which would make a 5-second suite a
+    // 90-second one and tie a green run to someone else's uptime. The client's
+    // own behaviour is tested with an injected fetcher, and the live path is
+    // verified by `GET /api/ebay/status` against the real sandbox.
+    appId: process.env.NODE_ENV === "test" ? "" : process.env.EBAY_APP_ID || "",
+    certId: process.env.NODE_ENV === "test" ? "" : process.env.EBAY_CERT_ID || "",
+    devId: process.env.EBAY_DEV_ID || "",
+    marketplaceId: process.env.EBAY_MARKETPLACE_ID || "EBAY_US",
+    /** The redirect the consent flow returns to — eBay calls it an RuName, and
+     *  it is registered on the application, not chosen here. */
+    // Blanked under test like the keys above: the suite must never start a
+    // consent round trip against eBay.
+    ruName: process.env.NODE_ENV === "test" ? "" : process.env.EBAY_RUNAME || "",
+
+  },
+  /** eBay's account-deletion notifications: the token we registered, and the
+   *  endpoint URL exactly as registered (it is part of the challenge hash). */
+  ebayDeletion: {
+    verificationToken: process.env.EBAY_DELETION_VERIFICATION_TOKEN || "",
+    endpoint: process.env.EBAY_DELETION_ENDPOINT || "",
   },
 
   /** Bounded fan-out. The gateway runs a shared 8-wide LLM semaphore; stay under it. */

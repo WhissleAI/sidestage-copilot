@@ -794,6 +794,51 @@ test("promotion is never granted on too little evidence", async () => {
   assert.ok(ready.criteria.every((c) => c.state !== "met" || c.showsSeen >= c.showsRequired));
 });
 
+test("promotion counts only the shows this account owns", async () => {
+  // A rung is a claim about THIS seller's behaviour. Reading the last five
+  // reports globally meant a stranger's clean show could promote you — which is
+  // precisely the guarantee the ladder exists to make.
+  const d = rigPool();
+  const r = await rig();
+  const mine = `acct_${Math.random().toString(36).slice(2, 8)}`;
+  const theirs = `acct_${Math.random().toString(36).slice(2, 8)}`;
+  for (const id of [mine, theirs]) {
+    await d.query(
+      "INSERT INTO accounts (id, kind, handle, display_name) VALUES ($1,'seller',$1,$1) ON CONFLICT DO NOTHING",
+      [id],
+    );
+  }
+
+  // A spotless report, owned by somebody else.
+  await d.query("UPDATE shows SET owner_account_id = $1 WHERE id = $2", [theirs, r.showId]);
+  const spotless = {
+    engagement: { commentsSeen: 400, questionsAsked: 40, answered: 40, sent: 40, answeredRate: 1,
+      medianLatencyMs: 800, p95LatencyMs: 1200, cacheHitRate: 0.3 },
+    safety: { blocked: 0, revised: 0, abstained: 0, byGuard: {}, auditChain: { ok: true, height: 10 }, examples: [] },
+    inventory: { lotsObserved: 10, lotsEnded: 8, priceChanges: 1, peakViewers: 100 },
+    actions: { proposed: 0, committed: 0, rolledBack: 0, failed: 0 },
+    gaps: { unanswered: [], droppedByGate: {} },
+  };
+  for (let i = 0; i < 5; i++) {
+    await d.query(
+      `INSERT INTO show_reports (show_id, generated_at, report) VALUES ($1,$2,$3::jsonb)
+       ON CONFLICT (show_id) DO UPDATE SET report = EXCLUDED.report`,
+      [r.showId, new Date(Date.now() - i * 1000).toISOString(), JSON.stringify(spotless)],
+    );
+  }
+
+  const forMe = await promotionReadiness(d, "L1_SUGGEST", mine);
+  assert.equal(forMe.ready, false, "another account's clean show must not promote me");
+  assert.ok(forMe.criteria.every((c) => c.state === "unknown" || c.showsSeen === 0));
+
+  const forThem = await promotionReadiness(d, "L1_SUGGEST", theirs);
+  assert.ok(forThem.criteria.some((c) => c.showsSeen > 0), "the owner sees their own evidence");
+
+  // And with nobody signed in, nothing counts at all.
+  const anon = await promotionReadiness(d, "L1_SUGGEST", null);
+  assert.equal(anon.ready, false);
+});
+
 // ── naming a lot the stream refused to name ────────────────────────────────
 //
 // eBay Live names lots for the seller automatically and the name carries no

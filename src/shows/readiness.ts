@@ -14,6 +14,8 @@
 
 import { config } from "../config.js";
 import type { Catalog } from "./catalogs.js";
+import { aspectGaps, type AspectGap } from "./catalogAspects.js";
+import { ebay } from "../ingest/ebay/client.js";
 
 export interface ReadinessCheck {
   name: string;
@@ -28,6 +30,23 @@ export interface Readiness {
   agentId: string | null;
   ok: boolean;
   checks: ReadinessCheck[];
+  /** What eBay says a listing in this category should carry, and what this
+   *  catalog does. Null when eBay could not be asked — which the check reports
+   *  as "not checked", never as "nothing missing". */
+  aspects?: AspectGap | null;
+  /**
+   * What the last show on this catalog could not answer.
+   *
+   * The report ends with the questions the catalog could not ground; setup is
+   * the last moment a seller can still fix them before the next show asks the
+   * same things. Null when no earlier show on this catalog left a report.
+   */
+  carried?: {
+    fromShowId: string;
+    title: string;
+    endedAt: string;
+    gaps: { question: string; asked: number; reason: string }[];
+  } | null;
 }
 
 async function api<T>(path: string): Promise<T | null> {
@@ -91,9 +110,17 @@ const STOP = new Set([
   "auction", "bid", "bids", "free", "ship", "shipping", "sale",
 ]);
 
-export async function checkReadiness(catalog: Catalog): Promise<Readiness> {
+export async function checkReadiness(
+  catalog: Catalog,
+  opts: { agentId?: string | null } = {},
+): Promise<Readiness> {
   const checks: ReadinessCheck[] = [];
-  const agentId = catalog.agentId ?? null;
+  // The SHOW's agent when there is one. A prepared show carries its agent in
+  // `prepared_shows` and a running show in `shows.agent_id`; the catalog file
+  // knows neither, and reading only the file told the operator "this catalog
+  // has no agent — run seed:agent" about a show that was answering from its
+  // own agent at that moment.
+  const agentId = opts.agentId ?? catalog.agentId ?? null;
 
   // ── what this process will ground against ────────────────────────────────
   checks.push({
@@ -110,23 +137,59 @@ export async function checkReadiness(catalog: Catalog): Promise<Readiness> {
       : "none — every shipping or returns question will abstain",
     severity: "blocker",
   });
+  // Comparables come from eBay now — completed sales where they exist, active
+  // asking prices otherwise — fetched in the background per lot. The seeded
+  // comps in a catalog file are the fallback for a machine with no eBay
+  // application, which is the only case where their absence is a warning.
   checks.push({
     name: "Market comps",
-    ok: (catalog.comps?.length ?? 0) > 0,
-    detail: catalog.comps?.length
-      ? `${catalog.comps.length} recent comparable sales`
-      : "none — \"is that a good price?\" has nothing to answer from, so product research will abstain",
+    ok: ebay.configured || (catalog.comps?.length ?? 0) > 0,
+    detail: ebay.configured
+      ? `live from eBay — sold prices where a lot has any, asking prices otherwise${catalog.comps?.length ? `, plus ${catalog.comps.length} seeded sales` : ""}`
+      : catalog.comps?.length
+        ? `${catalog.comps.length} seeded comparable sales — no eBay application, so nothing live`
+        : "none — no eBay application and no seeded sales, so \"is that a good price?\" will abstain",
     severity: "warning",
   });
+
+  // ── what eBay expects a listing here to carry ────────────────────────────
+  //
+  // Two calls, and the whole check degrades to "not checked" rather than to a
+  // clean bill of health, because those look identical to a seller skimming and
+  // are opposite facts.
+  const gaps = await aspectGaps(catalog.items).catch(() => null);
+  checks.push(
+    gaps
+      ? {
+          name: "Listing aspects eBay expects",
+          ok: gaps.missing.length === 0,
+          detail: gaps.missing.length
+            ? `${gaps.categoryName}: no item carries ${gaps.missing.join(", ")} — buyers filter on these, and the copilot cannot cite a field the catalog does not have`
+            : `${gaps.categoryName}: all ${gaps.required.length} required aspects are covered${gaps.worst.length ? `, though ${gaps.worst.length} items are missing one` : ""}`,
+          severity: "warning",
+        }
+      : {
+          name: "Listing aspects eBay expects",
+          ok: true,
+          // Two different reasons, and the difference is whether there is
+          // anything the seller can do about it.
+          detail: ebay.configured
+            ? "not checked — no item carried enough brand or model detail to resolve an eBay category"
+            : "not checked — no eBay application configured",
+          severity: "info",
+        },
+  );
 
   if (!agentId) {
     checks.push({
       name: "Whissle agent",
       ok: false,
-      detail: "this catalog has no agent — run `npm run seed:agent`",
+      // Product language. A seller does not run npm scripts; attaching a show
+      // or preparing one creates the agent, and that is the instruction.
+      detail: "no agent yet — one is created when you monitor or prepare a show",
       severity: "blocker",
     });
-    return { catalogId: catalog.id, agentId, ok: false, checks };
+    return { catalogId: catalog.id, agentId, ok: false, checks, aspects: gaps };
   }
 
   // ── what the gateway actually holds ──────────────────────────────────────
@@ -192,5 +255,6 @@ export async function checkReadiness(catalog: Catalog): Promise<Readiness> {
     agentId,
     ok: checks.every((c) => c.ok || c.severity !== "blocker"),
     checks,
+    aspects: gaps,
   };
 }

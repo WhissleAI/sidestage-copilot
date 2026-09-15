@@ -49,6 +49,9 @@ export interface SettingsView {
 const EDITABLE = new Set<keyof SellerGuardrailPolicy>([
   "neverSay", "redactPii", "onViolation", "maxDiscountPct", "maxReplyChars",
   "allowMarkdown", "allowEmoji", "hypePhrases", "languageMode", "holdForApproval",
+  // What the copilot may use, and how much it may do on its own. Both were
+  // env-only, which meant a seller could not change either without a restart.
+  "ingest", "automation",
 ]);
 
 export function sanitize(input: unknown): Partial<SellerGuardrailPolicy> {
@@ -65,6 +68,26 @@ export function sanitize(input: unknown): Partial<SellerGuardrailPolicy> {
   }
   if (typeof out.maxReplyChars === "number") {
     out.maxReplyChars = Math.max(80, Math.min(2000, out.maxReplyChars));
+  }
+  // Automation bounds. L4 is deliberately not settable as a STARTING rung —
+  // bounded auto-acting only ever runs against a mock marketplace, so nobody
+  // gets to begin a show there.
+  if (out.automation && typeof out.automation === "object") {
+    const a = out.automation as Record<string, unknown>;
+    const rungs = ["L0_OBSERVE", "L1_SUGGEST", "L2_ONE_TAP", "L3_AUTO_REPLY"];
+    if (typeof a.startingRung === "string" && !rungs.includes(a.startingRung)) a.startingRung = "L1_SUGGEST";
+    if (typeof a.confidenceFloor === "number") a.confidenceFloor = Math.max(0.5, Math.min(0.99, a.confidenceFloor));
+    if (typeof a.undoWindowS === "number") a.undoWindowS = Math.max(10, Math.min(600, a.undoWindowS));
+    if (typeof a.actionBudget === "number") a.actionBudget = Math.max(0, Math.min(100, a.actionBudget));
+    if (typeof a.warnBalanceUsd === "number") a.warnBalanceUsd = Math.max(0, Math.min(1000, a.warnBalanceUsd));
+    if (typeof a.perShowCapUsd === "number") a.perShowCapUsd = Math.max(0, Math.min(1000, a.perShowCapUsd));
+  }
+  // Buyer chat is not a toggle: with it off there is nothing to answer.
+  if (out.ingest && typeof out.ingest === "object") {
+    const i = out.ingest as Record<string, unknown>;
+    for (const k of ["hostAudio", "cameraFrames", "webResearch", "priorAnswers"]) {
+      if (k in i) i[k] = Boolean(i[k]);
+    }
   }
   if (Array.isArray(out.neverSay)) {
     out.neverSay = (out.neverSay as unknown[])

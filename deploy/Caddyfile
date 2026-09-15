@@ -1,0 +1,7 @@
+{$SITE_ADDRESS} {
+	encode zstd gzip
+	reverse_proxy app:8790 {
+		# SSE: never buffer the show stream.
+		flush_interval -1
+	}
+}

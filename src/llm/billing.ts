@@ -175,6 +175,9 @@ export class WhissleBilling {
  */
 export class SpendWindow {
   private opened = new Map<string, { at: string; balanceUsd: number }>();
+  /** The last computed spend per window, kept after the window closes so a
+   *  session can write down what it cost. */
+  private lastSpend = new Map<string, number>();
 
   /** Record the opening balance for a window (a show id, or "process"). */
   open(key: string, balanceUsd: number | null): void {
@@ -186,11 +189,26 @@ export class SpendWindow {
     this.opened.delete(key);
   }
 
+  /**
+   * The last spend we computed for this window, in dollars — or null when the
+   * wallet was never readable (a key without the billing scope, most often).
+   *
+   * Null is "we do not know". It exists so a persisted cost row can say that
+   * rather than record a confident zero.
+   */
+  lastKnown(key: string): number | null {
+    return this.lastSpend.get(key) ?? null;
+  }
+
   /** Spend so far for every open window, against the balance just read. */
   since(balanceUsd: number | null): Record<string, { openedAt: string; openingUsd: number; spentUsd: number }> {
     const out: Record<string, { openedAt: string; openingUsd: number; spentUsd: number }> = {};
     if (balanceUsd == null) return out;
     for (const [k, v] of this.opened) {
+      const spent = Math.max(0, Math.round((v.balanceUsd - balanceUsd) * 10000) / 10000);
+      // Remembered so the value survives the window closing — a session that
+      // ends needs to write down what it spent, and by then the window is gone.
+      this.lastSpend.set(k, spent);
       out[k] = {
         openedAt: v.at,
         openingUsd: v.balanceUsd,

@@ -76,11 +76,23 @@ what its limits are.
 
 ### One thing to know before you test the write path
 
-**Listing and inventory actions run against `MockMarketplace`, never a real
-marketplace.** All five kinds are implemented, two-phase committed, hash-chain
-audited and rollback-proven — against a simulator that injects latency, apply
-failures and optimistic-concurrency conflicts so the rollback path is genuinely
-exercised rather than theoretical.
+**Where a write lands is a per-show choice, and the show says which.** Every
+action runs the same two-phase protocol, hash-chain audit and undo window
+through `MarketplaceAdapter`; what differs is the adapter behind it.
+
+`mock` is the default for every show, including a seller's own. It is a
+simulator that injects latency, apply failures and optimistic-concurrency
+conflicts so the rollback path is genuinely exercised rather than theoretical.
+
+`ebay` is the real Sell Inventory API, and arming it takes two deliberate steps:
+the seller connects their eBay account (Settings → eBay, an OAuth consent they
+complete in a browser — no key can stand in for it), and then the show is
+switched over. Connecting grants the capability; it does not arm it. Two caveats
+the adapter does not paper over: eBay exposes no version on an offer, so the
+optimistic lock is value-based (read at reserve, re-read at apply, refuse if it
+moved) rather than version-based; and ending a listing WITHDRAWS the offer
+rather than deleting it, because the undo window promises reversibility and a
+deleted offer is not reversible.
 
 They cannot run against a real one here for a structural reason, not an
 unfinished one: a show you do not own is monitored **read-only**, because we
@@ -202,6 +214,46 @@ shows the live reply path.
 
 Required scopes: `agent:read`, `agent:write`, `agent:chat`, `kb:write`.
 
+## Accounts
+
+Every seller registers with an email and a password (`POST /api/auth/register`, `/login`,
+`/logout`; scrypt, no native dependency). There is no guest door any more: a visitor sees the
+landing page, and every `/api/*` route except the front door, health and eBay's own callbacks
+answers `401 sign in to use SideStage` without a session. The stream and the audio bridge
+carry the session as a `token` query parameter because neither can set a header.
+
+## Deployed
+
+| | |
+|---|---|
+| Frontend | https://sidestage.whissle.ai (also https://sidestage-five.vercel.app; Vercel, TanStack Start on the Nitro `vercel` preset; `/privacy` and `/terms` are pages of the app) |
+| Backend | https://35-173-35-240.sslip.io (one t3.small in us-east-1: Postgres + app + a real Chrome, in Docker Compose behind Caddy, which issues the certificate for the sslip.io name) |
+| eBay account deletion | `GET/POST /api/ebay/account-deletion` answers eBay's Marketplace Account Deletion challenge and notices (`src/ingest/ebay/deletion.ts`) — eBay keeps a **production** keyset disabled until this exists. Token in `EBAY_DELETION_VERIFICATION_TOKEN`; the registered URL in `EBAY_DELETION_ENDPOINT`, byte-for-byte |
+| eBay redirect | RuName registered with accepted URL `…/api/ebay/callback` on the backend, declined URL `/settings` on the frontend, privacy `/privacy` |
+
+`scripts/deploy-aws.sh up` creates the key pair, security group and instance and deploys;
+`scripts/deploy-aws.sh deploy` rsyncs this checkout plus `.env` and `data/` and restarts the
+stack. The eBay Live session travels as `data/ebay-session.json` (Playwright storage state),
+never as the Chrome profile — macOS Chrome encrypts cookies with the Keychain and a Linux Chrome
+cannot read them. Sign in locally with `npm run ebay:signin`, export the jar with `npm run ebay:export`,
+then `deploy` again. From a datacenter IP eBay answers every first request with a JavaScript
+challenge (`/splashui/challenge`); real Chrome passes it on its own, which is why the image
+installs Chrome and never Playwright's headless shell. The watcher (a show's `player.html`) was
+confirmed working from the box this way. The signed-in live grid needs one more thing, and the
+first diagnosis of it was wrong. It was recorded here as "eBay refuses the grid from a datacenter
+IP". Measured on 2026-09-14: a session that read 224 events from the laptop at 13:00 read zero
+from the box — and then zero from the laptop too, headed or headless, proxied through a home
+connection or not — while the seller's own Chrome showed 96 events. eBay's header on every one of
+those failing reads said "Sign in or register": **eBay had ended the session** after seeing it
+from a second address, and the anonymous grid (with its "technical issue" banner) is what a
+signed-out browser gets. Discovery now reads that header and reports `signed-out` rather than
+`blocked`. The durable setup for a hosted copilot follows from it: a fixed-IP residential or ISP
+proxy in `EBAY_DISCOVERY_PROXY`, the sign-in done THROUGH it (`npm run ebay:signin` honours the
+same variable, tick "Stay signed in"), the export shipped, and the server reading through the
+same address ever after — one session, one address, kept warm by the periodic discovery read.
+The grid is the same for every seller, so one such session serves every account on the host.
+Attaching by link, reports, analytics and the eBay consent flow all run deployed without it.
+
 ## Known limitations or broken paths
 
 Stated plainly, because these are the things a reviewer would otherwise find.
@@ -213,28 +265,72 @@ Stated plainly, because these are the things a reviewer would otherwise find.
    comfortably inside (p50 ~2 ms, p95 ~1.1 s). **The fix is token streaming to the console, which
    is specified in the frontend contract and not implemented in the backend** — proposals are
    emitted once, complete, rather than streaming. See `docs/TDD.md` §5.
-2. **Marketplace writes go to `MockMarketplace`**, not a live eBay or Whatnot account. It is a
-   real two-phase participant with injectable latency, injectable apply failures and genuine
-   optimistic-concurrency conflicts — the rollback tests force all three — but it is not a
-   network integration. The adapter interface is in `src/actions/marketplace/port.ts`.
+2. **Marketplace writes default to `MockMarketplace`**, and reach real eBay listings only when a
+   seller connects their account and switches a show to it. The mock is a real two-phase
+   participant with injectable latency, injectable apply failures and genuine
+   optimistic-concurrency conflicts — the rollback tests force all three. The live adapter
+   (`src/actions/marketplace/ebay.ts`) speaks the same port against the Sell Inventory API; its
+   optimistic lock is value-based because eBay publishes no offer version, which is a narrower
+   guarantee than the mock's and is documented as such in the file.
 3. **No neural embeddings.** The second retrieval leg is character-trigram cosine, not a
    learned embedding. `docs/EVALS.md` measures exactly what it buys (nothing on clean questions;
    it halves degradation on misspelled ones). An ONNX MiniLM is a drop-in at the same seam.
-4. **Host audio needs one operator click.** The listen-only Whissle session mints correctly and
-   transcripts feed the show context, but browsers require a user gesture to hand a page tab
-   audio, so `/audio-bridge` is a page the seller opens and clicks once. It cannot be started
-   from the backend — by us or anyone.
-5. **eBay Live ingestion is a scrape, not an API.** eBay publishes no Live chat or lot API, so
-   `src/ingest/ebaylive/watcher.ts` drives a headless browser over the show's own player DOM.
-   Read-only by construction, but it is subject to selector drift on an eBay deploy and to
-   eBay's terms on automated access. Full details and limits in
-   [`docs/EBAY_LIVE.md`](docs/EBAY_LIVE.md).
+4. **Host audio needs one operator click — and once it is on, the show is kept.** The listen-only
+   Whissle session mints correctly and the bridge page publishes tab audio into it, but Chrome
+   will not hand over tab audio without a person ticking "Share tab audio", so the copilot cannot
+   start hearing a show by itself. With the bridge open, every finalised utterance is stored with
+   its emotion and intent **distributions**, the frames the agent read are kept with their reading,
+   and the audio is kept in ten-second Opus chunks under `data/shows/<showId>/` — all of it
+   deleted with the show. The report's Timeline tab plays it back; nothing else reads the bytes.
+
+5. **eBay Live ingestion is a scrape, not an API — and discovery needs a signed-in session.**
+   eBay publishes no Live chat, lot or schedule API, so `src/ingest/ebaylive/` drives a browser
+   over eBay's own pages. The live grid and a seller's schedule render **nothing** to an
+   anonymous visitor (measured: zero event links at forty seconds, against 224 for a signed-in
+   session), so `npm run ebay:signin` opens a window where the operator signs in once; the
+   browser profile persists under `data/` (gitignored) and discovery drives it directly. One
+   process at a time can hold that profile, so sign in with the server stopped. It must
+   be **real Chrome in new-headless mode** — eBay blocks Playwright's bundled headless shell on
+   the same profile. Subject to selector drift on an eBay deploy and to eBay's terms on
+   automated access. Full details and limits in [`docs/EBAY_LIVE.md`](docs/EBAY_LIVE.md).
 6. **A monitored show's lineup must be imported.** eBay Live renders only the lot on the block;
    the full list needs sign-in. Without a catalog import the copilot honestly abstains on
    everything except the current lot.
 7. **Chat replies are drafted, never delivered.** Nothing posts back to eBay or Twitch. Both
    live sources are read-only by construction with no send path — see `docs/TDD.md` §8 for why
    that is a deliberate boundary rather than an unfinished feature.
+8. **Comparables prefer SOLD prices and fall back to asking.** Marketplace Insights (completed
+   sales, 90 days) is used where it answers; where it does not — sandbox carries no sales history
+   at all — the comparables come from active listings through Browse and every surface labels
+   them as asking prices. The two are never averaged together: asking prices skew high, and a
+   seller holding firm against a number they believe is a sale price is being misled. Market
+   lookups are fetched in the background and served from cache, never on the request path: one
+   sandbox Browse call measured 0.7–4.6 seconds against a 2-second end-to-end budget.
+9. **The eBay application unlocks the catalog, not the live stream.** Browse and Taxonomy need
+   only an application key; the seller's own listings need their consent (`EBAY_RUNAME` plus an
+   OAuth sign-in). eBay Live has no API in any tier, so discovery and the watcher stay a scrape.
+10. **Preparing a show reads the seller's listings two ways, and says which.** One seller has
+    three names: a display name on the Live card ("GoldStandardAuction"), a Live-page slug in the
+    seller link ("q_EImPfySam"), and the account username ("gold_standard_guy") that actually keys
+    their listings. Preparation resolves the username from the Live seller page, then tries the
+    Browse API seller filter — which a **sandbox** key rejects for every real seller, and which
+    eBay then silently drops while returning the whole market with a 200 and a warning in the
+    body. That warning is treated as a failure, never as a result. The fallback reads the
+    seller's public results page through the signed-in profile (skipping "Shop on eBay" filler
+    and the seller's own "Live show link" placeholders), and the catalog records that it came
+    from a page read rather than the API.
+11. **The agent's conclusion is written, not measured.** At the end of a show the show's own agent
+    is handed the report's numbers, the gaps, a sample of what the host said and what the camera
+    showed, and asked for a summary, an outcome and typed next actions (`src/shows/conclusion.ts`).
+    It can only cite that evidence, but it is still a model writing prose: read the counts first.
+    The platform's own end-of-session summary is pulled beside it when the gateway produced one,
+    matched by room and then by agent and time window — the report says which.
+
+12. **Host distributions are probability mass, and the head is honest about arousal.** "Excited
+    41%" on the report is 41% of the mass across every utterance, not "excited 41% of the time",
+    and the gateway's own note says the emotion head degrades on low-arousal states. Both are
+    printed on the surface rather than smoothed away.
+
 8. **No auth, no tenancy.** Shows are isolated per SQLite file, but anyone who can reach the
    port can drive every show. CORS is wide open, which is correct for a local operator tool and
    wrong for anything deployed.

@@ -72,7 +72,13 @@ let refCount = 0;
 
 async function acquireBrowser(headless: boolean): Promise<Browser> {
   if (!shared) {
-    shared = await chromium.launch({
+    // Real Chrome first, the bundled build only where there is none. On the
+    // deployed box Playwright's headless shell crashed its renderer on EVERY
+    // player page ("Target crashed", measured 2026-09-15 on two live shows)
+    // while the same attach worked on a laptop; Google Chrome in the same
+    // image, which discovery already uses, does not.
+    const launch = (channel?: "chrome") => chromium.launch({
+      ...(channel ? { channel } : {}),
       headless,
       // A headless page is a BACKGROUND page, and Chrome throttles background
       // timers and lets renderers idle. eBay's chat socket stops delivering when
@@ -84,8 +90,14 @@ async function acquireBrowser(headless: boolean): Promise<Browser> {
         "--disable-renderer-backgrounding",
         "--disable-features=CalculateNativeWinOcclusion",
         "--mute-audio",
+        // A 2 GB box runs this next to Postgres and, at times, a second Chrome
+        // for discovery. Keep the renderer off /dev/shm and off a GPU it does
+        // not have; a renderer that runs out of either reports "Target crashed".
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
       ],
     });
+    shared = await launch("chrome").catch(() => launch());
     // Chromium can die under us — OOM-killed, crashed, or closed by hand — and
     // without this the stale handle is handed to every watcher forever: each
     // scrape() throws, the console keeps rendering a show that looks alive, and
@@ -136,7 +148,18 @@ export class EbayLiveWatcher {
   }
 
   async start(): Promise<void> {
-    await this.openPage();
+    try {
+      await this.openPage();
+    } catch (e) {
+      // A renderer that dies on first paint ("Target crashed") is a memory
+      // blip, not a verdict on the show. Drop what is left, let the shared
+      // browser relaunch, and try once more before telling the operator.
+      if (!/crash|Target closed|disconnected/i.test(String((e as Error).message))) throw e;
+      await this.page?.context().close().catch(() => {});
+      this.page = null;
+      await releaseBrowser();
+      await this.openPage();
+    }
 
     // The first scrape is a BACKLOG, not new traffic: mark everything already on
     // screen as seen so a freshly attached show does not replay an hour of chat

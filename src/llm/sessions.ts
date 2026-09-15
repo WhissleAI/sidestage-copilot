@@ -127,6 +127,74 @@ export class WhissleSessions {
     };
   }
 
+  /**
+   * The platform's own account of one voice session.
+   *
+   * A listen-only session is still a session to the gateway: it runs the same
+   * emotion/intent head over the host's audio and, when it ends, writes the
+   * same `session_summary` block a phone call gets. That block sat on the
+   * gateway unread while the report described the show from chat alone.
+   *
+   * Matching is by the `session_id` the bench minted (it carries the room) and
+   * falls back to "a voice session on this agent inside the show's window"; the
+   * report says which, because a summary of the wrong session is worse than
+   * none.
+   */
+  async voiceSessionFor(opts: {
+    agentId: string;
+    room: string | null;
+    since: string | null;
+  }): Promise<PlatformSessionSummary | null> {
+    const list = await this.get<{ items?: SessionRow[] }>(`/api/sessions?kind=voice&limit=25`);
+    if (!list.ok) return null;
+    const since = opts.since ? new Date(opts.since).getTime() : 0;
+    const items = (list.value.items ?? []).filter((s) => new Date(s.created_at).getTime() >= since - 60_000);
+    const pick = (matched: PlatformSessionSummary["matchedBy"], f: (s: SessionRow) => boolean) => {
+      const hit = items.find(f);
+      return hit ? { hit, matched } : null;
+    };
+    const found =
+      (opts.room && pick("room", (s) => Boolean(s.session_id && s.session_id.includes(opts.room!)))) ||
+      pick("agent", (s) => s.agent_id === opts.agentId) ||
+      (since ? pick("window", () => true) : null);
+    if (!found) return null;
+
+    const det = await this.get<{ session?: SessionDetail } & SessionDetail>(`/api/sessions/${found.hit.id}`);
+    if (!det.ok) return null;
+    const x = det.value.session ?? det.value;
+    const m = x.metadata ?? {};
+    const ss = m.session_summary;
+    const pct = (o: Record<string, number> | undefined) =>
+      o
+        ? Object.entries(o)
+            .map(([label, v]) => ({ label: label.replace(/^(EMOTION|INTENT)_/, "").toLowerCase(), share: Number(v) / 100 }))
+            .sort((a, b) => b.share - a.share)
+        : [];
+    return {
+      sessionId: x.id,
+      matchedBy: found.matched,
+      createdAt: x.created_at,
+      durationSec: Number(x.duration_sec ?? 0),
+      turns: Array.isArray(m.turn_signals) ? m.turn_signals.length : 0,
+      summary: ss && typeof ss === "object"
+        ? {
+            summary: str(ss.summary),
+            outcome: str(ss.outcome),
+            disposition: str(ss.disposition),
+            nextAction: str(ss.next_action),
+            recommendedAction: str(ss.recommended_action),
+            confidence: str(ss.confidence),
+            keyPoints: Array.isArray(ss.key_points) ? ss.key_points.map(String) : [],
+          }
+        : null,
+      emotion: pct(m.emotion_distribution),
+      intent: pct(m.intent_breakdown),
+      dominantEmotion: str(m.dominant_emotion)?.replace(/^EMOTION_/, "").toLowerCase() ?? null,
+      primaryIntent: str(m.primary_intent)?.replace(/^INTENT_/, "").toLowerCase() ?? null,
+      recordingPath: str(x.recording_path),
+    };
+  }
+
   private async get<T>(path: string): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
     const t0 = performance.now();
     const ctl = new AbortController();
@@ -159,7 +227,46 @@ export class WhissleSessions {
   }
 }
 
-interface SessionRow { id: string; title: string | null; created_at: string }
+interface SessionRow {
+  id: string; title: string | null; created_at: string;
+  session_id?: string | null; agent_id?: string | null; kind?: string;
+}
+interface SessionDetail {
+  id: string; created_at: string; duration_sec?: number | null; recording_path?: string | null;
+  metadata?: {
+    session_summary?: Record<string, unknown>;
+    emotion_distribution?: Record<string, number>;
+    intent_breakdown?: Record<string, number>;
+    dominant_emotion?: unknown;
+    primary_intent?: unknown;
+    turn_signals?: unknown[];
+  };
+}
+const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+/** What the gateway wrote about the host's audio session, mapped to the
+ *  report's vocabulary. `share` is a fraction, labels are bare lower-case. */
+export interface PlatformSessionSummary {
+  sessionId: string;
+  matchedBy: "room" | "agent" | "window";
+  createdAt: string;
+  durationSec: number;
+  turns: number;
+  summary: {
+    summary: string | null;
+    outcome: string | null;
+    disposition: string | null;
+    nextAction: string | null;
+    recommendedAction: string | null;
+    confidence: string | null;
+    keyPoints: string[];
+  } | null;
+  emotion: { label: string; share: number }[];
+  intent: { label: string; share: number }[];
+  dominantEmotion: string | null;
+  primaryIntent: string | null;
+  recordingPath: string | null;
+}
 interface TraceEvent {
   type: string;
   data?: {

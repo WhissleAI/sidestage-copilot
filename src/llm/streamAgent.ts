@@ -40,6 +40,16 @@ export interface StreamAgentSpec {
   monitored: boolean;
 }
 
+/** How the platform should summarise the audio session at its end. */
+export function scoringPrompt(s: StreamAgentSpec): string {
+  return [
+    `This session is the host's audio from a live selling show ("${s.showTitle}", host ${s.host}). You only listened; the host never spoke to you.`,
+    "Summarise the SHOW, not a conversation: what was pitched, how the host paced it, where energy rose or dropped, what sold or stalled if audible.",
+    "outcome: one of strong / steady / rough / quiet. next_action: the one thing the host should change before the next show. key_points: 3-5, each tied to something said.",
+    "Do not describe it as a call, a customer, or a support interaction.",
+  ].join(" ");
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const r = await fetch(`${config.whissle.base}${path}`, {
     method,
@@ -112,6 +122,13 @@ export async function createStreamAgent(s: StreamAgentSpec): Promise<string> {
   await call("PATCH", `/api/agents/${created.id}`, {
     content_guardrails: toContentGuardrails(),
     action_policy: toActionPolicy(),
+    // The gateway runs its own emotion/intent head over the listen-only audio
+    // session and writes an end-of-session summary; both are read back into
+    // the post-show report (see shows/conclusion.ts and llm/sessions.ts). The
+    // rubric tells that summary what a SHOW is, so it does not grade a
+    // two-hour selling stream as an unresolved support call.
+    emotion_analysis_enabled: true,
+    scoring_prompt: scoringPrompt(s),
   }).catch(() => {
     // The agent exists and works; it is just not carrying Layer A yet. Readiness
     // reports that honestly rather than the session failing to start.

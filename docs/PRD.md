@@ -211,3 +211,27 @@ assumption:
    by under 1%; the tail is the shared LLM pool. The win that mattered was the version-keyed
    cache (p50 1.2 s → 2 ms on repeats), which matters *because* live chat asks the same six
    questions over and over — a product fact, not an engineering one.
+
+
+## 8. Implementation status against this document
+
+Read on 2026-09-14 against the code, not the other way round. ✓ built and exercised,
+~ partial and named, ✗ not built and named.
+
+| PRD requirement | Status | Where, or why not |
+|---|---|---|
+| §2 buyer question → claim-structured reply → guardrails against **current** state → card with provenance → one-keystroke send | ✓ | `src/pipeline/pipeline.ts`, `src/guardrails/`; exercised live on a real eBay Live show: admitted → allowed → card in <14 s with 8 cited facts |
+| §2 "no reply the system cannot justify" | ✓ (after a real hole) | Two listing facts were **synthesised** from defaults for every lot — "$9.95 Ground Advantage", "general-release pair, 30-day return" — and passed every guard because a claim cited them. Removed; a lot with no real shipping or authenticity data now yields no fact and the copilot abstains. Blocking precision 0.962 → 1.000 |
+| §2 operational problem → bounded, reversible action → preflight → approve → commit → hash-chained audit → undo | ✓ | `src/actions/`; two-phase against `MockMarketplace` by default, real eBay Sell Inventory when a seller connects and arms the show |
+| §3 one seller, one show, one catalog | ~ | The product also monitors and prepares **other** sellers' shows (read-only), added on request. The seller's own path is now first on Shows ("Your show") rather than behind a paste-a-URL box |
+| §4 every metric computed per show | ✓ | `src/shows/prdMetrics.ts`, on every report; aggregated across shows on Analytics → Overview |
+| §4 "wrong replies reaching a buyer" | ✗ by design | Not self-measurable; the operator's "wrong?" flag is the floor, and is counted |
+| §4 "operational edits within 60 s of the signal" | ~ | Count computed; latency to signal not |
+| §5 five-rung ladder, promotion criteria checkable against own numbers | ✓ | `src/autonomy/`; criteria rendered with progress on Analytics → Autonomy. L4 stays locked while writes hit a mock |
+| §5 a `block` never auto-sends; price and discount never on the L3 allow-list | ✓ | `src/autonomy/ladder.ts` |
+| §6 pilot instrumentation — span breakdown, evidence, guard verdicts on every proposal | ✓ | persisted in `reply_proposals`, readable per reply in the console inspector |
+| Delivery of a sent reply to the marketplace chat | ✗ | eBay Live exposes no chat-post API. A "sent" reply is recorded and audited, not delivered; stated in the README |
+| §2 the copilot **perceives** the show — host speech with emotion and intent, what the camera shows | ✓ | `src/api/audioBridge.ts` → `show_transcript`, `show_frames`, `show_audio`; distributions kept whole (`src/shows/signals.ts`) |
+| §4 post-session report the seller reads and acts on | ✓ | Five sections — Did it help · What the host did · Can I trust it · What the agent concluded · Fix before the next show — plus Replies, Actions, Audit and a playable Timeline (`/api/shows/:id/record`, `/timeline`, `/export`) |
+| §5 next actions carried into the next show | ✓ | Readiness returns the last report's gaps on the same catalog (`carried`); the agent's typed next actions sit on the report (`src/shows/conclusion.ts`) |
+| §5 promotion argued from evidence by topic | ✓ | Analytics → Topics: asked / answered / abstained / blocked / edited per intent against the allow-list constant |

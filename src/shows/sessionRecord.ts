@@ -8,9 +8,30 @@
 // on a database round trip to reach the seller, and losing one row from a report
 // is a smaller failure than adding latency to every reply.
 
+//
+// The report's vocabulary — one word per thing, used by the API, the console
+// and the docs alike:
+//
+//   signals      what was measured from the show itself: the host's utterances
+//                (with emotion and intent distributions), the frames the agent
+//                read, the audio. Never a reply. See signals.ts.
+//   proposals    replies drafted for the seller; verdicts are what the guards
+//                said about them (allow · revise · block).
+//   actions      writes to listings — proposed, committed, rolled back.
+//   gaps         buyer questions the catalog could not ground.
+//   conclusion   what the agent concluded at the end: summary, outcome, next
+//                actions. See conclusion.ts.
+//
+// The five sections a seller reads, in order: Did it help (engagement) · What
+// the host did (host) · Can I trust it (safety) · What the agent concluded
+// (conclusion) · Fix before the next show (gaps + next actions).
+
 import type { Pool } from "../db/pg.js";
 import type { ChatMessage, ReplyProposal } from "../domain/types.js";
 import { prdMetrics, type PrdMetrics } from "./prdMetrics.js";
+import type { HostSummary, SessionSignals } from "./signals.js";
+import type { Conclusion, ConclusionEvidence } from "./conclusion.js";
+import type { PlatformSessionSummary } from "../llm/sessions.js";
 
 /** Statuses that mean the seller acted on it. */
 const DECIDED = new Set(["sent", "dismissed"]);
@@ -29,6 +50,39 @@ export class SessionRecord {
          m.admitted, m.dropReason ?? null],
       )
       .catch(() => {});
+  }
+
+  /**
+   * The last few minutes of chat, for a console that just connected.
+   *
+   * A show runs for hours and a console can be opened at any point in it — or
+   * reopened after a reload. Without this the firehose column starts empty and
+   * stays empty until the next buyer types, which reads as a broken feed rather
+   * than a late arrival. Dropped messages come back too: the gate's refusals
+   * are half of what the column is for.
+   */
+  async recentChat(limit = 60): Promise<ChatMessage[]> {
+    const { rows } = await this.d.query<{
+      id: string; author: string; text: string; at: string;
+      intent: string | null; speech_act: string | null;
+      admitted: boolean; drop_reason: string | null;
+    }>(
+      `SELECT id, author, text, at, intent, speech_act, admitted, drop_reason
+         FROM chat_messages WHERE show_id = $1 ORDER BY at DESC LIMIT $2`,
+      [this.showId, limit],
+    );
+    return rows
+      .map((r) => ({
+        id: r.id,
+        author: r.author,
+        text: r.text,
+        at: r.at,
+        intent: r.intent as ChatMessage["intent"],
+        speechAct: r.speech_act as ChatMessage["speechAct"],
+        admitted: r.admitted,
+        ...(r.drop_reason ? { dropReason: r.drop_reason } : {}),
+      }))
+      .reverse();
   }
 
   recordProposal(p: ReplyProposal): void {
@@ -68,6 +122,7 @@ export class SessionRecord {
 
 export interface ShowReport {
   showId: string;
+  catalogId?: string | null;
   title: string;
   source: string;
   startedAt: string;
@@ -89,6 +144,16 @@ export interface ShowReport {
     blocked: number;
     revised: number;
     abstained: number;
+    /**
+     * Replies the OPERATOR marked wrong after they were sent.
+     *
+     * The PRD lists "wrong replies reaching a buyer" as not self-measurable,
+     * which is true — a reply this system judged correct is exactly the one it
+     * cannot mark wrong. This is the human's count, and it is a FLOOR: it
+     * counts the ones somebody noticed. Every surface that renders it says so.
+     */
+    flaggedWrong: number;
+    flagReasons: Record<string, number>;
     byGuard: Record<string, number>;
     auditChain: { ok: boolean; height: number; brokenAt?: number };
     examples: { question: string; draft: string; guard: string; reason: string }[];
@@ -118,17 +183,41 @@ export interface ShowReport {
   /** Every number docs/PRD.md §4 promises, computed. Carried on the report so a
    *  reviewer can diff the document against a real show rather than the code. */
   prd: PrdMetrics;
+  /**
+   * What the host did — from their own speech, not from chat.
+   *
+   * Distributions summed as probability mass over every utterance; null when
+   * host audio was never captured, which the page must say rather than draw
+   * an empty chart. The platform's own account of the same audio session sits
+   * beside it when the gateway produced one: two measurements of one show,
+   * shown as two.
+   */
+  host: HostSummary | null;
+  platform: PlatformSessionSummary | null;
+  /** What was kept to play back: counts, so the page knows whether to offer a timeline. */
+  media: { utterances: number; frames: number; audioChunks: number; audioSeconds: number };
+  /** What the agent concluded. Null when it could not answer; the page says so. */
+  conclusion: Conclusion | null;
 }
 
 export async function buildReport(
   d: Pool,
   showId: string,
-  extra: { auditChain: { ok: boolean; height: number; brokenAt?: number } },
+  extra: {
+    auditChain: { ok: boolean; height: number; brokenAt?: number };
+    /** The persisted signals, when the caller has them. Tests build reports without. */
+    signals?: SessionSignals;
+    /** The platform's account of the audio session, fetched by the caller. */
+    platform?: () => Promise<PlatformSessionSummary | null>;
+    /** The agent's conclusion, given the evidence the report assembled. */
+    conclude?: (e: ConclusionEvidence) => Promise<Conclusion | null>;
+  },
 ): Promise<ShowReport> {
   const show = (
     await d.query<{
-      title: string; source: string; started_at: string; viewers: number;
-    }>("SELECT title, source, started_at, viewers FROM shows WHERE id = $1", [showId])
+      title: string; source: string; started_at: string; viewers: number; catalog_id: string | null;
+      seller_handle: string | null;
+    }>("SELECT title, source, started_at, viewers, catalog_id, seller_handle FROM shows WHERE id = $1", [showId])
   ).rows[0];
   if (!show) throw new Error(`no show ${showId}`);
 
@@ -143,9 +232,10 @@ export async function buildReport(
     await d.query<{
       status: string; verdict: string; confidence: number; abstained: boolean; repaired: boolean;
       latency_ms: number; cache_hit: boolean; guards: { guard: string; verdict: string; reason?: string }[];
-      question: string; draft: string;
+      question: string; draft: string; flagged_wrong: boolean; flag_reason: string | null;
     }>(
-      `SELECT status, verdict, confidence, abstained, repaired, latency_ms, cache_hit, guards, question, draft
+      `SELECT status, verdict, confidence, abstained, repaired, latency_ms, cache_hit, guards, question, draft,
+              flagged_wrong, flag_reason
        FROM reply_proposals WHERE show_id = $1`,
       [showId],
     )
@@ -215,10 +305,31 @@ export async function buildReport(
   const sent = props.filter((p) => p.status === "sent" || p.status === "auto_sent").length;
   const questions = chat.filter((c) => c.admitted).length;
 
-  return {
+  // Signals, when the caller keeps them. Each read is independent and none is
+  // allowed to sink the report: a show with no audio still had a chat.
+  const sig = extra.signals;
+  const [host, utterances, frames, audio, platform] = await Promise.all([
+    sig ? sig.hostSummary(showId).catch(() => null) : null,
+    sig ? sig.utterances(showId).catch(() => []) : [],
+    sig ? sig.frames(showId).catch(() => []) : [],
+    sig ? sig.audio(showId).catch(() => []) : [],
+    extra.platform ? extra.platform().catch(() => null) : null,
+  ]);
+  const media = {
+    utterances: utterances.length,
+    frames: frames.length,
+    audioChunks: audio.length,
+    audioSeconds: Math.round(audio.reduce((a, c) => a + c.durationMs, 0) / 1000),
+  };
+  const prd = await prdMetrics(d, showId);
+
+  const report: ShowReport = {
     showId,
     title: show.title,
     source: show.source,
+    // Which inventory this show ran on, so the gaps list has somewhere to write
+    // an answer back to. Absent on reports generated before this existed.
+    catalogId: show.catalog_id,
     startedAt: show.started_at,
     endedAt: new Date().toISOString(),
     durationMin: Math.max(0, Math.round((Date.now() - started) / 60_000)),
@@ -238,6 +349,14 @@ export async function buildReport(
       blocked: props.filter((p) => p.verdict === "block").length,
       revised: props.filter((p) => p.repaired).length,
       abstained: props.filter((p) => p.abstained).length,
+      // What a human caught that the system could not. A floor, never a total.
+      flaggedWrong: props.filter((p) => p.flagged_wrong).length,
+      flagReasons: props.reduce<Record<string, number>>((acc, p) => {
+        if (!p.flagged_wrong) return acc;
+        const k = p.flag_reason ?? "unspecified";
+        acc[k] = (acc[k] ?? 0) + 1;
+        return acc;
+      }, {}),
       byGuard,
       auditChain: extra.auditChain,
       examples,
@@ -255,6 +374,48 @@ export async function buildReport(
       failed: actCount("failed"),
     },
     gaps: { unanswered, droppedByGate },
-    prd: await prdMetrics(d, showId),
+    prd,
+    host,
+    platform,
+    media,
+    conclusion: null,
   };
+
+  // Last, and from the finished numbers: the conclusion is the agent reading
+  // this report, not the report reading the agent.
+  if (extra.conclude) {
+    const every = <T extends { offsetMs: number }>(n: number, xs: T[]): T[] =>
+      xs.filter((_, i) => i % Math.max(1, Math.ceil(xs.length / n)) === 0).slice(0, n);
+    report.conclusion = await extra.conclude({
+      title: show.title,
+      host: show.seller_handle ?? "the host",
+      durationMin: report.durationMin,
+      engagement: {
+        commentsSeen: report.engagement.commentsSeen,
+        questionsAsked: report.engagement.questionsAsked,
+        answered: report.engagement.answered,
+        sent: report.engagement.sent,
+        p95LatencyMs: report.engagement.p95LatencyMs,
+      },
+      safety: {
+        blocked: report.safety.blocked,
+        revised: report.safety.revised,
+        abstained: report.safety.abstained,
+        flaggedWrong: report.safety.flaggedWrong,
+        byGuard: report.safety.byGuard,
+      },
+      actions: report.actions,
+      inventory: report.inventory,
+      gaps: unanswered.slice(0, 10),
+      hostSignals: host,
+      onScreen: every(8, frames).map((f) => ({ offsetMs: f.offsetMs, reading: f.reading })),
+      said: every(12, utterances).map((u) => ({
+        offsetMs: u.offsetMs, text: u.text,
+        emotion: u.emotion?.topLabel ?? null, intent: u.intent?.topLabel ?? null,
+      })),
+      gmv: prd.gmv.lotsSold ? { grossCents: prd.gmv.grossCents, lotsSold: prd.gmv.lotsSold } : null,
+      platformSummary: platform?.summary?.summary ?? null,
+    });
+  }
+  return report;
 }

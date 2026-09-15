@@ -3,24 +3,27 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "SideStage — a real-time AI copilot for solo live-commerce sellers. Grounded replies, enforced guardrails, reversible listing and inventory actions.",
+  "description": "SideStage \u2014 a real-time AI copilot for solo live-commerce sellers. Grounded replies, enforced guardrails, reversible listing and inventory actions.",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "seed": "tsx src/db/seed.ts",
     "seed:agent": "tsx src/llm/seedAgent.ts",
-    "test": "node --import tsx --test test/*.test.ts",
-    "eval": "node --import tsx --test test/*.eval.ts",
+    "pretest": "node scripts/ensure-test-db.mjs",
+    "test": "NODE_ENV=test CATALOGS_DIR=.tmp/test-catalogs node --import tsx --test test/*.test.ts",
+    "preeval": "node scripts/ensure-test-db.mjs",
+    "eval": "NODE_ENV=test CATALOGS_DIR=.tmp/test-catalogs node --import tsx --test test/*.eval.ts",
     "bench": "tsx bench/latency.bench.ts",
     "demo:stale-price": "tsx bench/stalePrice.demo.ts",
     "ebay:watch": "tsx bench/ebayWatch.demo.ts",
+    "ebay:signin": "node scripts/ebay-signin.mjs",
     "ebay:shows": "tsx src/ingest/ebaylive/discovery.ts",
-    "demo:ebaylive": "tsx bench/ebayLive.demo.ts"
+    "demo:ebaylive": "tsx bench/ebayLive.demo.ts",
+    "ebay:export": "node scripts/ebay-export-session.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
-    "better-sqlite3": "^11.5.0",
     "fastify": "^5.1.0",
     "pg": "^8.23.0",
     "playwright": "^1.63.0"

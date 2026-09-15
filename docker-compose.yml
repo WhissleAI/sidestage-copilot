@@ -1,0 +1,67 @@
+# Production shape: Postgres, the app, and Caddy terminating TLS in front of it.
+# `SITE_ADDRESS` is the public hostname Caddy gets a certificate for.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sidestage
+      POSTGRES_PASSWORD: sidestage
+      POSTGRES_DB: sidestage
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sidestage"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://sidestage:sidestage@db:5432/sidestage
+      PORT: "8790"
+      # The seller's eBay Live profile and every show's kept media live here.
+      EBAY_PROFILE_DIR: /app/data/ebay-profile
+      EBAY_SESSION_PATH: /app/data/ebay-session.json
+      SHOW_MEDIA_DIR: /app/data/shows
+      # Registered with eBay verbatim; part of the deletion-challenge hash.
+      EBAY_DELETION_ENDPOINT: https://${SITE_ADDRESS}/api/ebay/account-deletion
+      # EBAY_DISCOVERY_PROXY (the fixed-IP egress for the eBay Live discovery
+      # browser, see ingest/ebaylive/session.ts) comes from .env like the rest
+      # of the eBay settings, so the sign-in on a laptop and the reads on the
+      # server share one address — the whole point of it.
+    # Lets a proxy or tunnel running on the host be reached as host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      # Catalogs are files the app writes (imports, prepared shows); keep them on the host.
+      - ./fixtures/catalogs:/app/fixtures/catalogs
+    depends_on:
+      db:
+        condition: service_healthy
+    # Chrome needs a bigger /dev/shm than Docker's 64 MB default.
+    shm_size: "1gb"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

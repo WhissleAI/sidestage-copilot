@@ -60,9 +60,10 @@ const UNMEASURABLE = [
     metric: "Wrong replies reaching a buyer",
     why:
       "Cannot be self-measured: a reply this system judged correct is exactly the reply it " +
-      "cannot mark wrong. It needs a human reading sent replies against the catalog, which is " +
-      "what the pilot's weekly review is for. `sentThenContradicted` is the nearest machine " +
-      "proxy and is NOT the same thing.",
+      "cannot mark wrong. Two floors exist instead, and neither is the total. `flaggedWrong` " +
+      "counts what the OPERATOR marked wrong during the show — the only human in the loop — and " +
+      "`sentThenContradicted` counts sent replies whose grounding a later state change broke. " +
+      "The pilot's weekly review of sent replies against the catalog is what closes the gap.",
   },
 ];
 

@@ -206,7 +206,7 @@ export async function showBudgetContext(
   return {
     readOnlyShow: (await repo.show()).readOnly,
     committedThisShow: d.committedThisShow,
-    actionBudget: Number(process.env.ACTION_BUDGET_PER_SHOW || 25),
+    actionBudget: policy().automation.actionBudget,
     committedLastMinute: d.committedLastMinute,
     ratePerMinute: Number(process.env.ACTION_RATE_PER_MIN || 6),
   };

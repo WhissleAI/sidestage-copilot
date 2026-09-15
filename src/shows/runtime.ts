@@ -20,13 +20,22 @@ import { AuditLog } from "../actions/audit.js";
 import { ActionExecutor } from "../actions/executor.js";
 import { ActionProposer } from "../actions/proposer.js";
 import { MockMarketplace } from "../actions/marketplace/mock.js";
+import { EbayMarketplace } from "../actions/marketplace/ebay.js";
+import { EbayOAuth } from "../ingest/ebay/oauth.js";
+import type { MarketplaceAdapter } from "../actions/marketplace/port.js";
 import type { RemoteListing } from "../actions/marketplace/port.js";
 import { ResearchService } from "../research/research.js";
 import { enrichLot, needsIdentity } from "../ingest/enrichLot.js";
 import { SessionRecord, buildReport, type ShowReport } from "./sessionRecord.js";
+import { SessionSignals } from "./signals.js";
+import { concludeShow } from "./conclusion.js";
+import { WhissleSessions } from "../llm/sessions.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
 import { Pipeline } from "../pipeline/pipeline.js";
 import { WhissleClient } from "../llm/whissle.js";
+import { meter } from "../llm/meter.js";
+import { policy } from "../guardrails/policy.js";
+import { spendWindow } from "../llm/billing.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
 import { EbayLiveWatcher } from "../ingest/ebaylive/watcher.js";
 import { SimulatedShowSource, ScriptedHostAudio, type ChatSource } from "../ingest/sources.js";
@@ -62,9 +71,20 @@ export class ShowRuntime {
   readonly research: ResearchService;
   /** Persists chat + proposals so a report can be built after the fact. */
   readonly record: SessionRecord;
+  /** The show's signals — utterances, frames, audio — persisted. */
+  readonly signals: SessionSignals;
   readonly showContext: ShowContextEngine;
   readonly pipeline: Pipeline;
   readonly market: MockMarketplace;
+  /**
+   * Where this show's writes actually land.
+   *
+   * A stored per-show choice, not an inference from whether a connection
+   * happens to exist — an operator has to know, before approving a markdown,
+   * whether it hits a mock or a listing real buyers are looking at. Connecting
+   * eBay grants the capability; the show has to be switched to it.
+   */
+  private adapter: MarketplaceAdapter;
 
   /**
    * This show's OWN client. Each catalog owns a Whissle agent, so two sellers
@@ -98,16 +118,33 @@ export class ShowRuntime {
       showId: o.showId,
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
     this.db = pgPool();
     this.repo = new Repo(this.db, o.showId);
     this.retriever = new Retriever(this.repo);
     this.audit = new AuditLog(this.db, o.showId);
     this.market = new MockMarketplace([]);
+    this.adapter = this.market;
 
     const emit = (event: string, data: unknown) => o.events.emit(this.showId, event, data);
 
-    this.executor = new ActionExecutor(this.db, this.repo, this.market, this.audit, {
-      undoWindowS: config.undoWindowS,
+    // The executor holds a stable reference, so the adapter is routed through
+    // this object rather than swapped out from under it mid-show.
+    const routed: MarketplaceAdapter = {
+      get name() { return self.adapter.name; },
+      get: (id) => self.adapter.get(id),
+      reserve: (i) => self.adapter.reserve(i),
+      apply: (r) => self.adapter.apply(r),
+      confirm: (r) => self.adapter.confirm(r),
+      cancel: (r) => self.adapter.cancel(r),
+      compensate: (r, b) => self.adapter.compensate(r, b),
+    };
+
+    this.executor = new ActionExecutor(this.db, this.repo, routed, this.audit, {
+      // The seller's setting, not an environment variable — they are the one
+      // who decides how long a committed write stays one keystroke from undo.
+      undoWindowS: policy().automation.undoWindowS,
       onChange: (a) => {
         emit("action", a);
         void this.audit.list(1).then((rows) => { if (rows[0]) emit("audit", rows[0]); });
@@ -129,6 +166,7 @@ export class ShowRuntime {
     this.proposer = new ActionProposer(this.repo);
     this.research = new ResearchService(this.repo);
     this.record = new SessionRecord(this.db, o.showId);
+    this.signals = new SessionSignals(this.db);
 
     this.showContext = new ShowContextEngine({
       llm: this.llm,
@@ -204,6 +242,16 @@ export class ShowRuntime {
     // A show row may not exist yet; the demo show arrives pre-seeded.
     try {
       await this.repo.show();
+      // The row exists, so this is a RE-attach — a new session on a show that
+      // ended. It goes back on air with a fresh clock. A row already `live`
+      // (resume after a restart) keeps its clock; that is the WHERE clause.
+      // Left as it was, the Shows list said "0 on air" under a live strip that
+      // said LIVE, and a restart never resumed the show because it was
+      // "ended".
+      await this.db.query(
+        "UPDATE shows SET status = 'live', started_at = $2 WHERE id = $1 AND status = 'ended'",
+        [this.showId, new Date().toISOString()],
+      );
     } catch {
       await this.repo.createShow({
         id: this.o.showId,
@@ -212,12 +260,30 @@ export class ShowRuntime {
         source: this.o.source,
         externalId: this.o.externalId ?? null,
         readOnly: this.o.readOnly ?? false,
-        autonomyLevel: config.autonomyDefault,
-        undoWindowS: config.undoWindowS,
+        // Where a new show starts is a seller setting. L4 can never be it:
+        // bounded auto-acting only ever runs against a mock marketplace.
+        autonomyLevel: policy().automation.startingRung,
+        undoWindowS: policy().automation.undoWindowS,
       });
     }
 
     await this.refreshIndex();
+
+    // A show that was writing to eBay before a restart must not quietly come
+    // back writing to a mock — that is the same action reported as done with a
+    // different thing actually happening.
+    const stored = (
+      await this.db.query<{ write_target: string }>(
+        "SELECT write_target FROM shows WHERE id = $1",
+        [this.showId],
+      )
+    ).rows[0]?.write_target;
+    if (stored === "ebay") {
+      await this.setWriteTarget("ebay").catch((e) => {
+        console.warn(`  ${this.showId}: staying on the mock marketplace — ${(e as Error).message}`);
+      });
+    }
+
     const remote: RemoteListing[] = this.lotRows.map((l) => ({
       id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
     }));
@@ -226,11 +292,70 @@ export class ShowRuntime {
 
   private lotRows: ListingWithDescription[] = [];
 
+  /**
+   * Point this show's writes at eBay, or back at the mock.
+   *
+   * Refuses to arm eBay without a live connection for the show's owner, because
+   * the alternative is an operator approving a markdown that fails at the last
+   * step with an auth error — after the audit entry says it was approved.
+   */
+  async setWriteTarget(target: "mock" | "ebay"): Promise<"mock" | "ebay"> {
+    if (target === "mock") {
+      this.adapter = this.market;
+      await this.db.query("UPDATE shows SET write_target = 'mock' WHERE id = $1", [this.showId]);
+      return "mock";
+    }
+
+    const owner = (
+      await this.db.query<{ owner_account_id: string | null }>(
+        "SELECT owner_account_id FROM shows WHERE id = $1",
+        [this.showId],
+      )
+    ).rows[0]?.owner_account_id;
+    if (!owner) throw new Error("this show has no owner account — claim the console first");
+
+    const auth = new EbayOAuth(this.db);
+    const token = await auth.userToken(owner);
+    if (!token) throw new Error("no eBay account is connected — connect one in Settings first");
+
+    this.adapter = new EbayMarketplace(
+      async (listingId) => {
+        const l = await this.repo.listing(listingId);
+        return l
+          ? {
+              id: l.id, sku: l.sku, priceCents: l.priceCents, qty: l.qty,
+              version: l.version, state: l.state, pinned: l.pinned,
+            }
+          : null;
+      },
+      () => auth.userToken(owner),
+    );
+    await this.db.query("UPDATE shows SET write_target = 'ebay' WHERE id = $1", [this.showId]);
+    return "ebay";
+  }
+
+  /** What the operator is actually about to write to. */
+  get writeTarget(): "mock" | "ebay" {
+    return this.adapter.name === "ebay" ? "ebay" : "mock";
+  }
+
   /** Rebuild the retrieval index and the caches derived from the same snapshot. */
-  private async refreshIndex(): Promise<void> {
+  /** Public because a lot the operator just renamed has to be searchable by
+   *  that name before the next question arrives. */
+  async refreshIndex(): Promise<void> {
     await this.retriever.rebuild();
     this.lotRows = await this.repo.listings();
     this.lots = this.lotRows.map((l) => ({ id: l.id, title: `${l.title} size ${l.size}` }));
+
+    // Warm the market cache for the lots about to be asked about — the pinned
+    // one first, then the front of the queue. eBay is slow enough that fetching
+    // on demand means never having an answer in time; fetching ahead means
+    // nearly always having one. Fire-and-forget: a live show does not wait on
+    // comparables, it just has better ones a minute later.
+    const pinnedFirst = [...this.lotRows].sort((a, b) =>
+      a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1,
+    );
+    void this.research.warm(pinnedFirst).catch(() => {});
   }
 
   show(): Promise<ShowState> {
@@ -258,9 +383,13 @@ export class ShowRuntime {
   async snapshot(): Promise<Record<string, unknown>> {
     // One round of reads, in parallel: a console connecting should not wait on
     // five sequential queries.
-    const [show, all, actions, audit, metrics] = await Promise.all([
+    const [show, all, actions, audit, metrics, chat] = await Promise.all([
       this.repo.show(), this.repo.listings(), this.executor.list(),
       this.audit.list(200), this.pipeline.metrics(),
+      // Chat is the one thing the runtime does not hold in memory — it is
+      // emitted and forgotten. A console opened an hour into a show would show
+      // an empty firehose until the next buyer typed.
+      this.record.recentChat(60).catch(() => []),
     ]);
     const listings = all.filter((l) => l.state !== "ended" || l.id === show.pinnedListingId);
     return {
@@ -269,6 +398,7 @@ export class ShowRuntime {
       agentId: this.llm.agentId,
       show,
       listings,
+      chat,
       proposals: this.pipeline.list(),
       actions,
       audit,
@@ -397,19 +527,88 @@ export class ShowRuntime {
   async finishSession(): Promise<ShowReport | null> {
     try {
       const chain = await this.audit.verify();
-      const report = await buildReport(this.db, this.showId, { auditChain: chain });
+      const listen = (
+        await this.db.query<{ listen_room: string | null; listen_started_at: string | null }>(
+          "SELECT listen_room, listen_started_at FROM shows WHERE id = $1", [this.showId],
+        )
+      ).rows[0];
+      const sessions = new WhissleSessions(config.whissle.base, config.whissle.apiKey);
+      const report = await buildReport(this.db, this.showId, {
+        auditChain: chain,
+        signals: this.signals,
+        // Only when the bridge ever opened a session: without one there is
+        // nothing on the gateway to match, and "window" matching would pick up
+        // someone else's call.
+        platform: listen?.listen_started_at
+          ? () => sessions.voiceSessionFor({
+              agentId: this.llm.agentId,
+              room: listen.listen_room,
+              since: listen.listen_started_at,
+            })
+          : undefined,
+        conclude: this.llm.agentId ? (e) => concludeShow(this.llm, e) : undefined,
+      });
       await this.db.query(
         `INSERT INTO show_reports (show_id, report) VALUES ($1, $2::jsonb)
          ON CONFLICT (show_id) DO UPDATE SET report = EXCLUDED.report, generated_at = now()`,
         [this.showId, JSON.stringify(report)],
       );
       await this.db.query("UPDATE shows SET status = 'ended' WHERE id = $1", [this.showId]);
+      await this.recordCost(report).catch(() => {});
       return report;
     } catch (e) {
-      // A report that cannot be built must not stop a session ending.
-      console.warn(`  could not build report for ${this.showId}: ${(e as Error).message}`);
+      // A report that cannot be built must not stop a session ending — but the
+      // show still has to end, or it stays `live` forever in a list that says
+      // so. The failure is loud because the report is the most useful artefact
+      // the session produces, and losing one silently is how it stays broken.
+      console.error(`  REPORT FAILED for ${this.showId}: ${(e as Error).message}`);
+      await this.db
+        .query("UPDATE shows SET status = 'ended' WHERE id = $1", [this.showId])
+        .catch(() => {});
       return null;
     }
+  }
+
+  /**
+   * What this show cost, written down before the process forgets it.
+   *
+   * The meter and the wallet-delta window are both in memory: a restart zeroed
+   * them and nothing in Postgres recorded spend, so the Cost page could answer
+   * "right now" and nothing about last week. The call counts are exact — this
+   * app makes the calls — and the dollar figure is a bound, because the wallet
+   * is workspace-wide. The row keeps them apart so the caveat survives.
+   */
+  private async recordCost(report: ShowReport): Promise<void> {
+    const snap = meter.snapshot();
+    const mine = snap.byShow[this.showId];
+    if (!mine) return;
+
+    // The spend window is keyed by show and opened when the session attached.
+    // A wallet we could not read leaves this null — which is "unknown", and
+    // must never render as zero.
+    const spent = spendWindow.lastKnown(this.showId);
+
+    await this.db.query(
+      `INSERT INTO show_costs
+         (show_id, opened_at, duration_min, calls, failures, context_chars, by_door, wallet_delta_usd, answered)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)
+       ON CONFLICT (show_id) DO UPDATE SET
+         closed_at = now(), duration_min = EXCLUDED.duration_min, calls = EXCLUDED.calls,
+         failures = EXCLUDED.failures, context_chars = EXCLUDED.context_chars,
+         by_door = EXCLUDED.by_door, wallet_delta_usd = EXCLUDED.wallet_delta_usd,
+         answered = EXCLUDED.answered`,
+      [
+        this.showId,
+        report.startedAt,
+        Math.round(report.durationMin),
+        mine.calls,
+        mine.failures,
+        mine.contextChars,
+        JSON.stringify(mine.byDoor),
+        spent,
+        report.engagement.answered,
+      ],
+    );
   }
 
   /** The pool is process-wide now, not a file this show owns, so closing a

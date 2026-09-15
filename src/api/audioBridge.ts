@@ -81,6 +81,11 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
   var API = location.origin;
   var room = null, stream = null, visualTimer = null, visualEl = null;
   var levelCtx = null, levelTimer = null, levelPost = null, levelWindow = [];
+  var recorder = null, chunkSeq = 0, chunkStartedAt = 0;
+  /** How long each kept audio chunk is. Ten seconds is short enough that a
+   *  failed upload loses little and long enough that a two-hour show is 720
+   *  files, not 7,200. */
+  var CHUNK_MS = 10000;
   /** ~10 Hz. Fine enough to show a pause, coarse enough to stay cheap. */
   var LEVEL_EVERY_MS = 100;
   /** How often a keyframe is offered to the copilot. Lots change on the order of
@@ -88,6 +93,9 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
   var VISUAL_EVERY_MS = 12000;
   var el = function (id) { return document.getElementById(id); };
   var params = new URLSearchParams(location.search);
+  // The console hands its session over in the URL; every call back carries it.
+  var TOKEN = params.get("token") || "";
+  var AUTH = TOKEN ? { authorization: "Bearer " + TOKEN } : {};
   el("show").value = params.get("showId") || "";
 
   function log(line) {
@@ -122,7 +130,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
     pending = { emotion: null, intent: null, speechRate: null };
     await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/transcript", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: Object.assign({ "content-type": "application/json" }, AUTH),
       body: JSON.stringify(body)
     }).catch(function (e) { log("transcript post failed: " + e.message); });
   }
@@ -149,7 +157,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       log("captured tab audio: " + audio.label);
 
       status("minting a listen-only Whissle session…");
-      var r = await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/session", { method: "POST" });
+      var r = await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/session", { method: "POST", headers: AUTH });
       var s = await r.json();
       if (!r.ok) { status("session failed", "err"); log(s.error || ("HTTP " + r.status)); return; }
       log("listen-only session on " + s.url);
@@ -212,6 +220,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       else log("no video track — the copilot will hear the show but not see it");
 
       startLevels(showId, audio);
+      startRecording(showId, audio);
 
       audio.onended = function () { log("tab sharing ended by the browser"); el("stop").click(); };
     } catch (e) {
@@ -219,6 +228,69 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
       log(String(e && e.message ? e.message : e));
     }
   };
+
+  /**
+   * Keep the host's audio, in chunks, beside the transcript.
+   *
+   * The same track that goes to Whissle also goes through a MediaRecorder here,
+   * so the post-show report can play the show back against what was said and
+   * shown. Opus in WebM at 32 kbps: speech, not music, about 40 KB per ten
+   * seconds. Each chunk is posted with its own sequence number so a retry
+   * replaces rather than duplicates.
+   *
+   * timeslice chunks from MediaRecorder are only independently playable when
+   * the recorder is restarted per chunk — a continuation chunk has no header.
+   * So the recorder is stopped and started every CHUNK_MS, which costs a few
+   * milliseconds of audio at each boundary and nothing else.
+   */
+  function startRecording(showId, audioTrack) {
+    if (typeof MediaRecorder === "undefined") { log("MediaRecorder unavailable — audio will not be kept"); return; }
+    var mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].filter(function (m) {
+      return MediaRecorder.isTypeSupported(m);
+    })[0];
+    if (!mime) { log("no supported audio recording format — audio will not be kept"); return; }
+    var ms = new MediaStream([audioTrack]);
+
+    function cut() {
+      var seq = chunkSeq++;
+      var startedAt = Date.now();
+      var rec;
+      try { rec = new MediaRecorder(ms, { mimeType: mime, audioBitsPerSecond: 32000 }); }
+      catch (e) { log("recorder failed: " + e.message); return; }
+      recorder = rec;
+      var parts = [];
+      rec.ondataavailable = function (ev) { if (ev.data && ev.data.size) parts.push(ev.data); };
+      rec.onstop = function () {
+        var blob = new Blob(parts, { type: mime.split(";")[0] });
+        var durationMs = Math.max(1, Date.now() - startedAt);
+        if (blob.size) post(seq, blob, durationMs);
+        // Keep going while the session is up. Stop cleared the recorder.
+        if (recorder === rec) cut();
+      };
+      rec.start();
+      setTimeout(function () { if (rec.state === "recording") rec.stop(); }, CHUNK_MS);
+    }
+
+    function post(seq, blob, durationMs, attempt) {
+      attempt = attempt || 0;
+      fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/chunk?seq=" + seq + "&durationMs=" + durationMs, {
+        method: "POST",
+        headers: Object.assign({ "content-type": blob.type || "audio/webm" }, AUTH),
+        body: blob
+      }).then(function (r) {
+        if (r.status === 409) { log("audio is off in settings — chunks are not being kept"); return; }
+        if (!r.ok && attempt < 2) setTimeout(function () { post(seq, blob, durationMs, attempt + 1); }, 2000);
+        else if (!r.ok) log("chunk " + seq + " lost after 3 attempts (HTTP " + r.status + ")");
+      }).catch(function () {
+        if (attempt < 2) setTimeout(function () { post(seq, blob, durationMs, attempt + 1); }, 2000);
+        else log("chunk " + seq + " lost after 3 attempts");
+      });
+    }
+
+    chunkSeq = 0;
+    cut();
+    log("keeping audio in " + (CHUNK_MS / 1000) + "s chunks (" + mime + ")");
+  }
 
   /**
    * Measure the show's loudness off the track we are already publishing.
@@ -261,7 +333,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
         var batch = pending.splice(0, pending.length);
         fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/levels", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: Object.assign({ "content-type": "application/json" }, AUTH),
           body: JSON.stringify({ levels: batch })
         }).catch(function () {});
       }, 1000);
@@ -320,7 +392,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 
         var r = await fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/visual/frame", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: Object.assign({ "content-type": "application/json" }, AUTH),
           body: JSON.stringify({ frame: frame })
         });
         var out = await r.json().catch(function () { return {}; });
@@ -361,6 +433,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
   }
 
   el("stop").onclick = async function () {
+    if (recorder) { var r = recorder; recorder = null; try { if (r.state === "recording") r.stop(); } catch (e) {} }
     if (visualTimer) { clearInterval(visualTimer); visualTimer = null; }
     if (visualEl) { try { visualEl.remove(); } catch (e) {} visualEl = null; }
     if (levelTimer) { clearInterval(levelTimer); levelTimer = null; }

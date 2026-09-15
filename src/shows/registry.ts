@@ -1,9 +1,17 @@
 // The set of shows this process is watching.
 //
-// One seeded demo show always exists (so the console has something to render
-// with no network), plus any number of attached eBay Live shows. Each is an
-// isolated ShowRuntime; the registry only owns their lifecycle and routes events
-// to the SSE hub tagged with the show they came from.
+// Any number of attached eBay Live shows, each an isolated ShowRuntime. The
+// registry owns their lifecycle and routes events to the SSE hub tagged with
+// the show they came from.
+//
+// There used to be a seeded demo show here that the server created on every
+// boot and refused to delete, so the console always had something to render.
+// What it rendered was a scripted animation: simulated buyers, simulated lots,
+// a reply queue that filled whether or not anything was connected. A product
+// whose empty state is a fake show cannot tell you it is not working — and the
+// operator could not get rid of it. It is now opt-in (`DEMO_SHOW=1`, or
+// `ensureDemo()` from a test), and when nothing is being watched the answer is
+// that nothing is being watched.
 
 import { config } from "../config.js";
 import type { EventHub, EventName } from "../api/hub.js";
@@ -23,10 +31,20 @@ export interface ShowSummary {
   source: "simulated" | "ebaylive";
   externalId: string | null;
   readOnly: boolean;
+  /** Where this show's approved writes actually land. Never inferred by a
+   *  client: an operator must be told, not left to work it out. */
+  writeTarget: "mock" | "ebay";
   status: "live" | "ended";
+  /** When the show went on air. The live strip on every non-console screen
+   *  counts from this, so it cannot be derived client-side. */
+  startedAt: string;
   viewers: number;
   listings: number;
   proposals: number;
+  /** What is waiting for the operator right now — so a screen that is not the
+   *  console can still say "2 awaiting · 1 blocked". */
+  awaiting: number;
+  blocked: number;
 }
 
 export class ShowRegistry {
@@ -38,9 +56,11 @@ export class ShowRegistry {
    * The operator console opens one SSE stream and does not pass a showId, so
    * something has to decide which show it is looking at. Rather than make the
    * console carry a switcher before it needs one, the server holds an ACTIVE
-   * show that `POST /api/shows/:id/activate` moves.
+   * show that `POST /api/shows/:id/activate` moves. Null when nothing is being
+   * watched — which is a real state now that there is no demo show standing in
+   * for one.
    */
-  private activeShowId: string = DEMO_SHOW_ID;
+  private activeShowId: string | null = null;
 
   constructor(private hub: EventHub) {}
 
@@ -51,7 +71,14 @@ export class ShowRegistry {
     },
   };
 
-  /** The seeded demo show. Uses the main database so `npm run seed` drives it. */
+  /**
+   * The seeded, simulated show.
+   *
+   * Opt-in: the test suite calls it directly, and `DEMO_SHOW=1` brings it back
+   * for anyone who wants the scripted walkthrough. The server does not create
+   * one on boot — a fake show is the worst possible empty state, because it
+   * looks exactly like a working one.
+   */
   async ensureDemo(): Promise<ShowRuntime> {
     const existing = this.runtimes.get(DEMO_SHOW_ID);
     if (existing) return existing;
@@ -66,6 +93,7 @@ export class ShowRegistry {
     this.runtimes.set(DEMO_SHOW_ID, rt);
     await rt.init();
     await rt.start();
+    if (!this.activeShowId) this.activeShowId = DEMO_SHOW_ID;
     return rt;
   }
 
@@ -111,7 +139,6 @@ export class ShowRegistry {
   }
 
   async detach(showId: string): Promise<ShowReport | null> {
-    if (showId === DEMO_SHOW_ID) throw new Error("the demo show cannot be detached");
     const rt = this.runtimes.get(showId);
     if (!rt) return null;
     // The report is built BEFORE teardown, while the show row still says what
@@ -119,14 +146,22 @@ export class ShowRegistry {
     // operator back to an empty launcher with nothing to read.
     const report = await rt.finishSession();
     this.runtimes.delete(showId);
-    if (this.activeShowId === showId) this.activeShowId = DEMO_SHOW_ID;
+    if (this.activeShowId === showId) this.activeShowId = null;
     await rt.close().catch(() => {});
     this.hub.emit("shows", await this.list());
     return report;
   }
 
-  get active(): string {
-    return this.runtimes.has(this.activeShowId) ? this.activeShowId : DEMO_SHOW_ID;
+  /**
+   * The show a console lands on with no showId, or null when there is none.
+   *
+   * Falls forward to any other watched show rather than to a fixed id: after a
+   * detach the operator is far more likely to want the show still on air than
+   * an error about the one they just closed.
+   */
+  get active(): string | null {
+    if (this.activeShowId && this.runtimes.has(this.activeShowId)) return this.activeShowId;
+    return this.runtimes.keys().next().value ?? null;
   }
 
   async activate(showId: string): Promise<ShowSummary> {
@@ -138,8 +173,13 @@ export class ShowRegistry {
   }
 
   get(showId?: string | null): ShowRuntime {
-    const rt = this.runtimes.get(showId || this.active);
-    if (!rt) throw new Error(`show ${showId} is not being watched`);
+    const id = showId || this.active;
+    // Two different failures, and the console renders them differently: no show
+    // at all sends the operator to Shows to start one; a show it cannot find is
+    // a stale link.
+    if (!id) throw new Error("no show is being monitored — paste an eBay Live link on Shows to start one");
+    const rt = this.runtimes.get(id);
+    if (!rt) throw new Error(`show ${id} is not being watched`);
     return rt;
   }
 
@@ -159,10 +199,14 @@ export class ShowRegistry {
         source: s.source,
         externalId: s.externalId,
         readOnly: s.readOnly,
+        writeTarget: rt.writeTarget,
         status: s.status,
+        startedAt: s.startedAt,
         viewers: s.viewers,
         listings: listings.length,
         proposals: rt.pipeline.list().length,
+        awaiting: rt.pipeline.list().filter((p) => p.status === "ready" || p.status === "needs_review").length,
+        blocked: rt.pipeline.list().filter((p) => p.status === "blocked").length,
       };
     }));
   }

@@ -113,21 +113,34 @@ export function listingFacts(l: ListingWithDescription): Fact[] {
         ? `This ${l.model || l.title} is a size ${l.size.trim()}. Only that size is available in this listing.`
         : `This ${l.model || l.title} has no size variant — it is a single item.`,
     }),
-    mk({
+  ];
+
+  // Two facts that used to be emitted for EVERY lot and were, for most lots,
+  // invented. The fallback branches came from the demo catalog's world — every
+  // unauthenticated lot became "a general-release pair … with the standard
+  // 30-day return", every lot without a named profile "ships USPS Ground
+  // Advantage at a flat $9.95". A real gemstone show attached from eBay Live
+  // had no policies at all, and the copilot answered a shipping question with
+  // that $9.95 in the first minute, every guard allowing it — because the claim
+  // cited a fact. A fabricated fact is the one failure the provenance chips
+  // cannot catch, so these are now emitted only when there is something real
+  // behind them. Absent, the copilot abstains, which is the design.
+  if (l.authenticated && l.certId) {
+    out.push(mk({
       factId: `listing:${l.id}#authenticity`, source: "listing", label: `${short} · authentication`,
       field: "authenticity", listingId: l.id, listingVersion: l.version,
-      text: l.authenticated && l.certId
-        ? `${name} is authenticated by CheckCheck, certificate ${l.certId}, and ships with the certificate card.`
-        : `${name} is a general-release pair and is NOT third-party authenticated. It carries the standard 30-day return.`,
-    }),
-    mk({
+      text: `${name} is authenticated by CheckCheck, certificate ${l.certId}, and ships with the certificate card.`,
+    }));
+  }
+  if (l.shippingProfile === "us-free-2day") {
+    out.push(mk({
       factId: `listing:${l.id}#shipping`, source: "listing", label: `${short} · shipping`,
       field: "shipping", listingId: l.id, listingVersion: l.version,
-      text: l.shippingProfile === "us-free-2day"
-        ? `${name} ships free within the US on 2-day service.`
-        : `${name} ships USPS Ground Advantage at a flat $9.95 within the US.`,
-    }),
-  ];
+      text: `${name} ships free within the US on 2-day service.`,
+    }));
+  }
+  // Any other shipping answer comes from the seller's POLICY clauses, which are
+  // theirs, or from nowhere.
   return out;
 }
 
@@ -205,7 +218,7 @@ export async function buildFacts(repo: Repo): Promise<Fact[]> {
   // One market fact per SKU, carrying the 30-day median of comparable sales.
   const bySku = new Map<string, number[]>();
   for (const l of listings) {
-    const prices = (await repo.comps(l.sku)).map((c) => c.soldPriceCents);
+    const prices = (await repo.comps(l.sku)).map((c) => c.priceCents);
     if (prices.length) bySku.set(l.sku, prices);
   }
   for (const [sku, prices] of bySku) {

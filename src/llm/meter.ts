@@ -52,7 +52,26 @@ export interface MeterSnapshot {
   since: string;
   doors: Record<GatewayDoor, DoorReport>;
   totals: { calls: number; failures: number; contextChars: number };
-  byShow: Record<string, { calls: number; failures: number; contextChars: number }>;
+  byShow: Record<string, ShowMeter>;
+}
+
+/** Per-show attribution, including WHICH door the calls went through.
+ *  `byShow` used to carry a bare call count, so "where did this show's money
+ *  go" was not answerable — only "how many calls did it make". */
+export interface ShowMeter {
+  calls: number;
+  failures: number;
+  contextChars: number;
+  byDoor: Record<GatewayDoor, { calls: number; failures: number; totalMs: number }>;
+}
+
+export function blankShowMeter(): ShowMeter {
+  return {
+    calls: 0,
+    failures: 0,
+    contextChars: 0,
+    byDoor: Object.fromEntries(DOORS.map((d) => [d, { calls: 0, failures: 0, totalMs: 0 }])) as ShowMeter["byDoor"],
+  };
 }
 
 const DOORS: GatewayDoor[] = ["chat_turn", "utility_turn", "voice_start", "kb_upload", "billing", "visual_read"];
@@ -77,7 +96,7 @@ function pct(sorted: number[], p: number): number {
 export class GatewayMeter {
   private since = new Date().toISOString();
   private doors = new Map<GatewayDoor, DoorStats>(DOORS.map((d) => [d, blank()]));
-  private shows = new Map<string, { calls: number; failures: number; contextChars: number }>();
+  private shows = new Map<string, ShowMeter>();
 
   record(o: {
     door: GatewayDoor;
@@ -109,12 +128,17 @@ export class GatewayMeter {
     if (o.status != null) d.lastStatus = o.status;
     this.doors.set(o.door, d);
 
-    // Per-show attribution — the thing the platform cannot give us.
+    // Per-show attribution — the thing the platform cannot give us — down to
+    // the door, so a show's spend can be explained and not just counted.
     const key = o.showId || "unattributed";
-    const s = this.shows.get(key) ?? { calls: 0, failures: 0, contextChars: 0 };
+    const s = this.shows.get(key) ?? blankShowMeter();
     s.calls += 1;
     if (!o.ok) s.failures += 1;
     s.contextChars += o.contextChars ?? 0;
+    const sd = s.byDoor[o.door];
+    sd.calls += 1;
+    if (!o.ok) sd.failures += 1;
+    sd.totalMs += o.ms;
     this.shows.set(key, s);
   }
 

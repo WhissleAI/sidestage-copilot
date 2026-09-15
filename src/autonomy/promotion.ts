@@ -49,16 +49,27 @@ const r3 = (n: number) => Number(n.toFixed(3));
 export async function promotionReadiness(
   d: Pool,
   current: AutonomyLevel,
+  /** Whose shows count. A rung is a claim about THIS seller's behaviour, so a
+   *  stranger's clean show must never promote them — which is exactly what an
+   *  unscoped read did. Null means "nobody is signed in", and then nothing
+   *  counts: an unknown never reads as met. */
+  ownerAccountId?: string | null,
 ): Promise<PromotionReadiness> {
   const next = LADDER[rung(current) + 1] ?? null;
 
   // Newest first, capped: a criterion is about recent behaviour, and dragging
   // in a show from three weeks ago answers a question nobody asked.
-  const rows = (
-    await d.query<{ report: ShowReport }>(
-      "SELECT report FROM show_reports ORDER BY generated_at DESC LIMIT 5",
-    )
-  ).rows.map((x) => x.report);
+  const rows = ownerAccountId
+    ? (
+        await d.query<{ report: ShowReport }>(
+          `SELECT r.report FROM show_reports r
+             JOIN shows s ON s.id = r.show_id
+            WHERE s.owner_account_id = $1
+            ORDER BY r.generated_at DESC LIMIT 5`,
+          [ownerAccountId],
+        )
+      ).rows.map((x) => x.report)
+    : [];
 
   if (!next) {
     return { current, next: null, ready: false, criteria: [] };

@@ -53,9 +53,55 @@ export interface SellerGuardrailPolicy {
    *  `action_policy: {tool: "approve"}`, which makes the gateway hold the call
    *  and raise an approve/discard affordance instead of executing. */
   holdForApproval: string[];
+
+  // ── what the copilot may use ──────────────────────────────────────────────
+  //
+  // These were env-only, so "turn host audio off" meant editing a .env and
+  // restarting. Each one off is a CLASS OF QUESTION the copilot must abstain on
+  // rather than guess at, which is a decision that belongs to the seller.
+  ingest: {
+    /** Off means it never hears "last one in this waist" — the lot facts a
+     *  seller says out loud and never typed. */
+    hostAudio: boolean;
+    /** A frame every few seconds, used to name a placeholder lot and read a
+     *  price card. The frames the agent read are kept with their reading for
+     *  the post-show timeline; frames it skipped are not. */
+    cameraFrames: boolean;
+    /** Comps and web research. Powers the research card; never grounds a reply
+     *  on its own, because a web page is not the seller's listing. */
+    webResearch: boolean;
+    /** Answers this seller already gave, reused across shows. */
+    priorAnswers: boolean;
+  };
+
+  // ── how much it may do on its own ─────────────────────────────────────────
+  automation: {
+    /** Where a new show starts. Rungs above this unlock from finished shows. */
+    startingRung: "L0_OBSERVE" | "L1_SUGGEST" | "L2_ONE_TAP" | "L3_AUTO_REPLY" | "L4_AUTO_ACT";
+    /** A reply below this confidence never auto-sends, at any rung. */
+    confidenceFloor: number;
+    /** How long a committed action stays one keystroke from undo. */
+    undoWindowS: number;
+    /** How many writes a single show may make. */
+    actionBudget: number;
+    /** Warn the operator when the wallet falls below this, mid-show. */
+    warnBalanceUsd: number;
+    /** Stop spending on this show past here. Null is no cap. */
+    perShowCapUsd: number | null;
+  };
 }
 
 export const DEFAULT_POLICY: SellerGuardrailPolicy = {
+  ingest: { hostAudio: true, cameraFrames: true, webResearch: true, priorAnswers: false },
+  automation: {
+    // A copilot, until a seller's own finished shows say otherwise.
+    startingRung: "L1_SUGGEST",
+    confidenceFloor: 0.8,
+    undoWindowS: 90,
+    actionBudget: 12,
+    warnBalanceUsd: 5,
+    perShowCapUsd: null,
+  },
   redactPii: true,
   onViolation: "Let me get the host to answer that one directly.",
   maxDiscountPct: 15,

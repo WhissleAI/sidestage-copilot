@@ -8,12 +8,20 @@
 import type { FastifyInstance } from "fastify";
 import type { AutonomyLevel } from "../domain/types.js";
 import { LADDER } from "../autonomy/ladder.js";
-import { discoverLiveShows } from "../ingest/ebaylive/discovery.js";
+import { discoverLiveShows, discoverSellerShows, parseEventId } from "../ingest/ebaylive/discovery.js";
+import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid } from "../sellers/following.js";
+import { Preparer } from "../shows/prepareEvent.js";
+import { sessionStatus } from "../ingest/ebaylive/session.js";
+import { BudgetWatch, budgetState, setBudgetWatch } from "../llm/budget.js";
+import { ebay } from "../ingest/ebay/client.js";
+import { marketIndex } from "../shows/catalogMarket.js";
+import { analyticsOverview } from "../shows/analytics.js";
+import { EbayOAuth } from "../ingest/ebay/oauth.js";
+import { importSellerListings } from "../ingest/ebay/import.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
-import { applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
+import { addCatalogQa, applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
 import { catalogFit, checkReadiness } from "../shows/readiness.js";
 import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
-import { DEMO_SHOW_ID } from "../shows/registry.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
 import { prdMetrics } from "../shows/prdMetrics.js";
 import { promotionReadiness } from "../autonomy/promotion.js";
@@ -22,13 +30,17 @@ import { normalizeDistribution } from "../ingest/signals.js";
 import { extractJsonObject } from "../compose/composer.js";
 import { meter } from "../llm/meter.js";
 import { WhissleBilling, spendWindow } from "../llm/billing.js";
-import { Accounts, canWrite, type Account } from "../auth/accounts.js";
+import { Accounts, AuthError, canWrite, type Account } from "../auth/accounts.js";
 import {
   SettingsStore, sanitize, merge, diffFromDefaults, invalidPatterns, pushLayerA,
   type SettingsView,
 } from "../settings/store.js";
 import { policy, DEFAULT_POLICY } from "../guardrails/policy.js";
 import { WhissleSessions } from "../llm/sessions.js";
+import { SessionSignals } from "../shows/signals.js";
+import { showRecord } from "../shows/record.js";
+import { challengeResponse, honourDeletion, parseNotice } from "../ingest/ebay/deletion.js";
+import { createReadStream, existsSync } from "node:fs";
 import { db as pgPool } from "../db/pg.js";
 import { config } from "../config.js";
 import type { AppContext } from "./context.js";
@@ -89,12 +101,28 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // detach a show. The distinction is enforced here rather than in each handler
   // so a route added later is not accidentally left open.
   const accounts = new Accounts(pgPool());
+  // Declared up here with the other stores: the eBay routes below are defined
+  // before the `following` block, and a `const` used above its declaration is a
+  // runtime error rather than a compile one.
+  const ebayAuth = new EbayOAuth(pgPool());
+  const preparer = new Preparer(pgPool());
   const actors = new WeakMap<object, Account | null>();
 
-  app.addHook("onRequest", async (req) => {
+  // Paths a signed-out caller may reach: the front door, health, eBay's own
+  // callbacks, and the bridge page (which carries its token as a query
+  // parameter because it is a bare HTML page, not the console).
+  const OPEN = [/^\/health$/, /^\/api\/auth\/(register|login)$/, /^\/api\/ebay\/callback/, /^\/api\/ebay\/account-deletion/, /^\/audio-bridge/];
+  app.addHook("onRequest", async (req, reply) => {
     const header = req.headers.authorization;
-    const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
-    actors.set(req as object, await accounts.resolve(token));
+    const q = (req.query ?? {}) as { token?: string };
+    // EventSource cannot set headers; the stream and the bridge send the token as a query parameter.
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : typeof q.token === "string" ? q.token : null;
+    const actor = await accounts.resolve(token);
+    actors.set(req as object, actor);
+    const path = req.url.split("?")[0]!;
+    if (!actor && !OPEN.some((re) => re.test(path))) {
+      return reply.code(401).send({ error: "sign in to use SideStage", actor: null });
+    }
   });
 
   const actorOf = (req: object): Account | null => actors.get(req) ?? null;
@@ -103,23 +131,44 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   const mustWrite = (
     req: object,
     reply: { code(n: number): { send(b: unknown): unknown } },
+    // What was being attempted. A guest told they "cannot send replies" after
+    // trying to follow a seller is being answered about a different action.
+    what = "send replies or approve actions",
   ): Account | null => {
     const a = actorOf(req);
     if (canWrite(a)) return a;
     reply.code(403).send({
       error: a
-        ? "this session is a guest — it can watch the show but cannot send replies or approve actions"
+        ? `this session is a guest — it can watch the show but cannot ${what}`
         : "no session — the console mints one on load; send it as `Authorization: Bearer <token>`",
       actor: a?.kind ?? null,
     });
     return null;
   };
 
-  app.post("/api/auth/guest", async () => {
-    // No credentials, deliberately: the point is that someone can open the
-    // console and watch a live show work. Acting on it needs a seller.
-    const s = await accounts.createGuest();
-    return { token: s.token, account: s.account, expiresAt: s.expiresAt };
+  app.post<{ Body: { email?: string; password?: string; displayName?: string } }>("/api/auth/register", async (req, reply) => {
+    try {
+      const s = await accounts.register(req.body?.email ?? "", req.body?.password ?? "", req.body?.displayName ?? "");
+      return { token: s.token, account: s.account, expiresAt: s.expiresAt };
+    } catch (e) {
+      return reply.code(e instanceof AuthError ? e.status : 500).send({ error: (e as Error).message });
+    }
+  });
+
+  app.post<{ Body: { email?: string; password?: string } }>("/api/auth/login", async (req, reply) => {
+    try {
+      const s = await accounts.login(req.body?.email ?? "", req.body?.password ?? "");
+      return { token: s.token, account: s.account, expiresAt: s.expiresAt };
+    } catch (e) {
+      return reply.code(e instanceof AuthError ? e.status : 500).send({ error: (e as Error).message });
+    }
+  });
+
+  app.post("/api/auth/logout", async (req) => {
+    const header = req.headers.authorization;
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
+    if (token) await accounts.endSession(token);
+    return { ok: true };
   });
 
   app.get("/api/auth/me", async (req) => ({ account: actorOf(req as object) }));
@@ -137,6 +186,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // attribution actually lives: which provider and model answered, whether it
   // failed over, the latency and the tokens, per hop.
   const sessionsApi = new WhissleSessions(config.whissle.base, config.whissle.apiKey);
+  // One store for every show's signals; the runtime has its own handle on the
+  // same tables for the report. Media reads below do not need a live runtime —
+  // a report is read after the show is gone.
+  const signals = new SessionSignals(pgPool());
+  // Audio chunks arrive as raw bytes, not JSON. Registered once; the route
+  // caps the size.
+  for (const mime of ["audio/webm", "audio/ogg", "audio/mp4", "application/octet-stream"]) {
+    app.addContentTypeParser(mime, { parseAs: "buffer", bodyLimit: 12 * 1024 * 1024 }, (_req, body, done) => done(null, body));
+  }
 
   /**
    * Is the loaded catalog actually about what this show is selling?
@@ -153,7 +211,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       return reply.code(404).send({ error: (e as Error).message });
     }
     const listings = await target.repo.listings();
-    const observed = listings.filter((l) => l.externalRef).map((l) => l.title);
+    // Sellers pin "$1 Live show link" placeholders between lots and eBay pads
+    // grids with "Shop on eBay" filler. Neither is a lot, and judging catalog
+    // fit against them reported "mismatch — 0% of 4 lots" for a catalog that
+    // matched every real lot the show had put on screen.
+    const placeholder = (t: string) => /live show link|^shop on ebay$/i.test(t);
+    const observed = listings
+      .filter((l) => l.externalRef && !placeholder(l.title))
+      .map((l) => l.title);
     const own = listings.filter((l) => !l.externalRef).map((l) => l.title);
     // Too few observed lots to judge — saying "mismatch" off two titles would
     // cry wolf in the first minute of every show.
@@ -173,15 +238,33 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
-  /** Has this seller earned the next rung? Computed, not asserted. */
+  /** Has this seller earned the next rung? Computed, not asserted — and
+   *  computed over THEIR shows: promotion on a stranger's clean numbers is
+   *  exactly the guarantee the ladder exists to make. */
   app.get<{ Querystring: { showId?: string } }>("/api/autonomy/readiness", async (req, reply) => {
     try {
       const target = rt(req.query.showId);
       const show = await target.show();
-      return await promotionReadiness(pgPool(), show.autonomyLevel);
+      return await promotionReadiness(pgPool(), show.autonomyLevel, actorOf(req as object)?.id ?? null);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
     }
+  });
+
+  /**
+   * Analytics across every finished show in the window. Needs no live show:
+   * every number is a sum or a rate over persisted reports, which is what makes
+   * it the same number tomorrow.
+   */
+  app.get<{ Querystring: { days?: string } }>("/api/analytics/overview", async (req) => {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+    const [overview, readiness] = await Promise.all([
+      analyticsOverview(pgPool(), days),
+      promotionReadiness(pgPool(), "L1_SUGGEST", null).catch(() => null),
+    ]);
+    // Which show is on air, if any, so the page can offer its live view.
+    const live = shows.active;
+    return { ...overview, liveShowId: live, readiness };
   });
 
   app.get<{ Querystring: { showId?: string; days?: string } }>("/api/analytics", async (req, reply) => {
@@ -339,10 +422,22 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       "Access-Control-Allow-Origin": "*",
     });
 
-    let id = -1;
+    // Registered BEFORE the show is resolved, and with an empty show id when
+    // there is no show to resolve.
+    //
+    // The stream is the console's connection to the product, not to one show.
+    // When resolving failed, this handler used to return without registering —
+    // Fastify then ended the response, the browser's EventSource fired onerror,
+    // and the console sat in a reconnect loop rendering a skeleton forever. Now
+    // an idle console holds a real stream: it gets the heartbeat, it gets
+    // `shows` (which every client receives), and the moment a show is attached
+    // it hears about it on the connection it already has.
+    const id = hub.add(reply, "");
+    req.raw.on("close", () => hub.remove(id));
+
     try {
       const target = rt(req.query.showId);
-      id = hub.add(reply, target.showId);
+      hub.retarget(id, target.showId);
       // Both awaited BEFORE writing. An unresolved promise serialises to `{}`,
       // which would hand the console an empty hello it happily rendered as a
       // show with no listings, no proposals and no audit.
@@ -350,9 +445,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       reply.raw.write(`event: hello\ndata: ${JSON.stringify({ showId: target.showId, ...snapshot })}\n\n`);
       reply.raw.write(`event: shows\ndata: ${JSON.stringify(list)}\n\n`);
     } catch (e) {
-      reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`);
+      reply.raw.write(`event: stream_error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`);
+      reply.raw.write(`event: shows\ndata: ${JSON.stringify(await shows.list().catch(() => []))}\n\n`);
     }
-    req.raw.on("close", () => { if (id >= 0) hub.remove(id); });
   });
 
   // ── catalogs ──────────────────────────────────────────────────────────────
@@ -371,6 +466,46 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   const billing = new WhissleBilling(config.whissle.apiKey, config.whissle.base);
 
   /**
+   * The per-show cap, made real.
+   *
+   * `automation.perShowCapUsd` was settable and read by nothing: a seller could
+   * save a $2 limit, watch the page confirm it, and spend $9. The watch polls
+   * the wallet while a show is live and latches the show when the bound crosses
+   * the cap; the pipeline refuses to draft from there, and the chain records
+   * it, because the cap changed what the copilot did.
+   *
+   * Constructed here, STARTED from the server entry point — a test suite must
+   * not poll a billing gateway.
+   */
+  setBudgetWatch(
+    new BudgetWatch(
+      billing,
+      () => policy().automation,
+      async () => (await shows.list()).map((s) => s.showId),
+      (showId, state) => {
+        hub.emit("budget", { showId, ...state });
+        const rt = shows.get(showId);
+        void rt.audit
+          .append(
+            "budget_cap_reached",
+            "system",
+            `spend cap reached — drafting stopped at $${(state.spentUsd ?? 0).toFixed(2)} of $${(state.capUsd ?? 0).toFixed(2)}`,
+            { showId, spentUsd: state.spentUsd, capUsd: state.capUsd, basis: "wallet-delta upper bound" },
+          )
+          .then((e) => hub.emit("audit", { showId, ...e }))
+          .catch(() => {});
+      },
+    ),
+  );
+
+  /** What this show has spent against the cap. The console polls it beside the
+   *  cost rail; the `budget` stream event carries the moment it trips. */
+  app.get<{ Querystring: { showId?: string } }>("/api/budget", async (req) => {
+    const target = rt(req.query.showId);
+    return { showId: target.showId, ...budgetState(target.showId) };
+  });
+
+  /**
    * Anchor a show's spend window when the SESSION starts.
    *
    * It used to open on the first `/api/billing` read, which is whenever the
@@ -384,8 +519,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     if (w.ok) spendWindow.open(showId, w.value.balanceUsd);
   };
 
-  app.get<{ Querystring: { days?: string } }>("/api/billing", async (req) => {
-    const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+  /** One reader, two routes: `/api/billing` is the live rail, `/api/cost` is the
+   *  history. They must never disagree about what the wallet says. */
+  const billingSnapshot = async (days: number) => {
     // Both reads in flight together — this panel is polled, and two sequential
     // round-trips to the gateway is a visibly slower page for no reason.
     const [walletR, usageR] = await Promise.all([billing.wallet(), billing.usage(days)]);
@@ -417,7 +553,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           "for text turns.",
       },
     };
-  });
+  };
+
+  app.get<{ Querystring: { days?: string } }>("/api/billing", async (req) =>
+    billingSnapshot(Math.min(90, Math.max(1, Number(req.query.days) || 7))),
+  );
 
   /** The report a finished session left behind. */
   app.get<{ Params: { showId: string } }>("/api/shows/:showId/report", async (req, reply) => {
@@ -444,9 +584,6 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.delete<{ Params: { showId: string } }>("/api/shows/:showId", async (req, reply) => {
     if (!mustWrite(req as object, reply)) return;
     const showId = req.params.showId;
-    if (showId === DEMO_SHOW_ID) {
-      return reply.code(400).send({ error: "the demo show cannot be deleted" });
-    }
 
     const row = (
       await pgPool().query<{ agent_id: string | null; agent_owned: boolean }>(
@@ -466,24 +603,139 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
     // Everything else cascades: listings, chat, proposals, audit, sales, report.
     await pgPool().query("DELETE FROM shows WHERE id = $1", [showId]);
+    // The rows cascade; the bytes on disk do not.
+    signals.purge(showId);
     hub.emit("shows", await shows.list());
     return { ok: true, showId, agent };
   });
 
-  /** Every show that has a report — the "past shows" list. */
-  app.get("/api/reports", async () => {
-    const r = await pgPool().query<{ show_id: string; generated_at: Date; report: ShowReport }>(
-      "SELECT show_id, generated_at, report FROM show_reports ORDER BY generated_at DESC LIMIT 50",
+  /**
+   * Every show behind this seller — the "past shows" list.
+   *
+   * Built from `shows`, LEFT JOINed to its report, not from `show_reports`:
+   * report generation is fire-and-forget at session close (`runtime.ts`), so a
+   * session that ended badly produced no report — and a list built from reports
+   * made exactly the show you most want to look at disappear. A row with no
+   * report is still a row; it says so.
+   */
+  app.get<{ Querystring: { limit?: string } }>("/api/reports", async (req) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const r = await pgPool().query<{
+      show_id: string; title: string; source: string; started_at: Date; status: string;
+      viewers: number; agent_id: string | null; generated_at: Date | null; report: ShowReport | null;
+    }>(
+      `SELECT s.id AS show_id, s.title, s.source, s.started_at, s.status, s.viewers, s.agent_id,
+              r.generated_at, r.report
+         FROM shows s
+         LEFT JOIN show_reports r ON r.show_id = s.id
+        ORDER BY COALESCE(r.generated_at, s.started_at::timestamptz) DESC
+        LIMIT $1`,
+      [limit],
     );
     return r.rows.map((x) => ({
       showId: x.show_id,
+      title: x.report?.title ?? x.title,
+      source: x.source,
+      status: x.status,
+      startedAt: x.started_at,
+      viewers: x.viewers,
+      agentId: x.agent_id,
       generatedAt: x.generated_at,
-      title: x.report.title,
-      durationMin: x.report.durationMin,
-      questionsAsked: x.report.engagement.questionsAsked,
-      sent: x.report.engagement.sent,
-      blocked: x.report.safety.blocked,
+      /** Null on a session whose report never generated — which is a state to
+       *  show, not a row to hide. */
+      durationMin: x.report?.durationMin ?? null,
+      questionsAsked: x.report?.engagement.questionsAsked ?? null,
+      answered: x.report?.engagement.answered ?? null,
+      sent: x.report?.engagement.sent ?? null,
+      blocked: x.report?.safety.blocked ?? null,
+      hasReport: Boolean(x.report),
     }));
+  });
+
+  /**
+   * Cost, with a history.
+   *
+   * `/api/billing` answers "right now" from process memory, which a restart
+   * erases. This reads the rows every finished session writes, so the seller
+   * can see what last week cost — and it keeps the two kinds of number apart:
+   * calls are EXACT (this app makes them), dollars are an UPPER BOUND (the
+   * wallet is workspace-wide, and the caveat travels with the figure).
+   */
+  app.get<{ Querystring: { days?: string } }>("/api/cost", async (req) => {
+    const days = Math.min(120, Math.max(1, Number(req.query.days) || 30));
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+
+    const [rows, snapshot] = await Promise.all([
+      pgPool().query<{
+        show_id: string; title: string; opened_at: Date; closed_at: Date; duration_min: number;
+        calls: number; failures: number; context_chars: number;
+        by_door: Record<string, { calls: number; failures: number; totalMs: number }>;
+        wallet_delta_usd: string | null; answered: number;
+      }>(
+        `SELECT c.show_id, s.title, c.opened_at, c.closed_at, c.duration_min, c.calls, c.failures,
+                c.context_chars, c.by_door, c.wallet_delta_usd, c.answered
+           FROM show_costs c JOIN shows s ON s.id = c.show_id
+          WHERE c.closed_at >= $1
+          ORDER BY c.closed_at DESC`,
+        [since],
+      ),
+      billingSnapshot(7),
+    ]);
+
+    const shows = rows.rows.map((r) => ({
+      showId: r.show_id,
+      title: r.title,
+      openedAt: r.opened_at,
+      closedAt: r.closed_at,
+      durationMin: r.duration_min,
+      calls: r.calls,
+      failures: r.failures,
+      contextChars: Number(r.context_chars),
+      byDoor: r.by_door ?? {},
+      /** Null means the wallet was unreadable — never zero. */
+      walletDeltaUsd: r.wallet_delta_usd == null ? null : Number(r.wallet_delta_usd),
+      answered: r.answered,
+    }));
+
+    // Totals are summed from the rows, so the page's two tables cannot disagree.
+    const byDoor: Record<string, { calls: number; failures: number; totalMs: number }> = {};
+    for (const s of shows) {
+      for (const [door, d] of Object.entries(s.byDoor)) {
+        const acc = byDoor[door] ?? { calls: 0, failures: 0, totalMs: 0 };
+        acc.calls += d.calls; acc.failures += d.failures; acc.totalMs += d.totalMs;
+        byDoor[door] = acc;
+      }
+    }
+    const spentUsd = shows.reduce((a, s) => a + (s.walletDeltaUsd ?? 0), 0);
+    const answered = shows.reduce((a, s) => a + s.answered, 0);
+    const minutes = shows.reduce((a, s) => a + s.durationMin, 0);
+    const unpriced = shows.filter((s) => s.walletDeltaUsd == null).length;
+
+    return {
+      days,
+      shows,
+      totals: {
+        shows: shows.length,
+        calls: shows.reduce((a, s) => a + s.calls, 0),
+        contextChars: shows.reduce((a, s) => a + s.contextChars, 0),
+        spentUsd: Math.round(spentUsd * 10000) / 10000,
+        answered,
+        minutes,
+        perAnsweredUsd: answered ? Math.round((spentUsd / answered) * 100000) / 100000 : null,
+        perHourUsd: minutes ? Math.round((spentUsd / (minutes / 60)) * 10000) / 10000 : null,
+        /** How many of those shows have no dollar figure at all. A total that
+         *  silently omits them would read as cheaper than it was. */
+        showsWithoutWallet: unpriced,
+      },
+      byDoor,
+      wallet: snapshot.wallet,
+      walletError: snapshot.walletError,
+      usage: snapshot.usage,
+      usageError: snapshot.usageError,
+      /** What is running right now, which the rows cannot know yet. */
+      live: snapshot.meter.byShow,
+      attribution: snapshot.attribution,
+    };
   });
 
   app.get("/api/catalogs", async () => listCatalogs());
@@ -495,11 +747,178 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * grounding missing does not fail — it abstains on every question, which
    * reads as a cautious model rather than an absent corpus.
    */
-  app.get<{ Params: { id: string } }>("/api/catalogs/:id/readiness", async (req, reply) => {
-    const cat = getCatalog(req.params.id);
-    if (!cat) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
-    return checkReadiness(cat);
+  app.get<{ Params: { id: string }; Querystring: { showId?: string } }>(
+    "/api/catalogs/:id/readiness",
+    async (req, reply) => {
+      const cat = getCatalog(req.params.id);
+      if (!cat) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
+      // The show's own agent outranks whatever the catalog file remembers.
+      let agentId: string | null = null;
+      if (req.query.showId) {
+        try {
+          agentId = shows.get(req.query.showId).agentId || null;
+        } catch {
+          agentId = null;
+        }
+      }
+      const readiness = await checkReadiness(cat, { agentId });
+      // The gaps the last finished show on this catalog left behind — carried
+      // here because this is where they can still be closed.
+      const last = await pgPool().query<{ show_id: string; title: string; report: ShowReport }>(
+        `SELECT r.show_id, s.title, r.report FROM show_reports r JOIN shows s ON s.id = r.show_id
+          WHERE s.catalog_id = $1 AND s.status = 'ended' AND ($2::text IS NULL OR s.id <> $2)
+          ORDER BY r.generated_at DESC LIMIT 1`,
+        [cat.id, req.query.showId ?? null],
+      ).catch(() => null);
+      const row = last?.rows[0];
+      readiness.carried = row?.report?.gaps?.unanswered?.length
+        ? {
+            fromShowId: row.show_id,
+            title: row.title,
+            endedAt: row.report.endedAt,
+            gaps: row.report.gaps.unanswered.slice(0, 10),
+          }
+        : null;
+      return readiness;
+    },
+  );
+
+  /**
+   * The evidence behind a report: every comment, proposal, action and audit
+   * entry, from the tables that kept them. Works after the show is gone.
+   */
+  app.get<{ Params: { showId: string } }>("/api/shows/:showId/record", async (req, reply) => {
+    const exists = await pgPool().query("SELECT 1 FROM shows WHERE id = $1", [req.params.showId]);
+    if (!exists.rowCount) return reply.code(404).send({ error: `no show ${req.params.showId}` });
+    return showRecord(pgPool(), req.params.showId);
   });
+
+  /**
+   * Everything the product knows about one show, as one JSON document: the
+   * show row, its report, the full record and the signal timeline. Media bytes
+   * are referenced by their routes rather than inlined — a two-hour show is
+   * thirty megabytes of audio, and a download is not the place for it.
+   */
+  app.get<{ Params: { showId: string } }>("/api/shows/:showId/export", async (req, reply) => {
+    const id = req.params.showId;
+    const show = await pgPool().query(
+      `SELECT id, title, seller_handle, source, external_id, status, started_at, viewers, catalog_id,
+              agent_id, write_target, autonomy_level, read_only
+         FROM shows WHERE id = $1`, [id],
+    );
+    if (!show.rowCount) return reply.code(404).send({ error: `no show ${id}` });
+    const [report, record, utterances, frames, audio, host] = await Promise.all([
+      pgPool().query<{ report: unknown; generated_at: Date }>(
+        "SELECT report, generated_at FROM show_reports WHERE show_id = $1", [id],
+      ),
+      showRecord(pgPool(), id),
+      signals.utterances(id), signals.frames(id), signals.audio(id), signals.hostSummary(id),
+    ]);
+    reply.header("content-disposition", `attachment; filename="sidestage-${id}.json"`);
+    return {
+      exportedAt: new Date().toISOString(),
+      show: show.rows[0],
+      report: report.rows[0]?.report ?? null,
+      reportGeneratedAt: report.rows[0]?.generated_at ?? null,
+      record,
+      signals: {
+        host,
+        utterances,
+        frames: frames.map((f) => ({ ...f, path: undefined, url: `/api/shows/${id}/media/frames/${f.seq}` })),
+        audio: audio.map((a) => ({ ...a, path: undefined, url: `/api/shows/${id}/media/audio/${a.seq}` })),
+      },
+    };
+  });
+
+  /**
+   * Close a gap: the answer a question should have had, written into the
+   * catalog so the NEXT show is grounded on it.
+   *
+   * The report has listed unanswered questions since it was written, and there
+   * was nothing to do about one except edit JSON by hand. When the named show
+   * is still live, the answer lands in its own Q&A table too, so the gap closes
+   * now rather than next Friday.
+   */
+  app.post<{
+    Params: { id: string };
+    Body: { question?: string; answer?: string; tags?: string; showId?: string };
+  }>("/api/catalogs/:id/qa", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "edit the catalog");
+    if (!actor) return reply;
+
+    const question = (req.body?.question ?? "").trim();
+    const answer = (req.body?.answer ?? "").trim();
+    if (!question || !answer) {
+      return reply.code(400).send({ error: "both a question and an answer are required" });
+    }
+    const row = addCatalogQa(req.params.id, {
+      question,
+      answer,
+      ...(req.body?.tags ? { tags: req.body.tags } : {}),
+      ...(req.body?.showId ? { fromShowId: req.body.showId } : {}),
+    });
+    if (!row) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
+
+    // If that show is still running, ground it immediately rather than at the
+    // next attach — the seller answered the question thirty seconds ago.
+    let appliedLive = false;
+    try {
+      const live = shows.get(req.body?.showId ?? null);
+      if (live) {
+        await live.repo.insertQa({ id: row.id, question: row.question, answer: row.answer, tags: row.tags ?? "" });
+        await live.refreshIndex();
+        appliedLive = true;
+      }
+    } catch {
+      /* the show has ended — the catalog write is the point either way */
+    }
+
+    return { qa: row, catalogId: req.params.id, appliedLive };
+  });
+
+  /**
+   * The catalog priced against the real market — the whole lineup, not one lot.
+   *
+   * Served from cache and never blocking on eBay: a miss comes back
+   * `checking: true` and the page polls. `warm=1` kicks the whole catalog off
+   * in the background, which is what the page does when it first opens.
+   */
+  app.get<{ Params: { id: string }; Querystring: { warm?: string } }>(
+    "/api/catalogs/:id/market",
+    async (req, reply) => {
+      const cat = getCatalog(req.params.id);
+      if (!cat) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
+      if (req.query.warm === "1") void marketIndex.warm(cat.items).catch(() => {});
+      return marketIndex.read(cat.id, cat.items);
+    },
+  );
+
+  /**
+   * Search eBay's live catalog directly.
+   *
+   * The seller's own inventory is one question; "what else is out there" is
+   * another, and it is the one they ask when pricing a lot they have not listed
+   * yet. This one DOES wait on eBay, because a human typed a query and pressed
+   * enter — nothing is watching a queue.
+   */
+  app.get<{ Querystring: { q?: string; limit?: string; sold?: string } }>(
+    "/api/ebay/search",
+    async (req, reply) => {
+      const q = (req.query.q ?? "").trim();
+      if (!q) return reply.code(400).send({ error: "a query is required" });
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 12));
+      try {
+        if (req.query.sold === "1") {
+          const rows = await ebay.soldComps(q, { limit });
+          return { basis: "sold", query: q, rows };
+        }
+        const rows = await ebay.search(q, { limit });
+        return { basis: "asking", query: q, rows };
+      } catch (e) {
+        return reply.code(502).send({ error: (e as Error).message });
+      }
+    },
+  );
 
   app.post("/api/catalogs/reload", async () => {
     reloadCatalogs();
@@ -509,13 +928,343 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // ── shows ─────────────────────────────────────────────────────────────────
   app.get("/api/shows", async () => shows.list());
 
-  /** Best-effort list of eBay Live shows currently on air. */
+  /**
+   * Best-effort list of eBay Live shows currently on air.
+   *
+   * `sellerHandle` is the field the console reads; `host` is kept because the
+   * CLI printed it first. They are the same string — the console showed "—"
+   * under every card for as long as only one of them existed.
+   */
   app.get<{ Querystring: { limit?: string } }>("/api/shows/discover", async (req, reply) => {
     try {
-      return await discoverLiveShows({ limit: Math.min(30, Number(req.query.limit) || 12) });
+      const limit = Math.min(30, Number(req.query.limit) || 12);
+      const { shows, reason, session } = await discoverLiveShows({ limit });
+      // The reason travels with the list. "Nobody is on air" and "sign in to
+      // eBay first" are both empty grids and completely different instructions.
+      return { shows, reason, session };
     } catch (e) {
       return reply.code(502).send({ error: `discovery failed: ${(e as Error).message}` });
     }
+  });
+
+  /**
+   * Is the eBay application actually reachable, and what does it reach?
+   *
+   * Names the two APIs an app token gets and the one it does not, so nobody has
+   * to discover the sold-comps 403 from a research card that quietly said
+   * "median comp" over asking prices.
+   */
+  app.get("/api/ebay/status", async (req) => {
+    const [read, actor] = [await ebay.check(), actorOf(req as object)];
+    const connection = actor ? await ebayAuth.connection(actor.id).catch(() => null) : null;
+    return {
+      ...read,
+      // The two halves are genuinely different capabilities and the UI must not
+      // merge them: reads work for everyone with an application key; writes need
+      // this particular seller to have consented.
+      write: {
+        connected: Boolean(connection?.valid),
+        connectedAt: connection?.connectedAt ?? null,
+        scopes: connection?.scopes ?? [],
+        blockers: ebayAuth.blockers,
+      },
+    };
+  });
+
+  /**
+   * Begin the consent round trip.
+   *
+   * Returns the URL rather than redirecting: the console is a single-page app
+   * and a 302 out of an XHR is a silent failure. The caller opens it.
+   */
+  /**
+   * eBay's Marketplace Account Deletion endpoint — unauthenticated by design,
+   * because eBay is the caller. The GET is eBay checking we own the URL and
+   * the token; the POST is a member having closed their account, after which
+   * nothing about them may remain here. See ingest/ebay/deletion.ts.
+   */
+  app.get<{ Querystring: { challenge_code?: string } }>("/api/ebay/account-deletion", async (req, reply) => {
+    const { verificationToken: token, endpoint } = config.ebayDeletion;
+    if (!token || !endpoint) {
+      return reply.code(503).send({ error: "account-deletion notifications are not configured (EBAY_DELETION_VERIFICATION_TOKEN, EBAY_DELETION_ENDPOINT)" });
+    }
+    const code = (req.query.challenge_code || "").trim();
+    if (!code) return reply.code(400).send({ error: "challenge_code is required" });
+    return reply.type("application/json").send({
+      challengeResponse: challengeResponse(code, { verificationToken: token, endpointUrl: endpoint }),
+    });
+  });
+
+  app.post("/api/ebay/account-deletion", async (req, reply) => {
+    const notice = parseNotice(req.body);
+    // Anything that is not a deletion notice is acknowledged and ignored: eBay
+    // retries on non-2xx, and there is nothing to retry.
+    if (!notice) return reply.code(200).send({ ok: true, ignored: true });
+    const removed = await honourDeletion(pgPool(), notice).catch(() => 0);
+    return reply.code(200).send({ ok: true, removed });
+  });
+
+  app.post("/api/ebay/connect", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "connect an eBay account");
+    if (!actor) return reply;
+    try {
+      return await ebayAuth.begin(actor.id);
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+
+  /**
+   * Where eBay sends the seller back.
+   *
+   * A browser lands here, not an XHR, so it answers with a page rather than
+   * JSON — and it never echoes the code or the state back into the document.
+   */
+  app.get<{ Querystring: { code?: string; state?: string; error_description?: string } }>(
+    "/api/ebay/callback",
+    async (req, reply) => {
+      const { code, state } = req.query;
+      const fail = (msg: string) =>
+        reply.code(400).type("text/html").send(closingPage("Could not connect eBay", msg, false));
+
+      if (req.query.error_description) return fail(req.query.error_description);
+      if (!code) return fail("eBay sent no authorisation code.");
+      // The developer portal's "Test Sign-In" lands here with a code but no
+      // state, because it did not start from an account in this app. Say so,
+      // rather than blaming eBay for a code that is plainly in the URL.
+      if (!state) {
+        return fail(
+          "This sign-in did not start from SideStage, so there is no account to attach it to. " +
+            "Open Settings → eBay in the app and press Connect eBay; that link carries the state eBay hands back here.",
+        );
+      }
+      try {
+        await ebayAuth.complete(code, state);
+        return reply
+          .type("text/html")
+          .send(
+            closingPage(
+              "eBay connected",
+              "Price, stock and end-listing actions now act on your real listings.",
+              true,
+            ),
+          );
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
+
+  /**
+   * Arm this show's writes against eBay, or put them back on the mock.
+   *
+   * Explicit and per show. The alternative — inferring it from whether a
+   * connection exists — means an operator finds out which marketplace they
+   * edited after the fact, which is the one thing the audit chain exists to
+   * make impossible.
+   */
+  app.post<{ Params: { showId: string }; Body: { target?: "mock" | "ebay" } }>(
+    "/api/shows/:showId/write-target",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "change where writes land");
+      if (!actor) return reply;
+      const target = req.body?.target === "ebay" ? "ebay" : "mock";
+      try {
+        const rt = shows.get(req.params.showId);
+        const now = await rt.setWriteTarget(target);
+        await rt.audit.append(
+          "autonomy_changed",
+          "seller",
+          `write target set to ${now === "ebay" ? "the seller's real eBay listings" : "the mock marketplace"}`,
+          { writeTarget: now },
+          actor.id,
+        );
+        hub.emit("shows", await shows.list());
+        return { showId: req.params.showId, writeTarget: now };
+      } catch (e) {
+        return reply.code(409).send({ error: (e as Error).message });
+      }
+    },
+  );
+
+  app.delete("/api/ebay/connect", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "disconnect an eBay account");
+    if (!actor) return reply;
+    await ebayAuth.disconnect(actor.id);
+    return { ok: true };
+  });
+
+  /**
+   * Import the seller's own eBay listings as a catalog.
+   *
+   * This is the other half of connecting: until now a catalog was a JSON file
+   * someone wrote by hand, which is fine for a fixture and absurd for a seller
+   * with four hundred listings. Their inventory already exists; this reads it.
+   */
+  app.post<{ Body: { catalogId?: string; limit?: number } }>(
+    "/api/ebay/import",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "import listings");
+      if (!actor) return reply;
+      const token = await ebayAuth.userToken(actor.id).catch(() => null);
+      if (!token) {
+        return reply.code(409).send({ error: "connect an eBay account before importing" });
+      }
+      try {
+        const result = await importSellerListings({
+          token,
+          env: config.ebay.env as "sandbox" | "production",
+          catalogId: (req.body?.catalogId || `ebay-${actor.handle}`).slice(0, 60),
+          limit: Math.min(500, Math.max(1, req.body?.limit ?? 200)),
+        });
+        reloadCatalogs();
+        return result;
+      } catch (e) {
+        return reply.code(502).send({ error: (e as Error).message });
+      }
+    },
+  );
+
+  // ── getting ready for a show before it starts ────────────────────────────
+  /** Preparations running right now, so the UI can show progress per event. */
+  const preparing = new Set<string>();
+
+  // Unscoped on purpose. A prepared show's agent is created on the workspace's
+  // Whissle key and its catalog sits in the shared catalogs directory — it is a
+  // workspace resource, and scoping the LIST by whichever session happened to
+  // click "prepare" made the same show read as prepared in one browser and not
+  // in another.
+  app.get("/api/shows/prepared", async () => {
+    return {
+      prepared: await preparer.list(),
+      preparing: [...preparing],
+      session: sessionStatus(),
+    };
+  });
+
+  /**
+   * Build a catalog and an agent for one eBay Live event.
+   *
+   * Answers immediately and works in the background: several Browse calls plus
+   * an agent creation take the better part of a minute, and a seller clicking
+   * "prepare" on four shows should not be watching a spinner for four of them.
+   */
+  app.post<{
+    Body: {
+      eventId?: string; title?: string; host?: string;
+      sellerHandle?: string | null; tags?: string[]; thumbnailUrl?: string | null;
+    };
+  }>("/api/shows/prepare", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "prepare a show");
+    if (!actor) return reply;
+    const eventId = (req.body?.eventId ?? "").trim();
+    const title = (req.body?.title ?? "").trim();
+    if (!eventId || !title) {
+      return reply.code(400).send({ error: "an eventId and a title are required" });
+    }
+    if (preparing.has(eventId)) return { eventId, status: "already-preparing" };
+
+    preparing.add(eventId);
+    void preparer
+      .prepare({
+        eventId,
+        title,
+        host: req.body?.host ?? "",
+        sellerHandle: req.body?.sellerHandle ?? null,
+        tags: req.body?.tags ?? [],
+        thumbnailUrl: req.body?.thumbnailUrl ?? null,
+        accountId: actor.id,
+      })
+      .catch((e) => console.warn(`[prepare] ${eventId}: ${(e as Error).message}`))
+      .finally(() => preparing.delete(eventId));
+
+    return { eventId, status: "preparing" };
+  });
+
+  app.delete<{ Params: { eventId: string } }>(
+    "/api/shows/prepared/:eventId",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "drop a prepared show");
+      if (!actor) return reply;
+      return preparer.drop(req.params.eventId);
+    },
+  );
+
+  /**
+   * One seller's eBay Live page: their live show and what they have scheduled.
+   *
+   * The only place eBay puts an upcoming show. Reads a page, so it is on
+   * demand — per seller, when asked — never fanned out across the whole grid.
+   */
+  app.get<{ Params: { handle: string } }>("/api/shows/seller/:handle", async (req, reply) => {
+    try {
+      const r = await discoverSellerShows(req.params.handle);
+      return { handle: req.params.handle, shows: r.shows, reason: r.reason };
+    } catch (e) {
+      return reply.code(502).send({ error: (e as Error).message });
+    }
+  });
+
+  /** The whole home surface in one read: live now, what is prepared, your shows. */
+  app.get<{ Querystring: { refresh?: string } }>("/api/home", async (req) => {
+    const [discovery, prepared, watched] = await Promise.all([
+      req.query.refresh === "1"
+        ? discoverLiveShows({ limit: 24 })
+        : Promise.resolve(cachedDiscovery()),
+      preparer.list(),
+      shows.list(),
+    ]);
+    return {
+      live: discovery.shows,
+      discovery: { reason: discovery.reason, session: discovery.session },
+      prepared,
+      preparing: [...preparing],
+      watching: watched,
+    };
+  });
+
+  // ── sellers you follow ────────────────────────────────────────────────────
+  //
+  // Not a subscription: there is nothing to subscribe to. A follow is a handle
+  // we match against the live grid whenever the grid answers, and every response
+  // carries `checkedAt` so the console can say how long ago that was instead of
+  // rendering "not live" over a check that never happened.
+  const following = new Following(pgPool());
+
+  app.get("/api/following", async (req) => {
+    const a = actorOf(req as object);
+    const sellers = a ? await following.list(a.id) : [];
+    return { sellers, checkedAt: gridCheckedAt(), checking: cachedGrid().checking };
+  });
+
+  app.post("/api/following/refresh", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "keep a list of sellers");
+    if (!actor) return reply;
+    await liveGrid({ force: true });
+    return { sellers: await following.list(actor.id), checkedAt: gridCheckedAt(), checking: false };
+  });
+
+  app.post<{ Body: { handle?: string; note?: string } }>("/api/following", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "keep a list of sellers");
+    if (!actor) return reply;
+    const handle = (req.body?.handle ?? "").trim();
+    if (!handle) return reply.code(400).send({ error: "a seller handle is required" });
+    try {
+      const sellers = await following.add(actor.id, handle, req.body?.note);
+      return { sellers, checkedAt: gridCheckedAt(), checking: cachedGrid().checking };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+
+  app.delete<{ Params: { handle: string } }>("/api/following/:handle", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "keep a list of sellers");
+    if (!actor) return reply;
+    return {
+      sellers: await following.remove(actor.id, req.params.handle),
+      checkedAt: gridCheckedAt(),
+      checking: cachedGrid().checking,
+    };
   });
 
   /**
@@ -532,12 +1281,27 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const input = (req.body?.eventId || req.body?.url || "").trim();
       if (!input) return reply.code(400).send({ error: "eventId or url is required" });
 
-      const catalogId = (req.body?.catalogId || "").trim();
+      // A show that was PREPARED is the whole reason preparing exists: its
+      // catalog and its agent are already built. Attaching used to ignore that
+      // and mint a second agent with an empty knowledge base — so the operator
+      // did the preparation and then watched the copilot start from nothing.
+      const eventId = parseEventId(input);
+      const prepared = eventId ? await preparer.get(eventId).catch(() => null) : null;
+      // The live grid we already read knows this show's real title and host;
+      // the player page's own <title> is generic. Without this a show attached
+      // by link was called "eBay Live 47tK1SX0VsiHEXN1" for its whole life.
+      const seen = eventId ? cachedDiscovery().shows.find((s) => s.eventId === eventId) : undefined;
+
+      const catalogId = (req.body?.catalogId || prepared?.catalogId || "").trim();
       const catalog = catalogId ? getCatalog(catalogId) : null;
       if (catalogId && !catalog) return reply.code(400).send({ error: `unknown catalog "${catalogId}"` });
 
       try {
-        const target = await shows.attachEbayLive(input, { title: req.body?.title, host: req.body?.host });
+        const target = await shows.attachEbayLive(input, {
+          title: req.body?.title || prepared?.title || seen?.title,
+          host:
+            req.body?.host || prepared?.host || seen?.host || prepared?.sellerHandle || seen?.sellerHandle || undefined,
+        });
 
         // ── this show's own agent ──────────────────────────────────────
         //
@@ -552,13 +1316,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // deletes it.
         try {
           const show = await target.show();
-          const agentId = await createStreamAgent({
-            showId: target.showId,
-            showTitle: show.title,
-            host: show.sellerHandle,
-            seller: catalog?.seller,
-            monitored: show.readOnly,
-          });
+          // Reuse the prepared agent rather than creating a second one: it
+          // already carries this show's lineup in its knowledge base.
+          const agentId =
+            prepared?.agentId ??
+            (await createStreamAgent({
+              showId: target.showId,
+              showTitle: show.title,
+              host: show.sellerHandle,
+              seller: catalog?.seller,
+              monitored: show.readOnly,
+            }));
           target.useAgent(agentId);
           await pgPool().query(
             "UPDATE shows SET agent_id = $2, agent_owned = TRUE WHERE id = $1",
@@ -572,9 +1340,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
         let applied = null;
         if (catalog) {
-          applied = applyCatalog(target.repo, catalog);
+          // AWAITED. This used to be assigned unawaited, so the response
+          // serialised a pending promise as `{}` and the row below was never
+          // written — the catalog landed in memory, invisibly, and was gone on
+          // the next restart because resume had no catalog_id to re-apply.
+          applied = await applyCatalog(target.repo, catalog);
           target.seller = catalog.seller;
           target.catalogId = catalog.id;
+          await pgPool().query(
+            `UPDATE shows SET catalog_id = $2,
+                    title = CASE WHEN title LIKE 'eBay Live %' AND $3 <> '' THEN $3 ELSE title END
+              WHERE id = $1`,
+            [target.showId, catalog.id, prepared?.title ?? ""],
+          );
           // Answer as THIS seller's agent, with THIS seller's knowledge base.
           // NOTE: the catalog's own agent is deliberately NOT adopted here.
           // The stream agent created above already carries this seller's
@@ -692,13 +1470,97 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   /** Mint a LISTEN-ONLY Whissle session: STT + emotion, no LLM, no TTS. The
    *  wsk_ key stays here; the browser receives only a short-lived room token. */
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/audio/session", async (req, reply) => {
+    let target;
     try {
-      rt(req.params.showId); // 404 early if the show is not watched
-      const session = await ctx.llm.startListenSession();
+      target = rt(req.params.showId);
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+    try {
+      // The SHOW's agent, not the shared client. It used to be the shared one,
+      // which minted every listen session on the seed agent: the transcript
+      // still arrived, but the gateway's emotion head, its end-of-session
+      // summary and its per-agent session list all belonged to the wrong
+      // agent, and the report could never find them.
+      const session = await target.llm.startListenSession();
+      await pgPool()
+        .query("UPDATE shows SET listen_room = $2, listen_started_at = now() WHERE id = $1", [
+          target.showId, session.room || null,
+        ])
+        .catch(() => {});
       return session;
     } catch (e) {
       return reply.code(502).send({ error: (e as Error).message });
     }
+  });
+
+  /**
+   * One chunk of the host's audio, as the bridge's MediaRecorder cut it.
+   *
+   * `seq` is the recorder's own counter, so a chunk re-sent after a flaky
+   * upload replaces itself. Kept beside the transcript on the same clock, so
+   * the report can play the show back against what was said and shown.
+   */
+  app.post<{ Params: { showId: string }; Querystring: { seq?: string; durationMs?: string } }>(
+    "/api/shows/:showId/audio/chunk",
+    async (req, reply) => {
+      if (!policy().ingest.hostAudio) {
+        return reply.code(409).send({ error: "host audio is off in settings", ingest: "hostAudio" });
+      }
+      const seq = Number(req.query.seq);
+      const durationMs = Number(req.query.durationMs);
+      if (!Number.isInteger(seq) || seq < 0) return reply.code(400).send({ error: "seq must be a non-negative integer" });
+      if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 120_000) {
+        return reply.code(400).send({ error: "durationMs must be between 1 and 120000" });
+      }
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: "audio bytes are required" });
+      let target;
+      try {
+        target = rt(req.params.showId);
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+      const mime = (req.headers["content-type"] || "audio/webm").split(";")[0]!.trim();
+      const row = await target.signals.recordAudio(target.showId, seq, body, { durationMs, mime });
+      return { ok: true, seq: row.seq, offsetMs: row.offsetMs, bytes: row.bytes };
+    },
+  );
+
+  /**
+   * The show on one clock: utterances, frames and audio chunks, milliseconds
+   * from `started_at`, plus the host summary. This is what the report's
+   * playable timeline is drawn from, and it works after the show has ended.
+   */
+  app.get<{ Params: { showId: string } }>("/api/shows/:showId/timeline", async (req, reply) => {
+    const exists = await pgPool().query("SELECT 1 FROM shows WHERE id = $1", [req.params.showId]);
+    if (!exists.rowCount) return reply.code(404).send({ error: `no show ${req.params.showId}` });
+    const id = req.params.showId;
+    const [utterances, frames, audio, host] = await Promise.all([
+      signals.utterances(id), signals.frames(id), signals.audio(id), signals.hostSummary(id),
+    ]);
+    return {
+      showId: id,
+      host,
+      utterances,
+      frames: frames.map((f) => ({ seq: f.seq, at: f.at, offsetMs: f.offsetMs, reading: f.reading, bytes: f.bytes })),
+      audio: audio.map((a) => ({ seq: a.seq, at: a.at, offsetMs: a.offsetMs, durationMs: a.durationMs, bytes: a.bytes, mime: a.mime })),
+    };
+  });
+
+  app.get<{ Params: { showId: string; seq: string } }>("/api/shows/:showId/media/frames/:seq", async (req, reply) => {
+    const f = await signals.frame(req.params.showId, Number(req.params.seq));
+    if (!f || !existsSync(f.path)) return reply.code(404).send({ error: "no such frame" });
+    return reply
+      .type(f.path.endsWith(".png") ? "image/png" : "image/jpeg")
+      .header("cache-control", "private, max-age=86400")
+      .send(createReadStream(f.path));
+  });
+
+  app.get<{ Params: { showId: string; seq: string } }>("/api/shows/:showId/media/audio/:seq", async (req, reply) => {
+    const a = await signals.audioChunk(req.params.showId, Number(req.params.seq));
+    if (!a || !existsSync(a.path)) return reply.code(404).send({ error: "no such audio chunk" });
+    return reply.type(a.mime).header("cache-control", "private, max-age=86400").send(createReadStream(a.path));
   });
 
   /**
@@ -713,6 +1575,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     Params: { showId: string };
     Body: { text?: string; emotion?: unknown; intent?: unknown; speechRate?: number; final?: boolean; levels?: unknown };
   }>("/api/shows/:showId/audio/transcript", async (req, reply) => {
+    // The seller's switch, honoured at the door rather than in the UI. With
+    // host audio off the copilot never hears "last one in this waist" — and it
+    // then abstains on those questions instead of guessing, which is the whole
+    // point of the setting.
+    if (!policy().ingest.hostAudio) {
+      return reply.code(409).send({ error: "host audio is off in settings", ingest: "hostAudio" });
+    }
     const text = (req.body?.text || "").trim();
     if (!text) return reply.code(400).send({ error: "text is required" });
     try {
@@ -743,6 +1612,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       // already paying for shaded nothing. `push` keeps it only while the head
       // itself reports it trusted, and expires it after one utterance's worth.
       target.showContext.push(text, segment.emotion);
+      // Kept, distribution and all — this is the row the post-show "what the
+      // host did" section is computed from.
+      target.signals.recordUtterance(segment);
       hub.emit("transcript", segment);
       return { ok: true, ...segment };
     } catch (e) {
@@ -797,6 +1669,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { showId: string }; Body: { frame?: string } }>(
     "/api/shows/:showId/visual/frame",
     async (req, reply) => {
+      if (!policy().ingest.cameraFrames) {
+        return reply.code(409).send({ error: "camera frames are off in settings", ingest: "cameraFrames" });
+      }
       const dataUrl = (req.body?.frame || "").trim();
       if (!dataUrl.startsWith("data:image/")) {
         return reply.code(400).send({ error: "frame must be an image data URL" });
@@ -825,7 +1700,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         if (!text) return { ok: true, skipped: "no reading" };
         target.showContext.setOnScreen(text);
         hub.emit("context", { showId: target.showId, ...target.showContext.current() });
-        return { ok: true, onScreen: text };
+        // The frame is kept WITH its reading, and only then. What the agent
+        // saw and what it said it saw are one record; a seller reviewing a
+        // wrong reading needs the picture to judge it.
+        const kept = await target.signals.recordFrame(target.showId, dataUrl, text).catch(() => null);
+        if (kept) hub.emit("frame", { showId: target.showId, seq: kept.seq, at: kept.at, offsetMs: kept.offsetMs, reading: text });
+        return { ok: true, onScreen: text, frameSeq: kept?.seq ?? null };
       } catch (e) {
         // A failed vision call costs this frame and nothing else — the next one
         // is seconds away and the reply path never depended on it.
@@ -920,6 +1800,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Querystring: { showId?: string }; Body: { level: AutonomyLevel } }>(
     "/api/autonomy",
     async (req, reply) => {
+      // Moving the rung is the most consequential write in the product — L3 lets
+      // the copilot answer a buyer with nobody watching — and it was the one
+      // write with no guard on it. A guest could switch a show to auto-reply.
+      if (!mustWrite(req as object, reply)) return;
       const level = req.body?.level;
       if (!level || !LADDER.includes(level)) {
         return reply.code(400).send({ error: `level must be one of ${LADDER.join(", ")}` });
@@ -930,6 +1814,152 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         const [entry] = await target.audit.list(1);
         if (entry) hub.emit("audit", { showId: target.showId, ...entry });
         return show;
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+    },
+  );
+
+  /**
+   * Mark a sent reply wrong.
+   *
+   * The PRD names "wrong replies reaching a buyer" and marks it not
+   * self-measurable, which is correct — and leaves the number at nothing. The
+   * operator is the only one who can see it, so this is the control that turns
+   * it into a count. It is a FLOOR, never a total, and every surface that shows
+   * it says so.
+   *
+   * The flag is also an eval case. The guardrail suite has only ever learned
+   * from its own author; this is the first thing in it that came from a buyer.
+   */
+  app.post<{ Params: { id: string }; Querystring: { showId?: string }; Body: { reason?: string } }>(
+    "/api/proposals/:id/flag",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply);
+      if (!actor) return;
+      const reason = (req.body?.reason || "wrong fact").trim().slice(0, 80);
+      try {
+        const target = rt(req.query.showId);
+        const r = await pgPool().query<{ question: string; sent_text: string | null; draft: string }>(
+          `UPDATE reply_proposals
+              SET flagged_wrong = TRUE, flag_reason = $3, flagged_at = now()
+            WHERE show_id = $1 AND id = $2
+            RETURNING question, sent_text, draft`,
+          [target.showId, req.params.id, reason],
+        );
+        const row = r.rows[0];
+        if (!row) return reply.code(404).send({ error: `no proposal ${req.params.id}` });
+
+        // In the audit chain, because "who said this was wrong, and when" is
+        // exactly the kind of question the chain exists to answer.
+        await target.audit.append(
+          "reply_flagged_wrong",
+          "seller",
+          `reply flagged wrong · ${reason}`,
+          { proposalId: req.params.id, reason, question: row.question, sent: row.sent_text ?? row.draft },
+          actor.id,
+        );
+        const [entry] = await target.audit.list(1);
+        if (entry) hub.emit("audit", { showId: target.showId, ...entry });
+        return { ok: true, id: req.params.id, reason };
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+    },
+  );
+
+  /**
+   * Tell the copilot what is actually on screen.
+   *
+   * eBay Live names lots for the seller — "#007 — As seen on eBay LIVE" — so a
+   * monitored show has a price for something it cannot name. `enrichLot` names
+   * it from host speech and a camera frame, which is a guess, and when the
+   * guess is wrong every answer after it is wrong in the same direction. The
+   * operator is the only one who can see that, and this is the one input that
+   * fixes all of it at once.
+   */
+  app.post<{ Params: { listingId: string }; Querystring: { showId?: string }; Body: { title?: string } }>(
+    "/api/listings/:listingId/name",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply);
+      if (!actor) return;
+      const title = (req.body?.title || "").trim().slice(0, 200);
+      if (title.length < 3) return reply.code(400).send({ error: "title is required" });
+      try {
+        const target = rt(req.query.showId);
+        const before = (await target.repo.listings()).find((l) => l.id === req.params.listingId);
+        if (!before) return reply.code(404).send({ error: `no listing ${req.params.listingId}` });
+
+        // Named, not re-priced: this does not bump the listing version, because
+        // naming a lot is not a change to what is being sold — and the staleness
+        // guard reads that version.
+        await target.repo.nameObservedLot(req.params.listingId, title, "the operator");
+        await target.refreshIndex();
+        const after = (await target.repo.listings()).find((l) => l.id === req.params.listingId) ?? null;
+        await target.audit.append(
+          "lot_corrected",
+          "seller",
+          `lot renamed · ${before.title} → ${title}`,
+          { listingId: req.params.listingId, from: before.title, to: title },
+          actor.id,
+        );
+        const [entry] = await target.audit.list(1);
+        if (entry) hub.emit("audit", { showId: target.showId, ...entry });
+        if (after) hub.emit("listing", { showId: target.showId, ...after });
+        return after ?? { ok: true };
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+    },
+  );
+
+  /**
+   * Ask what the copilot WOULD say, without a show and without sending.
+   *
+   * The same pipeline, the same six guards, against the catalog as it stands
+   * right now. A guardrail change was previously only testable on a live buyer,
+   * which is the worst possible place to find out a regex blocks every reply.
+   */
+  app.post<{ Querystring: { showId?: string }; Body: { question?: string } }>(
+    "/api/dry-run",
+    async (req, reply) => {
+      const question = (req.body?.question || "").trim();
+      if (!question) return reply.code(400).send({ error: "question is required" });
+      try {
+        const target = rt(req.query.showId);
+        return await target.pipeline.dryRun(question);
+      } catch (e) {
+        return reply.code(404).send({ error: (e as Error).message });
+      }
+    },
+  );
+
+  /**
+   * Draft a reply for a comment the admission gate dropped.
+   *
+   * One show dropped 1,204 messages as reaction. The gate is right about nearly
+   * all of them and wrong about some, and when it is wrong the operator has no
+   * way to say "answer that one" — which makes the gate unarguable rather than
+   * merely strict.
+   */
+  app.post<{ Params: { id: string }; Querystring: { showId?: string } }>(
+    "/api/chat/:id/answer",
+    async (req, reply) => {
+      if (!mustWrite(req as object, reply)) return;
+      try {
+        const target = rt(req.query.showId);
+        // Read from the persisted record rather than memory: the operator may
+        // be answering something that scrolled past a while ago.
+        const row = (
+          await pgPool().query<{ author: string; text: string }>(
+            "SELECT author, text FROM chat_messages WHERE show_id = $1 AND id = $2",
+            [target.showId, req.params.id],
+          )
+        ).rows[0];
+        if (!row) return reply.code(404).send({ error: `no message ${req.params.id}` });
+        // Forced past the gate, and recorded as forced: a drop the operator
+        // overruled is a data point about the gate, not just about this reply.
+        return await target.pipeline.ingest({ author: row.author, text: row.text }, { force: true });
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -982,4 +2012,37 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Querystring: { showId?: string } }>("/api/context", read((s) => rt(s).showContext.current()));
   app.get<{ Querystring: { showId?: string } }>("/api/actions", read((s) => rt(s).executor.list()));
   app.get<{ Querystring: { showId?: string } }>("/api/proposals", read((s) => rt(s).pipeline.list()));
+}
+
+/**
+ * The page eBay's redirect lands on.
+ *
+ * A browser arrives here, not an XHR, so it gets a document. Deliberately
+ * minimal and self-closing: the seller started this from the console and should
+ * end up back there, not on a page that becomes another thing to navigate away
+ * from. Nothing from the query string is echoed into it — the code and state are
+ * secrets that have no business in a rendered document or a browser history
+ * entry's page text.
+ */
+function closingPage(title: string, detail: string, ok: boolean): string {
+  const esc = (x: string) =>
+    x.replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
+    );
+  return `<!doctype html><meta charset="utf-8"><title>${esc(title)}</title>
+<style>
+  body{margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f5f7;
+       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#1c1f24}
+  .card{background:#fff;border-radius:10px;padding:28px 32px;max-width:420px;
+        box-shadow:0 1px 2px rgb(28 31 36/.06),0 8px 28px rgb(28 31 36/.10)}
+  h1{margin:0 0 8px;font-size:17px;color:${ok ? "#1a7f4b" : "#b4232c"}}
+  p{margin:0;color:#5b6270}
+  small{display:block;margin-top:16px;color:#8b919c}
+</style>
+<div class="card">
+  <h1>${esc(title)}</h1>
+  <p>${esc(detail)}</p>
+  <small>You can close this tab.</small>
+</div>
+<script>setTimeout(function(){ try { window.close(); } catch (e) {} }, ${ok ? 1500 : 6000});</script>`;
 }
