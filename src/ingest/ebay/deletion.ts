@@ -21,7 +21,7 @@
 // the catalog file is named for OUR account, not the eBay member, and is
 // removed when the seller deletes their own data.
 
-import { createHash } from "node:crypto";
+import { createHash, createVerify } from "node:crypto";
 import type { Pool } from "../../db/pg.js";
 
 export interface DeletionConfig {
@@ -75,4 +75,64 @@ export async function honourDeletion(d: Pool, n: DeletionNotice): Promise<number
     [n.notificationId, n.userId, n.username, removed],
   );
   return removed;
+}
+
+
+// ── is this notice really from eBay? ─────────────────────────────────────────
+//
+// eBay signs every notification: `x-ebay-signature` is base64 JSON naming a
+// key id and carrying an ECDSA signature over the raw body; the public key is
+// fetched from the Notification API by that id. Without this check anyone who
+// knew a seller's eBay username could POST a deletion and disconnect them —
+// the endpoint is unauthenticated by eBay's design, so the signature is the
+// only thing standing between the internet and `honourDeletion`.
+
+export interface SignatureHeader {
+  kid: string;
+  signature: string;
+  alg: string;
+  digest: string;
+}
+
+export function parseSignatureHeader(raw: string | undefined): SignatureHeader | null {
+  if (!raw) return null;
+  try {
+    const d = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as Partial<SignatureHeader>;
+    if (!d.kid || !d.signature) return null;
+    return { kid: d.kid, signature: d.signature, alg: d.alg ?? "ecdsa", digest: d.digest ?? "SHA1" };
+  } catch {
+    return null;
+  }
+}
+
+/** eBay returns the key without PEM line breaks; Node wants them. */
+export function toPem(key: string): string {
+  const body = key.replace(/-----(BEGIN|END) PUBLIC KEY-----/g, "").replace(/\s+/g, "");
+  return `-----BEGIN PUBLIC KEY-----\n${body.match(/.{1,64}/g)?.join("\n") ?? body}\n-----END PUBLIC KEY-----\n`;
+}
+
+const keyCache = new Map<string, string>();
+
+export async function verifyNotification(
+  rawBody: string,
+  header: string | undefined,
+  fetchKey: (kid: string) => Promise<{ key: string; digest?: string } | null>,
+): Promise<{ ok: boolean; reason: string }> {
+  const sig = parseSignatureHeader(header);
+  if (!sig) return { ok: false, reason: "no x-ebay-signature header" };
+  let pem = keyCache.get(sig.kid);
+  if (!pem) {
+    const k = await fetchKey(sig.kid).catch(() => null);
+    if (!k?.key) return { ok: false, reason: `public key ${sig.kid} could not be fetched` };
+    pem = toPem(k.key);
+    keyCache.set(sig.kid, pem);
+  }
+  try {
+    const v = createVerify(sig.digest.replace(/-/g, "") || "SHA1");
+    v.update(rawBody);
+    const ok = v.verify(pem, sig.signature, "base64");
+    return ok ? { ok: true, reason: "signature verified" } : { ok: false, reason: "signature did not verify" };
+  } catch (e) {
+    return { ok: false, reason: `verification error: ${(e as Error).message}` };
+  }
 }

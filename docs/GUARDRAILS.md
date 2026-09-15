@@ -34,6 +34,17 @@ All six run on every reply, even after one has blocked — so the operator sees 
 complete picture, and the eval can measure each guard's precision independently
 rather than only the first to fire.
 
+**And they run again at send.** A blocked proposal cannot be sent whatever the
+client asks — the console hides the button, but a keystroke or a curl is not the
+console — and the refusal comes back as HTTP 409 with the guard and reason. An
+edited draft is a new draft: `Pipeline.send()` re-runs all six against the facts
+the original was grounded in and the listings as they stand now, refuses a
+block, and records `verdictAtSend` and `guardsAtSend` in the audit entry.
+
+**One limit, stated:** the policy is armed process-wide. Attaching a show arms
+Layer B with that seller's saved settings, so with two sellers live at once the
+last to attach wins. Per-show policy is next.
+
 ---
 
 ## Editing them

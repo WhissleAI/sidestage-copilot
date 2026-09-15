@@ -35,15 +35,17 @@ interface Client {
   /** Only events for this show reach this client. Empty while the console is
    *  connected but following nothing — it still gets `shows` and heartbeats. */
   showId: string;
+  /** Whose console this is. The `shows` switcher list is cut to their shows. */
+  ownerId: string | null;
 }
 
 export class EventHub {
   private clients = new Map<number, Client>();
   private nextId = 1;
 
-  add(reply: FastifyReply, showId: string): number {
+  add(reply: FastifyReply, showId: string, ownerId: string | null = null): number {
     const id = this.nextId++;
-    this.clients.set(id, { id, reply, showId });
+    this.clients.set(id, { id, reply, showId, ownerId });
     return id;
   }
 
@@ -79,6 +81,15 @@ export class EventHub {
     for (const [id, c] of this.clients) {
       if (event !== "shows" && from && from !== c.showId) continue;
       try {
+        if (event === "shows" && Array.isArray(data)) {
+          // The switcher's list, cut to this console's own shows. Rows older
+          // than ownership have no owner and are everyone's.
+          const mine = (data as { ownerAccountId?: string | null }[]).filter(
+            (s) => s.ownerAccountId == null || s.ownerAccountId === c.ownerId,
+          );
+          c.reply.raw.write(`event: shows\ndata: ${JSON.stringify(mine)}\n\n`);
+          continue;
+        }
         c.reply.raw.write(frame);
       } catch {
         this.clients.delete(id);

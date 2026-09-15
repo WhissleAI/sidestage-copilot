@@ -255,6 +255,10 @@ export class Preparer {
 
     // ── the agent ──────────────────────────────────────────────────────────
     let agentId: string | null = null;
+    // A re-prepare used to mint a second agent and forget the first; with a
+    // fifty-agent workspace cap that is a leak with a deadline.
+    const previous = await this.get(input.eventId).catch(() => null);
+    if (previous?.agentId) await deleteStreamAgent(previous.agentId).catch(() => undefined);
     if (!config.whissle.apiKey) {
       warnings.push("no Whissle credentials — no agent was created");
     } else {

@@ -14,7 +14,10 @@
 import type { ChatIntent, SpeechAct } from "../domain/types.js";
 
 const CUES: [ChatIntent, RegExp][] = [
-  ["discount_request", /\b(discount\w*|deal|cheap\w*|lower|lowest|can (?:you|u) do|would (?:you|u) take|take \$?\d|negotiat\w*|obo|bundle|best (?:price|offer)|offer\w*)\b/i],
+  // "10% off", "$20 off", "will you take less", "any deals", "price drop" were
+  // all missed, so four buyers asking for a discount never reached the three
+  // it takes to propose a markdown (measured 2026-09-15).
+  ["discount_request", /\b(discount\w*|deals?|cheap\w*|lower\w*|lowest|can (?:you|u) do|(?:would|will|could) (?:you|u) take|take (?:less|\$?\d)|\$?\d+\s*%?\s*off|percent off|price drop|negotiat\w*|obo|bundle|best (?:price|offer)|offer\w*)\b/i],
   ["price_question",   /\b(price|prices|cost|costs|how much|howmuch|asking|going for|what.?s it at)\b/i],
   ["availability",     /\b(available|avail|still (?:there|up|have|got)|left|in stock|instock|sold|gone|any more|anymore|last one|claim\w*|\bmine\b)\b/i],
   ["sizing",           /\b(size|sizes|sizing|fit|fits|run big|run small|runs|true to size|tts|half size|what size)\b/i],

@@ -135,7 +135,7 @@ export async function checkReadiness(
     detail: catalog.policies.length
       ? `${catalog.policies.length} clauses — shipping, returns, authenticity, discount floor`
       : "none — every shipping or returns question will abstain",
-    severity: "blocker",
+    severity: "warning", // a prepared show ships no clauses; it abstains on policy questions rather than not run
   });
   // Comparables come from eBay now — completed sales where they exist, active
   // asking prices otherwise — fetched in the background per lot. The seeded

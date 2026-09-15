@@ -1,7 +1,7 @@
 // The action executor — propose, approve, commit, roll back.
 //
 // The commit is the interesting part, because it spans two systems that can fail
-// independently: the marketplace (remote, slow, flaky) and our SQLite mirror
+// independently: the marketplace (remote, slow, flaky) and our Postgres mirror
 // (local, fast, durable). The order below is chosen so that every failure has a
 // defined outcome and none of them leaves the seller lied to:
 //
@@ -12,9 +12,11 @@
 //   3. apply — the only step that mutates remote state. On failure: cancel the
 //      reservation, mark the action failed, audit it. Nothing else moved.
 //   4. record locally — mutate our listing AND write the idempotency ledger row
-//      in ONE SQLite transaction. If this throws, we have a remote write with no
-//      local record, which is the genuinely dangerous state, so we immediately
-//      COMPENSATE the remote write and report failure.
+//      in ONE Postgres transaction. If this throws, we have a remote write with
+//      no local record, which is the genuinely dangerous state, so we
+//      immediately COMPENSATE the remote write and report failure — and if the
+//      compensation itself fails, the action is failed with a message that
+//      names the listing, never reported as handled.
 //   5. confirm — release the reservation once the result is durable locally.
 //
 // Rollback is a first-class operation, not a retry: it compensates remotely from
@@ -226,7 +228,7 @@ export class ActionExecutor {
   }
 
   /** Approve and commit. See the protocol note at the top of this file. */
-  async approve(id: string, actor: "seller" | "copilot" = "seller"): Promise<ActionProposal> {
+  async approve(id: string, actor: string = "seller"): Promise<ActionProposal> {
     let action = await this.store.get(id);
     if (!action) throw new Error(`action ${id} not found`);
     if (action.status === "committed") return action;
@@ -290,7 +292,17 @@ export class ActionExecutor {
       // Remote moved, local did not. Undo the remote write rather than leave the
       // two out of step — a silent divergence here is how a seller ends up
       // selling at a price their dashboard never showed.
-      await this.adapter.compensate(reservation, this.beforeRemote(action)).catch(() => {});
+      // If the compensation itself fails the two ARE out of step, and that is
+      // the one state this file must never describe as handled.
+      try {
+        await this.adapter.compensate(reservation, this.beforeRemote(action));
+      } catch (c) {
+        console.warn(`  actions: compensation FAILED for ${action.id} — ${(c as Error).message}`);
+        return this.fail(
+          action,
+          `local commit failed AND the remote write could not be undone — the marketplace may now differ from this catalog; check listing ${action.listingId} on eBay: ${(c as Error).message}`,
+        );
+      }
       return this.fail(action, `local commit failed, remote write compensated: ${(e as Error).message}`);
     }
 
@@ -310,11 +322,20 @@ export class ActionExecutor {
   }
 
   /** Compensating write, from the snapshot captured at preflight. */
-  async rollback(id: string, actor: "seller" | "system" = "seller"): Promise<ActionProposal> {
+  async rollback(id: string, actor: string = "seller"): Promise<ActionProposal> {
     const action = await this.store.get(id);
     if (!action) throw new Error(`action ${id} not found`);
     if (action.status !== "committed") {
       return this.fail(action, `only a committed action can be rolled back (this one is ${action.status})`);
+    }
+    // The undo window is a promise to the seller, not decoration: past it, a
+    // rollback is a new decision (a fresh markdown, a fresh stock fix), not an
+    // undo, and it should be proposed as one.
+    if (action.undoableUntil && Date.now() > Date.parse(action.undoableUntil)) {
+      return this.fail(
+        action,
+        `the undo window closed at ${new Date(action.undoableUntil).toLocaleTimeString()} — propose a new action instead`,
+      );
     }
 
     const current = await this.repo.listing(action.listingId);

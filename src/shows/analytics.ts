@@ -104,7 +104,7 @@ function median(xs: number[]): number {
   return s.length % 2 ? s[mid]! : Math.round((s[mid - 1]! + s[mid]!) / 2);
 }
 
-export async function analyticsOverview(d: Pool, days: number): Promise<AnalyticsOverview> {
+export async function analyticsOverview(d: Pool, days: number, ownerId: string | null = null): Promise<AnalyticsOverview> {
   const to = new Date();
   const from = new Date(to.getTime() - days * 86_400_000);
 
@@ -114,8 +114,9 @@ export async function analyticsOverview(d: Pool, days: number): Promise<Analytic
     `SELECT s.id, s.title, s.started_at, s.status, r.report
        FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
       WHERE s.started_at::timestamptz >= $1 AND s.status = 'ended'
+        AND (s.owner_account_id IS NULL OR $2::text IS NULL OR s.owner_account_id = $2)
       ORDER BY s.started_at DESC`,
-    [from.toISOString()],
+    [from.toISOString(), ownerId],
   );
 
   const reported = rows.filter((r): r is typeof r & { report: ShowReport } => r.report != null);
@@ -141,8 +142,9 @@ export async function analyticsOverview(d: Pool, days: number): Promise<Analytic
             count(*) FILTER (WHERE p.status IN ('sent','auto_sent'))::int AS sent
        FROM reply_proposals p JOIN shows s ON s.id = p.show_id
       WHERE s.started_at::timestamptz >= $1 AND s.status = 'ended'
+        AND (s.owner_account_id IS NULL OR $2::text IS NULL OR s.owner_account_id = $2)
       GROUP BY p.intent ORDER BY asked DESC`,
-    [from.toISOString()],
+    [from.toISOString(), ownerId],
   );
   const byIntent: AnalyticsOverview["byIntent"] = intents.rows.map((r) => {
     const intent = r.intent ?? "other";
@@ -162,10 +164,10 @@ export async function analyticsOverview(d: Pool, days: number): Promise<Analytic
   const blocked = sum(reported, (r) => r.report.safety.blocked);
   const withGmv = reported.filter((r) => r.report.prd?.gmv);
   const decision = reported
-    .map((r) => r.report.prd?.operatorLoad.medianDecisionMs)
+    .map((r) => r.report.prd?.operatorLoad?.medianDecisionMs)
     .filter((x): x is number => typeof x === "number");
   const edits = reported
-    .map((r) => r.report.prd?.trust.editRate)
+    .map((r) => r.report.prd?.trust?.editRate)
     .filter((x): x is number => typeof x === "number");
 
   return {
@@ -198,13 +200,13 @@ export async function analyticsOverview(d: Pool, days: number): Promise<Analytic
       flaggedWrong: sum(reported, (r) => r.report.safety.flaggedWrong ?? 0),
       byGuard,
       blockRate: answered + blocked ? blocked / (answered + blocked) : 0,
-      chainsIntact: reported.filter((r) => r.report.safety.auditChain.ok).length,
+      chainsIntact: reported.filter((r) => (r.report.safety?.auditChain?.ok ?? false)).length,
     },
     actions: {
-      proposed: sum(reported, (r) => r.report.actions.proposed),
-      committed: sum(reported, (r) => r.report.actions.committed),
-      rolledBack: sum(reported, (r) => r.report.actions.rolledBack),
-      failed: sum(reported, (r) => r.report.actions.failed),
+      proposed: sum(reported, (r) => (r.report.actions?.proposed ?? 0)),
+      committed: sum(reported, (r) => (r.report.actions?.committed ?? 0)),
+      rolledBack: sum(reported, (r) => (r.report.actions?.rolledBack ?? 0)),
+      failed: sum(reported, (r) => (r.report.actions?.failed ?? 0)),
     },
     gmv: {
       grossCents: sum(withGmv, (r) => r.report.prd!.gmv.grossCents),

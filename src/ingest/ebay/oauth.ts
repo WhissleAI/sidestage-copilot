@@ -21,6 +21,7 @@
 // than chosen here — which is why `EBAY_RUNAME` is configuration and its absence
 // is reported as a precise instruction rather than a generic failure.
 
+import { openToken, sealToken } from "./seal.js";
 import type { Pool } from "../../db/pg.js";
 import { config } from "../../config.js";
 import { EbayError } from "./client.js";
@@ -51,6 +52,8 @@ export const USER_SCOPES = [
 
 export interface EbayConnection {
   env: "sandbox" | "production";
+  /** The member's eBay username — the proof that a show is theirs. */
+  ebayUsername: string | null;
   ebayUserId: string | null;
   connectedAt: string;
   /** What eBay actually granted. Can be narrower than USER_SCOPES, and that
@@ -169,8 +172,8 @@ export class EbayOAuth {
          ebay_user_id = COALESCE(EXCLUDED.ebay_user_id, ebay_accounts.ebay_user_id),
          ebay_username = COALESCE(EXCLUDED.ebay_username, ebay_accounts.ebay_username)`,
       [
-        row.account_id, row.env, body.access_token,
-        String(body.expires_in ?? 7200), body.refresh_token,
+        row.account_id, row.env, sealToken(body.access_token),
+        String(body.expires_in ?? 7200), sealToken(body.refresh_token),
         String(body.refresh_token_expires_in ?? 47304000), scopes.join(" "),
         who?.userId ?? null, who?.username ?? null,
       ],
@@ -179,6 +182,7 @@ export class EbayOAuth {
     return {
       env: row.env as "sandbox" | "production",
       ebayUserId: who?.userId ?? null,
+      ebayUsername: who?.username ?? null,
       connectedAt: new Date().toISOString(),
       scopes,
       valid: true,
@@ -207,7 +211,7 @@ export class EbayOAuth {
 
     // A minute of headroom: a token that expires mid-request is a failed write
     // that looks like a permissions problem.
-    if (new Date(row.access_expires).getTime() - 60_000 > Date.now()) return row.access_token;
+    if (new Date(row.access_expires).getTime() - 60_000 > Date.now()) return openToken(row.access_token);
 
     if (row.refresh_expires && new Date(row.refresh_expires).getTime() < Date.now()) {
       throw new EbayError("this eBay connection has expired — reconnect to act again", 401, true);
@@ -215,14 +219,14 @@ export class EbayOAuth {
 
     const body = await this.token({
       grant_type: "refresh_token",
-      refresh_token: row.refresh_token,
+      refresh_token: openToken(row.refresh_token) ?? "",
       scope: USER_SCOPES.join(" "),
     });
     await this.d.query(
       `UPDATE ebay_accounts
           SET access_token = $3, access_expires = now() + ($4 || ' seconds')::interval
         WHERE account_id = $1 AND env = $2`,
-      [accountId, this.env, body.access_token, String(body.expires_in ?? 7200)],
+      [accountId, this.env, sealToken(body.access_token), String(body.expires_in ?? 7200)],
     );
     return body.access_token ?? null;
   }
@@ -233,7 +237,7 @@ export class EbayOAuth {
         env: string; ebay_user_id: string | null; connected_at: string;
         scopes: string; refresh_expires: string | null;
       }>(
-        `SELECT env, ebay_user_id, connected_at, scopes, refresh_expires
+        `SELECT env, ebay_user_id, ebay_username, connected_at, scopes, refresh_expires
            FROM ebay_accounts WHERE account_id = $1 AND env = $2`,
         [accountId, this.env],
       )
@@ -242,6 +246,8 @@ export class EbayOAuth {
     return {
       env: row.env as "sandbox" | "production",
       ebayUserId: row.ebay_user_id,
+      /** The member's eBay username — the proof that a show is theirs. */
+      ebayUsername: (row as { ebay_username?: string | null }).ebay_username ?? null,
       connectedAt: row.connected_at,
       scopes: row.scopes.split(" ").filter(Boolean),
       valid: !row.refresh_expires || new Date(row.refresh_expires).getTime() > Date.now(),

@@ -39,10 +39,11 @@ import { policy, DEFAULT_POLICY } from "../guardrails/policy.js";
 import { WhissleSessions } from "../llm/sessions.js";
 import { SessionSignals } from "../shows/signals.js";
 import { showRecord } from "../shows/record.js";
-import { challengeResponse, honourDeletion, parseNotice } from "../ingest/ebay/deletion.js";
+import { challengeResponse, honourDeletion, parseNotice, verifyNotification } from "../ingest/ebay/deletion.js";
 import { createReadStream, existsSync } from "node:fs";
 import { db as pgPool } from "../db/pg.js";
 import { config } from "../config.js";
+import { SendRefused } from "../pipeline/pipeline.js";
 import type { AppContext } from "./context.js";
 
 /** A keyframe is ~40-120 KB of base64 at the size we send. This is the ceiling
@@ -92,7 +93,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   const { hub, shows, kb } = ctx;
 
   /** Resolve the target show, or 404 with something actionable. */
-  const rt = (showId?: string) => shows.get(showId);
+  // No showId means "my show": the caller's newest live one. It used to mean
+  // the process's single active show, which on a host with several sellers
+  // was somebody else's.
+  const rt = (showId?: string | null, req?: object) => {
+    if (showId) return shows.get(showId);
+    const a = req ? actorOf(req) : null;
+    return shows.get(shows.activeFor(a?.id));
+  };
 
   // ── who is asking ─────────────────────────────────────────────────────────
   //
@@ -126,6 +134,50 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   const actorOf = (req: object): Account | null => actors.get(req) ?? null;
+
+  // ── whose show ────────────────────────────────────────────────────────────
+  //
+  // A show belongs to the account that attached it. Any route that names a
+  // show — path, query or body — answers 404 to anyone else, and 404 rather
+  // than 403 because another seller's show should not even be confirmed to
+  // exist. Rows older than ownership have no owner and stay visible; every
+  // show attached since has exactly one.
+  const ownerOf = async (showId: string): Promise<string | null | undefined> => {
+    if (shows.has(showId)) return shows.get(showId).ownerAccountId;
+    const r = await pgPool().query<{ owner_account_id: string | null }>(
+      "SELECT owner_account_id FROM shows WHERE id = $1", [showId],
+    );
+    return r.rows[0] ? r.rows[0].owner_account_id : undefined;
+  };
+  app.addHook("preHandler", async (req, reply) => {
+    const p = (req.params ?? {}) as { showId?: string };
+    const q = (req.query ?? {}) as { showId?: string };
+    const b = (req.body ?? {}) as { showId?: unknown };
+    const showId = p.showId || q.showId || (typeof b.showId === "string" ? b.showId : undefined);
+    if (!showId) return;
+    const a = actorOf(req as object);
+    if (!a) return; // onRequest already refused a signed-out caller on a closed path
+    const owner = await ownerOf(showId);
+    if (owner === undefined) return; // no such show: the handler says so its own way
+    if (owner !== null && owner !== a.id) return reply.code(404).send({ error: `no such show ${showId}` });
+  });
+
+  // Every mutation needs a signed-in seller. There is no guest kind any more,
+  // so this is belt-and-braces over onRequest — but a route added later that
+  // forgets its own check is still not an open write.
+  app.addHook("preHandler", async (req, reply) => {
+    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
+    const path = req.url.split("?")[0]!;
+    if (OPEN.some((re) => re.test(path))) return;
+    if (!canWrite(actorOf(req as object))) return reply.code(403).send({ error: "sign in with a seller account to do that" });
+  });
+
+  /** The audit's answer to "who did that": the account's handle, never a
+   *  literal "seller". */
+  const who = (req: object): string => {
+    const a = actorOf(req);
+    return a ? `seller:${a.handle}` : "seller";
+  };
 
   /** Refuse a write from a guest — or from nobody at all. */
   const mustWrite = (
@@ -206,7 +258,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Querystring: { showId?: string } }>("/api/show/fit", async (req, reply) => {
     let target;
     try {
-      target = rt(req.query.showId);
+      target = rt(req.query.showId, req as object);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
     }
@@ -231,7 +283,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   /** The PRD's success metrics for a show, live. */
   app.get<{ Querystring: { showId?: string } }>("/api/show/prd", async (req, reply) => {
     try {
-      const target = rt(req.query.showId);
+      const target = rt(req.query.showId, req as object);
       return await prdMetrics(pgPool(), target.showId);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
@@ -243,7 +295,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    *  exactly the guarantee the ladder exists to make. */
   app.get<{ Querystring: { showId?: string } }>("/api/autonomy/readiness", async (req, reply) => {
     try {
-      const target = rt(req.query.showId);
+      const target = rt(req.query.showId, req as object);
       const show = await target.show();
       return await promotionReadiness(pgPool(), show.autonomyLevel, actorOf(req as object)?.id ?? null);
     } catch (e) {
@@ -259,18 +311,18 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Querystring: { days?: string } }>("/api/analytics/overview", async (req) => {
     const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
     const [overview, readiness] = await Promise.all([
-      analyticsOverview(pgPool(), days),
-      promotionReadiness(pgPool(), "L1_SUGGEST", null).catch(() => null),
+      analyticsOverview(pgPool(), days, actorOf(req as object)?.id ?? null),
+      promotionReadiness(pgPool(), "L1_SUGGEST", actorOf(req as object)?.id ?? null).catch(() => null),
     ]);
-    // Which show is on air, if any, so the page can offer its live view.
-    const live = shows.active;
+    // Which of the caller's shows is on air, if any, so the page can offer its live view.
+    const live = shows.activeFor(actorOf(req as object)?.id) ?? null;
     return { ...overview, liveShowId: live, readiness };
   });
 
   app.get<{ Querystring: { showId?: string; days?: string } }>("/api/analytics", async (req, reply) => {
     let target;
     try {
-      target = rt(req.query.showId);
+      target = rt(req.query.showId, req as object);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
     }
@@ -432,21 +484,21 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     // an idle console holds a real stream: it gets the heartbeat, it gets
     // `shows` (which every client receives), and the moment a show is attached
     // it hears about it on the connection it already has.
-    const id = hub.add(reply, "");
+    const id = hub.add(reply, "", actorOf(req as object)?.id ?? null);
     req.raw.on("close", () => hub.remove(id));
 
     try {
-      const target = rt(req.query.showId);
+      const target = rt(req.query.showId, req as object);
       hub.retarget(id, target.showId);
       // Both awaited BEFORE writing. An unresolved promise serialises to `{}`,
       // which would hand the console an empty hello it happily rendered as a
       // show with no listings, no proposals and no audit.
-      const [snapshot, list] = await Promise.all([target.snapshot(), shows.list()]);
+      const [snapshot, list] = await Promise.all([target.snapshot(), shows.list(actorOf(req as object)?.id)]);
       reply.raw.write(`event: hello\ndata: ${JSON.stringify({ showId: target.showId, ...snapshot })}\n\n`);
       reply.raw.write(`event: shows\ndata: ${JSON.stringify(list)}\n\n`);
     } catch (e) {
       reply.raw.write(`event: stream_error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`);
-      reply.raw.write(`event: shows\ndata: ${JSON.stringify(await shows.list().catch(() => []))}\n\n`);
+      reply.raw.write(`event: shows\ndata: ${JSON.stringify(await shows.list(actorOf(req as object)?.id).catch(() => []))}\n\n`);
     }
   });
 
@@ -501,7 +553,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   /** What this show has spent against the cap. The console polls it beside the
    *  cost rail; the `budget` stream event carries the moment it trips. */
   app.get<{ Querystring: { showId?: string } }>("/api/budget", async (req) => {
-    const target = rt(req.query.showId);
+    const target = rt(req.query.showId, req as object);
     return { showId: target.showId, ...budgetState(target.showId) };
   });
 
@@ -514,6 +566,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * cost. One wallet read at attach is the price of the number meaning what it
    * says.
    */
+  // Shows resumed at boot never had their spend anchored, so the per-show cap
+  // could not trip on them. Anchor every live show once the app is up.
+  setTimeout(() => {
+    void (async () => {
+      for (const s of await shows.list().catch(() => [])) await anchorSpend(s.showId).catch(() => {});
+    })();
+  }, 5_000).unref?.();
   const anchorSpend = async (showId: string): Promise<void> => {
     const w = await billing.wallet();
     if (w.ok) spendWindow.open(showId, w.value.balanceUsd);
@@ -628,9 +687,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
               r.generated_at, r.report
          FROM shows s
          LEFT JOIN show_reports r ON r.show_id = s.id
+        WHERE s.owner_account_id IS NULL OR s.owner_account_id = $2
         ORDER BY COALESCE(r.generated_at, s.started_at::timestamptz) DESC
         LIMIT $1`,
-      [limit],
+      [limit, actorOf(req as object)?.id ?? null],
     );
     return r.rows.map((x) => ({
       showId: x.show_id,
@@ -675,9 +735,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         `SELECT c.show_id, s.title, c.opened_at, c.closed_at, c.duration_min, c.calls, c.failures,
                 c.context_chars, c.by_door, c.wallet_delta_usd, c.answered
            FROM show_costs c JOIN shows s ON s.id = c.show_id
-          WHERE c.closed_at >= $1
+          WHERE c.closed_at >= $1 AND (s.owner_account_id IS NULL OR s.owner_account_id = $2)
           ORDER BY c.closed_at DESC`,
-        [since],
+        [since, actorOf(req as object)?.id ?? null],
       ),
       billingSnapshot(7),
     ]);
@@ -745,10 +805,30 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * told an operator none of that, so the Catalog page could not say which
    * show a lineup belonged to or link back to it.
    */
-  app.get("/api/catalogs", async () => {
-    const prepared = await preparer.list().catch(() => []);
+  /** Which catalogs this account may see: the seeds, its own imports, and the
+   *  shows it prepared. Another seller's preparation is not a thing it can
+   *  even list. */
+  const visibleCatalogs = async (req: object) => {
+    const a = actorOf(req);
+    const prepared = await preparer.list(a?.id ?? null).catch(() => []);
+    const mine = new Set(prepared.map((p) => p.catalogId).filter(Boolean) as string[]);
+    return {
+      prepared,
+      list: listCatalogs().filter((c) => {
+        const eventShaped = /^ebay-[A-Za-z0-9]{16}$/.test(c.id);
+        if (mine.has(c.id)) return true;
+        if (eventShaped) return false; // somebody else's preparation
+        if (c.id.startsWith("ebay-")) return a ? c.id === `ebay-${a.handle}` : false; // imports are per account
+        return true; // seeds
+      }),
+    };
+  };
+  const catalogFor = async (req: object, id: string) => (await visibleCatalogs(req)).list.find((c) => c.id === id) ? getCatalog(id) : null;
+
+  app.get("/api/catalogs", async (req) => {
+    const { prepared, list } = await visibleCatalogs(req as object);
     const byCatalog = new Map(prepared.filter((p) => p.catalogId).map((p) => [p.catalogId as string, p]));
-    return listCatalogs().map((c) => {
+    return list.map((c) => {
       const p = byCatalog.get(c.id);
       // An event id is sixteen alphanumerics; a seller handle is not. A
       // catalog shaped like a preparation whose row is gone (dropped, or made
@@ -775,7 +855,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Params: { id: string }; Querystring: { showId?: string } }>(
     "/api/catalogs/:id/readiness",
     async (req, reply) => {
-      const cat = getCatalog(req.params.id);
+      const cat = await catalogFor(req as object, req.params.id);
       if (!cat) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
       // The show's own agent outranks whatever the catalog file remembers.
       let agentId: string | null = null;
@@ -792,8 +872,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const last = await pgPool().query<{ show_id: string; title: string; report: ShowReport }>(
         `SELECT r.show_id, s.title, r.report FROM show_reports r JOIN shows s ON s.id = r.show_id
           WHERE s.catalog_id = $1 AND s.status = 'ended' AND ($2::text IS NULL OR s.id <> $2)
+            AND (s.owner_account_id IS NULL OR s.owner_account_id = $3)
           ORDER BY r.generated_at DESC LIMIT 1`,
-        [cat.id, req.query.showId ?? null],
+        [cat.id, req.query.showId ?? null, actorOf(req as object)?.id ?? null],
       ).catch(() => null);
       const row = last?.rows[0];
       readiness.carried = row?.report?.gaps?.unanswered?.length
@@ -888,7 +969,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     // next attach — the seller answered the question thirty seconds ago.
     let appliedLive = false;
     try {
-      const live = shows.get(req.body?.showId ?? null);
+      const live = rt(req.body?.showId ?? null, req as object);
       if (live) {
         await live.repo.insertQa({ id: row.id, question: row.question, answer: row.answer, tags: row.tags ?? "" });
         await live.refreshIndex();
@@ -911,7 +992,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Params: { id: string }; Querystring: { warm?: string } }>(
     "/api/catalogs/:id/market",
     async (req, reply) => {
-      const cat = getCatalog(req.params.id);
+      const cat = await catalogFor(req as object, req.params.id);
       if (!cat) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
       if (req.query.warm === "1") void marketIndex.warm(cat.items).catch(() => {});
       return marketIndex.read(cat.id, cat.items);
@@ -951,7 +1032,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   // ── shows ─────────────────────────────────────────────────────────────────
-  app.get("/api/shows", async () => shows.list());
+  app.get("/api/shows", async (req) => shows.list(actorOf(req as object)?.id));
 
   /**
    * Best-effort list of eBay Live shows currently on air.
@@ -1021,13 +1102,43 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     });
   });
 
-  app.post("/api/ebay/account-deletion", async (req, reply) => {
-    const notice = parseNotice(req.body);
-    // Anything that is not a deletion notice is acknowledged and ignored: eBay
-    // retries on non-2xx, and there is nothing to retry.
-    if (!notice) return reply.code(200).send({ ok: true, ignored: true });
-    const removed = await honourDeletion(pgPool(), notice).catch(() => 0);
-    return reply.code(200).send({ ok: true, removed });
+  // Registered in its own scope so this one route keeps the RAW body: the
+  // signature is over the bytes eBay sent, not over our re-serialisation.
+  await app.register(async (sub) => {
+    // The inherited JSON parser has already consumed the body by the time a
+    // handler runs; this scope replaces it with one that keeps the bytes.
+    sub.removeContentTypeParser("application/json");
+    sub.addContentTypeParser("application/json", { parseAs: "string" }, (rq, body, done) => {
+      (rq as unknown as { rawBody: string }).rawBody = String(body);
+      try {
+        done(null, body ? JSON.parse(String(body)) : {});
+      } catch (e) {
+        done(e as Error, undefined);
+      }
+    });
+    sub.post("/api/ebay/account-deletion", async (req, reply) => {
+      const notice = parseNotice(req.body);
+      // Anything that is not a deletion notice is acknowledged and ignored: eBay
+      // retries on non-2xx, and there is nothing to retry.
+      if (!notice) return reply.code(200).send({ ok: true, ignored: true });
+      // Acknowledge always; honour only what eBay signed. A forged notice was
+      // a way to disconnect any seller by username, and eBay's own retry
+      // semantics mean a 2xx is still the right answer to a bad one.
+      const raw = (req as unknown as { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
+      const verdict = await verifyNotification(raw, req.headers["x-ebay-signature"] as string | undefined, async (kid) => {
+        const token = await ebay.appToken();
+        const r = await fetch(`${config.ebay.env === "production" ? "https://api.ebay.com" : "https://api.sandbox.ebay.com"}/commerce/notification/v1/public_key/${encodeURIComponent(kid)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        return r.ok ? ((await r.json()) as { key: string; digest?: string }) : null;
+      });
+      if (!verdict.ok) {
+        console.warn(`  ebay: deletion notice ${notice.notificationId} NOT honoured — ${verdict.reason}`);
+        return reply.code(200).send({ ok: true, honoured: false, reason: verdict.reason });
+      }
+      const removed = await honourDeletion(pgPool(), notice).catch(() => 0);
+      return reply.code(200).send({ ok: true, honoured: true, removed });
+    });
   });
 
   app.post("/api/ebay/connect", async (req, reply) => {
@@ -1212,6 +1323,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       const actor = mustWrite(req as object, reply, "drop a prepared show");
       if (!actor) return reply;
+      const mine = (await preparer.list(actor.id)).some((p) => p.eventId === req.params.eventId);
+      if (!mine) return reply.code(404).send({ error: `no prepared show ${req.params.eventId}` });
       return preparer.drop(req.params.eventId);
     },
   );
@@ -1237,8 +1350,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       req.query.refresh === "1"
         ? discoverLiveShows({ limit: 24 })
         : Promise.resolve(cachedDiscovery()),
-      preparer.list(),
-      shows.list(),
+      preparer.list(actorOf(req as object)?.id ?? null),
+      shows.list(actorOf(req as object)?.id),
     ]);
     return {
       live: discovery.shows,
@@ -1307,6 +1420,18 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Body: { eventId?: string; url?: string; title?: string; host?: string; catalogId?: string } }>(
     "/api/shows/attach",
     async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "attach a show");
+      if (!actor) return reply;
+      // Layer B is a process-wide policy (see settings/store.ts): arm it with
+      // THIS seller's settings as their show starts, so the guards it runs
+      // under are theirs. Known limit: with two sellers live at once the last
+      // to attach wins; per-show policy is the next step, not this one.
+      try {
+        const mine = await settings.load(actor.id);
+        settings.activate(merge(mine.overrides));
+      } catch (e) {
+        console.warn(`  settings: could not arm ${actor.handle}'s guardrails — ${(e as Error).message}`);
+      }
       const input = (req.body?.eventId || req.body?.url || "").trim();
       if (!input) return reply.code(400).send({ error: "eventId or url is required" });
 
@@ -1338,7 +1463,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (catalogId && !catalog) return reply.code(400).send({ error: `unknown catalog "${catalogId}"` });
 
       try {
+        // Is this the seller's OWN show? The only proof we accept is the eBay
+        // username behind their consent matching the show's seller handle.
+        // Everything else is watched read-only, and preflight refuses writes.
+        const sellerHandle = (prepared?.sellerHandle || seen?.sellerHandle || req.body?.host || "").replace(/^@/, "").toLowerCase();
+        const connection = await ebayAuth.connection(actor.id).catch(() => null);
+        const own = Boolean(sellerHandle && connection?.ebayUsername && connection.ebayUsername.toLowerCase() === sellerHandle);
         const target = await shows.attachEbayLive(input, {
+          ownerAccountId: actor.id,
+          readOnly: !own,
           title: req.body?.title || prepared?.title || seen?.title,
           host:
             req.body?.host || prepared?.host || seen?.host || prepared?.sellerHandle || seen?.sellerHandle || undefined,
@@ -1457,7 +1590,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     try {
       kb.cancel(req.params.showId);
       const report = await shows.detach(req.params.showId);
-      return { ok: true, report, shows: await shows.list() };
+      return { ok: true, report, shows: await shows.list(actorOf(req as object)?.id) };
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }
@@ -1771,7 +1904,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return rt(req.query.showId).pipeline.send(req.params.id, req.body?.text);
+        try {
+          return await rt(req.query.showId, req as object).pipeline.send(req.params.id, req.body?.text, who(req as object));
+        } catch (e) {
+          // A refusal is not a failure: the guards did their job at the last
+          // moment they could. 409, with the reason, so the console can say it.
+          if (e instanceof SendRefused) return reply.code(409).send({ error: (e as Error).message, refused: true });
+          throw e;
+        }
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -1783,7 +1923,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return rt(req.query.showId).pipeline.dismiss(req.params.id);
+        return rt(req.query.showId, req as object).pipeline.dismiss(req.params.id);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -1795,7 +1935,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return await rt(req.query.showId).pipeline.regenerate(req.params.id);
+        return await rt(req.query.showId, req as object).pipeline.regenerate(req.params.id);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -1808,7 +1948,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return await rt(req.query.showId).executor.approve(req.params.id, "seller");
+        return await rt(req.query.showId, req as object).executor.approve(req.params.id, who(req as object));
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -1820,7 +1960,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return rt(req.query.showId).executor.reject(req.params.id);
+        return rt(req.query.showId, req as object).executor.reject(req.params.id);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -1832,7 +1972,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return await rt(req.query.showId).executor.rollback(req.params.id, "seller");
+        return await rt(req.query.showId, req as object).executor.rollback(req.params.id, who(req as object));
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -1852,7 +1992,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         return reply.code(400).send({ error: `level must be one of ${LADDER.join(", ")}` });
       }
       try {
-        const target = rt(req.query.showId);
+        const target = rt(req.query.showId, req as object);
         const show = await target.setAutonomy(level);
         const [entry] = await target.audit.list(1);
         if (entry) hub.emit("audit", { showId: target.showId, ...entry });
@@ -1882,7 +2022,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!actor) return;
       const reason = (req.body?.reason || "wrong fact").trim().slice(0, 80);
       try {
-        const target = rt(req.query.showId);
+        const target = rt(req.query.showId, req as object);
         const r = await pgPool().query<{ question: string; sent_text: string | null; draft: string }>(
           `UPDATE reply_proposals
               SET flagged_wrong = TRUE, flag_reason = $3, flagged_at = now()
@@ -1929,7 +2069,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const title = (req.body?.title || "").trim().slice(0, 200);
       if (title.length < 3) return reply.code(400).send({ error: "title is required" });
       try {
-        const target = rt(req.query.showId);
+        const target = rt(req.query.showId, req as object);
         const before = (await target.repo.listings()).find((l) => l.id === req.params.listingId);
         if (!before) return reply.code(404).send({ error: `no listing ${req.params.listingId}` });
 
@@ -1969,7 +2109,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const question = (req.body?.question || "").trim();
       if (!question) return reply.code(400).send({ error: "question is required" });
       try {
-        const target = rt(req.query.showId);
+        const target = rt(req.query.showId, req as object);
         return await target.pipeline.dryRun(question);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
@@ -1990,7 +2130,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        const target = rt(req.query.showId);
+        const target = rt(req.query.showId, req as object);
         // Read from the persisted record rather than memory: the operator may
         // be answering something that scrolled past a while ago.
         const row = (
@@ -2015,7 +2155,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const text = (req.body?.text || "").trim();
       if (!text) return reply.code(400).send({ error: "text is required" });
       try {
-        return rt(req.query.showId).pipeline.ingest({ author: (req.body?.author || "you").trim(), text });
+        return rt(req.query.showId, req as object).pipeline.ingest({ author: (req.body?.author || "you").trim(), text });
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -2029,7 +2169,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const query = (req.body?.query || "").trim();
       if (!query) return reply.code(400).send({ error: "query is required" });
       try {
-        const target = rt(req.query.showId);
+        const target = rt(req.query.showId, req as object);
         return target.research.run(query, req.body?.listingId ?? (await target.show()).pinnedListingId);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });

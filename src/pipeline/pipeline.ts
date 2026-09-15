@@ -31,6 +31,7 @@ import { LlmError } from "../llm/types.js";
 import { Composer } from "../compose/composer.js";
 import { Retriever } from "../retrieval/retriever.js";
 import type { ResearchService } from "../research/research.js";
+import type { GuardInput } from "../guardrails/types.js";
 import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
 import { admit, classify, classifySpeechAct, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
@@ -69,12 +70,18 @@ export interface PipelineDeps {
 /** Said the same way in the firehose, in the report and in the audit entry. */
 const BUDGET_REASON = "this show reached its spend cap — the copilot stopped drafting";
 
+/** The guards said no at the moment of sending. Not an error in the system. */
+export class SendRefused extends Error {}
+
 export class Pipeline {
   private composer: Composer;
   private cache = new ReplyCache();
   private latency: LatencyTracker;
   private rate: RateLimiter;
   private proposals = new Map<string, ReplyProposal>();
+  /** What each proposal was grounded in, kept so an operator's EDIT of the
+   *  draft can be guarded against the same facts before it is sent. */
+  private grounding = new Map<string, { facts: GuardInput["facts"]; slots: GuardInput["slots"]; evidenceQuality: number }>();
   /** Set when the show is torn down. A draft in flight when that happens has
    *  nowhere to land: its database is about to close, and persisting into a
    *  closed handle throws from inside a promise nobody is awaiting. */
@@ -337,6 +344,7 @@ export class Pipeline {
           policies,
         };
       };
+      this.grounding.set(proposal.id, { facts: r.facts, slots: r.slots, evidenceQuality: r.evidence[0]?.score ?? 0 });
       let chain = runChain(await guardInput(), { evidenceQuality: r.evidence[0]?.score ?? 0, abstained: r.abstain });
       timer.mark("guard");
 
@@ -443,16 +451,54 @@ export class Pipeline {
   }
 
   // ── operator commands ─────────────────────────────────────────────────────
-  send(id: string, text?: string): ReplyProposal {
+  /**
+   * Send — the last moment the guards can act, so they do.
+   *
+   * A blocked proposal cannot be sent, whatever the client asks; the console
+   * hides the button, but a keystroke or a curl is not the console. An EDITED
+   * draft is a new draft: it is re-guarded against the facts the original was
+   * grounded in and the listings as they stand now, and a block refuses the
+   * send with the reason. What was actually checked is what the audit records.
+   */
+  async send(id: string, text?: string, actor = "seller"): Promise<ReplyProposal> {
     const p = this.proposals.get(id);
     if (!p) throw new Error(`proposal ${id} not found`);
+    if (p.status === "blocked" || p.verdict === "block") {
+      const why = p.guards.filter((g) => g.verdict === "block").map((g) => `${g.guard}: ${g.reason ?? "blocked"}`).join("; ");
+      throw new SendRefused(`this reply was blocked and cannot be sent — ${why || "a guard blocked it"}`);
+    }
     const sentText = (text ?? p.draft).trim();
-    const next: ReplyProposal = { ...p, status: "sent", sentText };
+    const edited = text !== undefined && sentText !== p.draft.trim();
+    let guards = p.guards;
+    let verdict = p.verdict;
+    if (edited) {
+      const g = this.grounding.get(id);
+      const [listings, policies] = await Promise.all([this.d.repo.listings(), this.d.repo.policies()]);
+      const chain = runChain(
+        {
+          draft: { answer: sentText, claims: [], parsedOk: true, raw: sentText },
+          question: p.message.text,
+          facts: g?.facts ?? [],
+          factById: new Map((g?.facts ?? []).map((f) => [f.factId, f])),
+          currentListings: new Map(listings.map((l) => [l.id, l])),
+          slots: g?.slots ?? ({} as GuardInput["slots"]),
+          policies,
+        },
+        { evidenceQuality: g?.evidenceQuality ?? 0 },
+      );
+      if (chain.verdict === "block") {
+        const why = chain.failures.map((f) => `${f.guard}: ${f.reason}`).join("; ");
+        throw new SendRefused(`your edit was blocked — ${why}`);
+      }
+      guards = chain.guards;
+      verdict = chain.verdict;
+    }
+    const next: ReplyProposal = { ...p, status: "sent", sentText, guards, verdict };
     this.proposals.set(id, next);
     this.counters.sent++;
-    this.d.audit.append("reply_sent", "seller", `sent to ${p.message.author}`, {
-      proposalId: id, text: sentText, edited: text !== undefined && text.trim() !== p.draft.trim(),
-      verdictAtSend: p.verdict,
+    this.d.audit.append("reply_sent", actor, `sent to ${p.message.author}`, {
+      proposalId: id, text: sentText, edited,
+      verdictAtSend: verdict, guardsAtSend: guards.map((g) => `${g.guard}:${g.verdict}`),
     });
     this.d.events.onProposal(next);
     void this.emitMetrics();

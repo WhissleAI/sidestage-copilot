@@ -102,9 +102,9 @@ export async function buildContext(): Promise<AppContext> {
       try {
         const rows = await pool.query<{
           id: string; external_id: string | null; started_at: string;
-          catalog_id: string | null; agent_id: string | null;
+          catalog_id: string | null; agent_id: string | null; owner_account_id: string | null;
         }>(
-          "SELECT id, external_id, started_at, catalog_id, agent_id FROM shows WHERE status = 'live' AND source = 'ebaylive'",
+          "SELECT id, external_id, started_at, catalog_id, agent_id, owner_account_id FROM shows WHERE status = 'live' AND source = 'ebaylive'",
         );
         for (const row of rows.rows) {
           const age = Date.now() - new Date(row.started_at).getTime();
@@ -113,7 +113,7 @@ export async function buildContext(): Promise<AppContext> {
             continue;
           }
           try {
-            const rt = await shows.attachEbayLive(row.external_id);
+            const rt = await shows.attachEbayLive(row.external_id, { ownerAccountId: row.owner_account_id ?? null });
             // Back onto the agent this show OWNS, with its own corpus. Falling
             // back to the shared one would put a resumed show's lots into a
             // knowledge base other shows read.

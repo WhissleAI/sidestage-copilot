@@ -20,7 +20,9 @@ Two repositories:
 
 - Node 20+
 - **Postgres 14+** running locally. `createdb sidestage` once; the server
-  migrates and seeds the demo show on boot. Override with `DATABASE_URL`.
+  migrates on boot (`src/db/pg_migrations/`, 15 migrations, tracked in
+  `schema_migrations`). Override with `DATABASE_URL`. The test suite uses its own
+  database (`TEST_DATABASE_URL`, default `sidestage_test`), created by `scripts/ensure-test-db.mjs`.
 
 ## PRD
 
@@ -47,19 +49,19 @@ visual intelligence is sitting right there.
 **[`docs/REVIEW.md`](docs/REVIEW.md)** — an adversarial review of this system
 against the brief, written after driving it on real eBay Live shows. 16 findings
 with measured evidence, a clarity pass over the console, and a prioritised list
-of Whissle platform gaps. Read it before the code: it says where this is weak
-more precisely than the Known Limitations section below.
+of Whissle platform gaps, plus dated fix logs. Read it before the code: it says
+where this is weak more precisely than the Known Limitations section below.
 
 ## TDD
 
 **[`docs/TDD.md`](docs/TDD.md)** — streaming ingestion, catalog grounding, the two-layer
-guardrail architecture, action auditability and rollback, the latency budget with measured
-numbers, and the marketplace integration shape. Alternatives considered and rejected are
+guardrail architecture, action auditability and rollback, tenancy, the latency budget with
+measured numbers, and the marketplace integration. Alternatives considered and rejected are
 recorded per decision, as are the places the implementation diverges from this document.
 
 ## Prototype
 
-Runnable locally. There is no hosted deployment — see **Known limitations**.
+Runnable locally, and hosted — see **Deployed** below.
 
 **It runs on real eBay Live shows.** Attach to a live stream, import the seller's
 catalog, and the copilot answers real buyers grounded in real inventory while the live
@@ -67,7 +69,7 @@ lot's price moves under it:
 
 ```bash
 npm run dev                                   # server on :8790
-npm run ebay:shows                            # what is on air (best effort)
+npm run ebay:shows                            # what is on air (needs the house session, see below)
 npm run demo:ebaylive -- <eventId|showUrl>    # attach + import catalog + ask real questions
 ```
 
@@ -84,34 +86,44 @@ through `MarketplaceAdapter`; what differs is the adapter behind it.
 simulator that injects latency, apply failures and optimistic-concurrency
 conflicts so the rollback path is genuinely exercised rather than theoretical.
 
-`ebay` is the real Sell Inventory API, and arming it takes two deliberate steps:
-the seller connects their eBay account (Settings → eBay, an OAuth consent they
-complete in a browser — no key can stand in for it), and then the show is
-switched over. Connecting grants the capability; it does not arm it. Two caveats
-the adapter does not paper over: eBay exposes no version on an offer, so the
-optimistic lock is value-based (read at reserve, re-read at apply, refuse if it
-moved) rather than version-based; and ending a listing WITHDRAWS the offer
-rather than deleting it, because the undo window promises reversibility and a
-deleted offer is not reversible.
+`ebay` is the real Sell Inventory API (`src/actions/marketplace/ebay.ts`), and
+arming it takes two deliberate steps: the seller connects their eBay account
+(Settings → eBay, an OAuth consent they complete in a browser — no key can stand
+in for it), and then the show is switched over with
+`POST /api/shows/:id/write-target {"target":"ebay"}`. Connecting grants the
+capability; it does not arm it, and arming refuses without a live token for the
+show's owner. The choice is persisted on the show row, so a show that was
+writing to eBay comes back writing to eBay after a restart, never quietly to the
+mock. Two caveats the adapter does not paper over: eBay exposes no version on
+an offer, so the optimistic lock is value-based (read at reserve, re-read at
+apply, refuse if it moved) rather than version-based; and ending a listing
+WITHDRAWS the offer rather than deleting it, because the undo window promises
+reversibility and a deleted offer is not reversible. `push_listing` and
+`swap_pinned` are about what is on screen in the show, which eBay Live exposes
+no API for — on the eBay adapter they are local no-ops, recorded as such.
 
-They cannot run against a real one here for a structural reason, not an
-unfinished one: a show you do not own is monitored **read-only**, because we
-hold no seller credentials for someone else's stream. Preflight refuses every
-write on such a show. So if you attach to a live eBay show and watch the ACTIONS
-rail, you will correctly see *"0 pending · no action proposals"* — that is the
-safety boundary working, not a broken feature.
+**Read this before expecting a real markdown to land.** A show attached from an
+eBay Live link is read-only (`read_only` on the show row) unless the eBay
+username behind the seller's consent matches the show's seller handle — the one
+proof we accept that the account watching is the account selling. On anyone
+else's show preflight refuses every write with *"show is yours to edit"*,
+whatever its write target. So if you attach to a live eBay show and
+watch the ACTIONS rail, you will correctly see *"0 pending · no action
+proposals"* — that is the safety boundary working, not a broken feature. The
+consequence, stated plainly: **no action has yet committed through the eBay
+adapter on a live show.** The adapter is exercised by `test/ebay.test.ts` with an
+injected fetcher (value-based conflict, withdraw-not-delete, no-connection
+message), not by a seller's listing. REVIEW.md F-07 stays open.
 
-**To exercise writes, use the seeded demo show** (`Friday Night Grails — Ep. 42`,
-listed under "Open a show"). There the copilot owns the listings and will
-propose markdowns, stock fixes and pinned-lot swaps, each with a preflight
-checklist, an audit entry and one-keystroke undo:
+**To exercise writes, use the seeded demo show** (`Friday Night Grails — Ep. 42`).
+It is opt-in — start the server with `DEMO_SHOW=1` — because a fake show is the
+worst possible empty state. There the copilot owns the listings and will propose
+markdowns, stock fixes and pinned-lot swaps, each with a preflight checklist, an
+audit entry and one-keystroke undo:
 
 ```bash
 npm run demo:stale-price   # the failure path: a markdown lands mid-draft and PriceGuard blocks the stale quote
 ```
-
-The eBay Sell API adapter is a documented shape behind the existing
-`MarketplaceAdapter` port, not a live integration.
 
 ```bash
 # ── backend ──────────────────────────────────────────────────────────────────
@@ -122,7 +134,7 @@ cp .env.example .env          # add your WHISSLE_API_KEY (a wsk_ workspace secre
 npm run seed                  # catalog, policies, market comps, past Q&A
 npm run seed:agent            # creates the Whissle agent + pushes its guardrails,
                               # then prints the WHISSLE_AGENT_ID to put in .env
-npm run dev                   # http://localhost:8790
+DEMO_SHOW=1 npm run dev       # http://localhost:8790, with the scripted show on air
 
 # ── operator console ─────────────────────────────────────────────────────────
 git clone https://github.com/WhissleAI/live-commerce-copilot && cd live-commerce-copilot
@@ -131,31 +143,40 @@ printf 'VITE_API_BASE=http://localhost:8790\nVITE_USE_MOCKS=false\n' > .env.loca
 npm run dev                   # http://localhost:3000
 ```
 
-The backend starts a **simulated live show** immediately — scripted buyer chat at a realistic
-mix (~55% reaction, which the admission gate filters) plus a scripted host transcript feeding
-the rolling show context. Open the console and it fills with real, grounded, guarded proposals.
+With `DEMO_SHOW=1` the backend runs a **simulated live show** — scripted buyer chat at a
+realistic mix (~55% reaction, which the admission gate filters) plus a scripted host
+transcript feeding the rolling show context. Without it, nothing is watched until you attach
+a show, and the console says so rather than animating. Register a seller account on the
+landing page (or `POST /api/auth/register`), open the console and it fills with real,
+grounded, guarded proposals.
 
 **Drive the core workflow:**
 
 1. Watch a proposal card appear. Read the **provenance chips** — each is a `factId` that was
    actually retrieved — and the six **guardrail pills**.
-2. Press `Enter` to send it, or `E` to edit it first.
+2. Press `Enter` to send it, or `E` to edit it first. An edited draft is re-guarded at send
+   against the facts it was grounded in and the listings as they stand now; a block refuses the
+   send with the reason (HTTP 409).
 3. Type a question into the chat composer at the bottom left (`can you do 340`,
    `size 10 still there`, `are the pandas legit`) and watch it go through the same path.
 4. Approve the **markdown** action when it appears in the right rail, read its preflight
    checklist, then press `U` to roll it back. Open the audit log and press **Verify chain**.
-5. `Cmd+K` for product research — comps, median, and where the listing sits against it.
+5. `⌘J` for product research — comps, median, and where the listing sits against it.
+   (`⌘K` is the shell's command palette: navigation, actions, and a way to find a show.)
 
-**Everything is curl-able**, which is usually the fastest way to check a claim:
+**Everything is curl-able**, which is usually the fastest way to check a claim. Every `/api/*`
+route except the front door needs a session, so mint one first:
 
 ```bash
 curl -s localhost:8790/health
-curl -sN localhost:8790/api/stream                    # the SSE event stream
-curl -s -X POST localhost:8790/api/chat/inject \
+TOKEN=$(curl -s -X POST localhost:8790/api/auth/login -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"********"}' | jq -r .token)
+curl -sN "localhost:8790/api/stream?token=$TOKEN"       # the SSE event stream
+curl -s -X POST localhost:8790/api/chat/inject -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{"author":"mia_k","text":"whats the lowest on the chicagos?"}'
-curl -s localhost:8790/api/proposals | jq '.[-1]'     # grounding, guards, span breakdown
-curl -s localhost:8790/api/audit/verify
+curl -s localhost:8790/api/proposals -H "authorization: Bearer $TOKEN" | jq '.[-1]'   # grounding, guards, span breakdown
+curl -s localhost:8790/api/audit/verify -H "authorization: Bearer $TOKEN"
 ```
 
 ### The failure path, on demand
@@ -172,14 +193,17 @@ the repair pass re-ground, and both events land in the audit chain.
 ### Tests, evaluations and the benchmark
 
 ```bash
-npm test     # 41 unit tests — actions, audit chain, ingest, cache, ladder, proposer
+npm test     # ~170 tests over test/*.test.ts (Node's test runner) — actions, audit chain, guardrails,
+             # proposer, contract suite over the real routing table, tenancy, eBay client/adapter,
+             # account-deletion signatures, session record, signals
 npm run eval # 6 evaluations — guardrail precision/recall, retrieval ablation
 npm run bench -- 24   # latency: per-stage p50/p95/p99, cold vs cached
 ```
 
-`npm test` and `npm run eval` need **no credentials** — every deterministic subsystem is
-testable without a network. `npm run bench` and `npm run demo:stale-price` exercise the real
-reply path and need the Whissle agent.
+`npm test` and `npm run eval` need **no LLM credentials** — every deterministic subsystem is
+testable without a network — but they do need a local Postgres (`pretest` creates the test
+database). `npm run bench` and `npm run demo:stale-price` exercise the real reply path and
+need the Whissle agent.
 
 Results and methodology: **[`docs/EVALS.md`](docs/EVALS.md)**.
 
@@ -189,70 +213,103 @@ This repository. Start here:
 
 | Path | What it is |
 |---|---|
-| `src/pipeline/pipeline.ts` | **the core loop** — admit → classify → cache → retrieve → compose → guard → ladder |
+| `src/pipeline/pipeline.ts` | **the core loop** — admit → classify → cache → retrieve → compose (streamed) → guard → ladder; `send()` re-guards edits and refuses blocks |
 | `src/retrieval/` | structured-first grounding: `facts.ts` (addressable facts), `slots.ts` (slot resolution), `bm25.ts`, `retriever.ts` (RRF fusion) |
 | `src/guardrails/` | `policy.ts` (one configurable policy), `guards.ts` (the six deterministic guards), `chain.ts` |
-| `src/actions/` | `preflight.ts`, `executor.ts` (two-phase commit + rollback), `audit.ts` (hash chain), `proposer.ts`, `marketplace/` |
-| `src/llm/` | `whissle.ts` (the agent client), `agentSpec.ts` + `seedAgent.ts` (agent config, incl. its guardrails) |
-| `src/autonomy/ladder.ts` | the five-rung copilot-to-automation ladder |
-| `src/ingest/ebaylive/` | real eBay Live ingestion — `watcher.ts` (chat + lots), `discovery.ts` |
-| `src/shows/` | `runtime.ts` (one isolated pipeline per show), `registry.ts`, `catalogImport.ts` |
+| `src/actions/` | `preflight.ts`, `executor.ts` (two-phase commit, undo window, rollback, compensation), `audit.ts` (hash chain), `proposer.ts`, `marketplace/` (`port.ts`, `mock.ts`, `ebay.ts`) |
+| `src/llm/` | `whissle.ts` (the agent client, JSON and streaming doors), `streamAgent.ts` (one agent per stream), `agentGc.ts` (retires finished shows' agents), `agentSpec.ts` + `seedAgent.ts` |
+| `src/autonomy/` | `ladder.ts` (the five-rung copilot-to-automation ladder), `promotion.ts` (criteria from the seller's own reports) |
+| `src/auth/accounts.ts` | register / login / logout / me; scrypt; bearer sessions |
+| `src/api/` | `routes.ts` (auth, tenancy and seller-only preHandlers, every REST route), `hub.ts` (SSE fan-out, per-client show list), `audioBridge.ts` |
+| `src/db/` | `pg.ts` (the pool, `tx()`), `pg_migrations/`, `seed.ts` |
+| `src/ingest/ebaylive/` | real eBay Live ingestion — `watcher.ts` (chat + lots, real Chrome), `discovery.ts` (the live grid), `session.ts` (house session + proxy), `sellerListings.ts` |
+| `src/ingest/ebay/` | the eBay Developer APIs — `client.ts` (Browse, Taxonomy, Marketplace Insights), `oauth.ts` (seller consent), `seal.ts` (tokens at rest), `deletion.ts` (account-deletion notices), `import.ts` |
+| `src/shows/` | `runtime.ts` (one isolated pipeline per show, write target), `registry.ts`, `sessionRecord.ts` (what a show leaves behind), `signals.ts`, `catalogImport.ts`, `prepareEvent.ts`, `conclusion.ts`, `prdMetrics.ts`, `analytics.ts` |
+| `src/sellers/following.ts` | followed sellers, and the poller that keeps the live grid warm |
 | `src/llm/kbSync.ts` | pushes a show's catalog into the Whissle agent's knowledge base |
-| `src/api/audioBridge.ts` | host-audio capture into a Whissle listen-only session |
 | `src/latency/` | span instrumentation and the version-keyed reply cache |
 
 ## Access notes / credentials
 
-The only credential is a **Whissle workspace secret key** (`wsk_…`), which is the sole LLM
-provider. Put it in `.env` as `WHISSLE_API_KEY`; `npm run seed:agent` does the rest and prints
-the `WHISSLE_AGENT_ID`.
+The LLM credential is a **Whissle workspace secret key** (`wsk_…`), the sole LLM provider.
+Put it in `.env` as `WHISSLE_API_KEY`; `npm run seed:agent` does the rest and prints the
+`WHISSLE_AGENT_ID`. Required scopes: `agent:read`, `agent:write`, `agent:chat`, `kb:write`.
+
+eBay is optional and layered: an application keyset (`EBAY_APP_ID`, `EBAY_CERT_ID`,
+`EBAY_DEV_ID`, `EBAY_ENV`) unlocks Browse and Taxonomy; a registered RuName (`EBAY_RUNAME`)
+lets a seller consent to their own listings; `EBAY_TOKEN_KEY` seals those tokens at rest;
+`EBAY_DELETION_VERIFICATION_TOKEN` + `EBAY_DELETION_ENDPOINT` answer eBay's account-deletion
+challenge, which a production keyset requires. See `.env.example`.
 
 Reviewers: a scoped key has been shared with the submission. If you do not have one,
 `npm test` and `npm run eval` still run in full — they cover retrieval, all six guardrails,
-two-phase commit, rollback, idempotency and the audit chain — and the recorded walkthrough
-shows the live reply path.
+two-phase commit, rollback, idempotency, the audit chain, tenancy and the eBay adapter —
+and the recorded walkthrough shows the live reply path.
 
-Required scopes: `agent:read`, `agent:write`, `agent:chat`, `kb:write`.
-
-## Accounts
+## Accounts and tenancy
 
 Every seller registers with an email and a password (`POST /api/auth/register`, `/login`,
-`/logout`; scrypt, no native dependency). There is no guest door any more: a visitor sees the
-landing page, and every `/api/*` route except the front door, health and eBay's own callbacks
-answers `401 sign in to use SideStage` without a session. The stream and the audio bridge
-carry the session as a `token` query parameter because neither can set a header.
+`/logout`, `GET /api/auth/me`; scrypt, no native dependency; `sst_` bearer tokens, 30 days).
+There is no guest kind any more (migration 015 ended every guest session): a visitor sees the
+landing page, and every `/api/*` route except the front door, health, eBay's own callbacks
+(`/api/ebay/callback`, `/api/ebay/account-deletion`) and the audio-bridge page answers
+`401 sign in to use SideStage` without a session. The stream and the audio bridge carry the
+session as a `token` query parameter because neither can set a header. Every non-GET route
+additionally requires a seller account (a second preHandler answers 403), so a route added
+later cannot be left open by omission.
+
+**A show belongs to the account that attached it** (`owner_account_id`, set at attach). Any
+route that names a show — path, query or body — answers **404** to anyone else, 404 rather
+than 403 because another seller's show should not even be confirmed to exist. Lists are cut
+to the caller: `/api/shows`, `/api/reports`, `/api/home`, `/api/cost`, analytics, catalogs, and
+the SSE `shows` event is filtered per client in `src/api/hub.ts`. `/api/shows/prepared` is
+deliberately workspace-wide: a preparation's agent and catalog are workspace resources.
+Rows written before ownership existed have no owner and stay visible to everyone — that is
+documented legacy, not a policy. Audit entries for a send, an approval or a rollback record
+`seller:<handle>` rather than a literal "seller". Six contract tests in `test/tenancy.test.ts`
+hold this boundary.
 
 ## Deployed
 
 | | |
 |---|---|
 | Frontend | https://sidestage.whissle.ai (also https://sidestage-five.vercel.app; Vercel, TanStack Start on the Nitro `vercel` preset; `/privacy` and `/terms` are pages of the app) |
-| Backend | https://35-173-35-240.sslip.io (one t3.small in us-east-1: Postgres + app + a real Chrome, in Docker Compose behind Caddy, which issues the certificate for the sslip.io name) |
-| eBay account deletion | `GET/POST /api/ebay/account-deletion` answers eBay's Marketplace Account Deletion challenge and notices (`src/ingest/ebay/deletion.ts`) — eBay keeps a **production** keyset disabled until this exists. Token in `EBAY_DELETION_VERIFICATION_TOKEN`; the registered URL in `EBAY_DELETION_ENDPOINT`, byte-for-byte |
+| Backend | https://35-173-35-240.sslip.io (one t3.small in us-east-1: Postgres 16 + app + a real Chrome, in Docker Compose behind Caddy, which issues the certificate for the sslip.io name) |
+| eBay keyset | **production** (`EBAY_ENV=production`). It lacks the Marketplace Insights grant, so sold comps degrade to asking prices and every surface says so |
+| eBay consent | `POST /api/ebay/connect` → eBay OAuth → `GET /api/ebay/callback`; the `state` is pinned to the account that asked. Access and refresh tokens are sealed with AES-256-GCM under `EBAY_TOKEN_KEY` before they reach Postgres (`src/ingest/ebay/seal.ts`); a process with no key stores plaintext and warns once |
+| eBay account deletion | `GET/POST /api/ebay/account-deletion` answers eBay's Marketplace Account Deletion challenge and notices (`src/ingest/ebay/deletion.ts`) — eBay keeps a production keyset disabled until this exists. A notice is honoured only after its `x-ebay-signature` (ECDSA over the raw body, public key fetched from eBay's Notification API by key id) verifies; an unsigned or forged notice is acknowledged with 200 and ignored. Token in `EBAY_DELETION_VERIFICATION_TOKEN`; the registered URL in `EBAY_DELETION_ENDPOINT`, byte-for-byte |
 | eBay redirect | RuName registered with accepted URL `…/api/ebay/callback` on the backend, declined URL `/settings` on the frontend, privacy `/privacy` |
 
 `scripts/deploy-aws.sh up` creates the key pair, security group and instance and deploys;
 `scripts/deploy-aws.sh deploy` rsyncs this checkout plus `.env` and `data/` and restarts the
-stack. The eBay Live session travels as `data/ebay-session.json` (Playwright storage state),
-never as the Chrome profile — macOS Chrome encrypts cookies with the Keychain and a Linux Chrome
-cannot read them. Sign in locally with `npm run ebay:signin`, export the jar with `npm run ebay:export`,
-then `deploy` again. From a datacenter IP eBay answers every first request with a JavaScript
-challenge (`/splashui/challenge`); real Chrome passes it on its own, which is why the image
-installs Chrome and never Playwright's headless shell. The watcher (a show's `player.html`) was
-confirmed working from the box this way. The signed-in live grid needs one more thing, and the
-first diagnosis of it was wrong. It was recorded here as "eBay refuses the grid from a datacenter
-IP". Measured on 2026-09-14: a session that read 224 events from the laptop at 13:00 read zero
-from the box — and then zero from the laptop too, headed or headless, proxied through a home
-connection or not — while the seller's own Chrome showed 96 events. eBay's header on every one of
-those failing reads said "Sign in or register": **eBay had ended the session** after seeing it
-from a second address, and the anonymous grid (with its "technical issue" banner) is what a
-signed-out browser gets. Discovery now reads that header and reports `signed-out` rather than
-`blocked`. The durable setup for a hosted copilot follows from it: a fixed-IP residential or ISP
-proxy in `EBAY_DISCOVERY_PROXY`, the sign-in done THROUGH it (`npm run ebay:signin` honours the
-same variable, tick "Stay signed in"), the export shipped, and the server reading through the
-same address ever after — one session, one address, kept warm by the periodic discovery read.
-The grid is the same for every seller, so one such session serves every account on the host.
-Attaching by link, reports, analytics and the eBay consent flow all run deployed without it.
+stack. The sync excludes `data/shows`, `data/ebay-profile` and `fixtures/catalogs/ebay-*` —
+the last because those catalogs are written **by the app** on the box when a show is prepared
+or imported, and an earlier deploy with `--delete` wiped them and left `prepared_shows` rows
+pointing at files that no longer existed.
+
+**The eBay Live house session.** The live grid renders nothing to an anonymous visitor, so
+discovery reads it through one signed-in session shared by every account on the host. It
+travels as `data/ebay-session.json` (Playwright storage state), never as the Chrome profile —
+macOS Chrome encrypts cookies with the Keychain and a Linux Chrome cannot read them. From a
+datacenter IP eBay answers every first request with a JavaScript challenge
+(`/splashui/challenge`); real Chrome passes it on its own, which is why the image installs
+Google Chrome and never Playwright's headless shell, for the watcher and for discovery alike.
+The watcher (a show's `player.html`) was confirmed working from the box this way. The signed-in
+grid needs one more thing, and the first diagnosis of it was wrong. It was recorded here as
+"eBay refuses the grid from a datacenter IP". Measured on 2026-09-14: a session that read 224
+events from the laptop at 13:00 read zero from the box — and then zero from the laptop too,
+headed or headless, proxied through a home connection or not — while the seller's own Chrome
+showed 96 events. eBay's header on every one of those failing reads said "Sign in or register":
+**eBay had ended the session** after seeing it from a second address, and the anonymous grid
+(with its "technical issue" banner) is what a signed-out browser gets. Discovery reads that
+header and reports `signed-out` rather than `blocked`; before the first read of a process it
+reports `pending`, not a refusal. The durable setup follows from it: a fixed-IP residential or
+ISP proxy in `EBAY_DISCOVERY_PROXY`, the sign-in done THROUGH it (`npm run ebay:signin` honours
+the same variable, tick "Stay signed in"), the export shipped with `npm run ebay:export` and
+`deploy`, and the server reading through the same address ever after — one session, one
+address, kept warm by the discovery poller (`DISCOVERY_REFRESH_MIN`, default 5). The proxy
+routes only the discovery browser, never the API client or the player attach. Attaching by
+link, reports, analytics and the eBay consent flow all run deployed without it.
 
 ## Known limitations or broken paths
 
@@ -262,77 +319,101 @@ Stated plainly, because these are the things a reviewer would otherwise find.
    questions: p50 **982–1220 ms** (stable), p95 **1950–3735 ms**, budget breaches **4–13%**.
    Roughly 99% of it is the single LLM hop, and the tail is the shared hosted pool queueing, not
    anything local — capping output tokens at 220 changed p50 by under 1%. The cached path is
-   comfortably inside (p50 ~2 ms, p95 ~1.1 s). **The fix is token streaming to the console, which
-   is specified in the frontend contract and not implemented in the backend** — proposals are
-   emitted once, complete, rather than streaming. See `docs/TDD.md` §5.
-2. **Marketplace writes default to `MockMarketplace`**, and reach real eBay listings only when a
-   seller connects their account and switches a show to it. The mock is a real two-phase
-   participant with injectable latency, injectable apply failures and genuine
-   optimistic-concurrency conflicts — the rollback tests force all three. The live adapter
-   (`src/actions/marketplace/ebay.ts`) speaks the same port against the Sell Inventory API; its
-   optimistic lock is value-based because eBay publishes no offer version, which is a narrower
-   guarantee than the mock's and is documented as such in the file.
-3. **No neural embeddings.** The second retrieval leg is character-trigram cosine, not a
+   comfortably inside (p50 ~2 ms, p95 ~1.1 s). Token streaming to the console **is** implemented
+   (`chatTurnStream` in `src/llm/whissle.ts`, `onPartial` in `src/pipeline/pipeline.ts`): the
+   operator watches the draft form, but the guards judge the complete draft, so time-to-send is
+   unchanged by design. Measured on 2026-09-15 on the hosted stack: proposals 0.5–1.5 s;
+   product research 0.22–0.28 s; a **dry run on a cold path took 4.3 s**, over budget.
+2. **Marketplace writes default to `MockMarketplace`, and no live action has committed through
+   the eBay adapter yet.** Arming a show to eBay is real (consent, sealed tokens, write target
+   persisted per show), but a show attached from a stream is read-only at attach and never
+   cleared, so preflight refuses every write on it. The mock is a real two-phase participant
+   with injectable latency, injectable apply failures and genuine optimistic-concurrency
+   conflicts — the rollback tests force all three. The live adapter speaks the same port against
+   the Sell Inventory API (`bulk_update_price_quantity` for price and quantity, `withdraw` /
+   `publish` for end and its undo, 429/503 backoff, value-based lock), and `push_listing` /
+   `swap_pinned` are no-ops on it. The undo window is enforced on rollback; a compensation
+   that itself fails marks the action failed with a message naming the listing to check on eBay.
+3. **L4 auto-act is a policy lock, not a code lock.** Settings refuse `L4_AUTO_ACT` as a
+   starting rung, and the ladder only ever auto-commits `markdown_price` and `adjust_stock`
+   after preflight. But `POST /api/autonomy` will move a show to L4 whatever its write target;
+   the stated rule — L4 only while writes hit the mock — is not checked against the write target
+   in code.
+4. **No neural embeddings.** The second retrieval leg is character-trigram cosine, not a
    learned embedding. `docs/EVALS.md` measures exactly what it buys (nothing on clean questions;
    it halves degradation on misspelled ones). An ONNX MiniLM is a drop-in at the same seam.
-4. **Host audio needs one operator click — and once it is on, the show is kept.** The listen-only
+5. **Host audio needs one operator click — and once it is on, the show is kept.** The listen-only
    Whissle session mints correctly and the bridge page publishes tab audio into it, but Chrome
    will not hand over tab audio without a person ticking "Share tab audio", so the copilot cannot
    start hearing a show by itself. With the bridge open, every finalised utterance is stored with
    its emotion and intent **distributions**, the frames the agent read are kept with their reading,
    and the audio is kept in ten-second Opus chunks under `data/shows/<showId>/` — all of it
    deleted with the show. The report's Timeline tab plays it back; nothing else reads the bytes.
-
-5. **eBay Live ingestion is a scrape, not an API — and discovery needs a signed-in session.**
-   eBay publishes no Live chat, lot or schedule API, so `src/ingest/ebaylive/` drives a browser
-   over eBay's own pages. The live grid and a seller's schedule render **nothing** to an
-   anonymous visitor (measured: zero event links at forty seconds, against 224 for a signed-in
-   session), so `npm run ebay:signin` opens a window where the operator signs in once; the
-   browser profile persists under `data/` (gitignored) and discovery drives it directly. One
-   process at a time can hold that profile, so sign in with the server stopped. It must
-   be **real Chrome in new-headless mode** — eBay blocks Playwright's bundled headless shell on
-   the same profile. Subject to selector drift on an eBay deploy and to eBay's terms on
-   automated access. Full details and limits in [`docs/EBAY_LIVE.md`](docs/EBAY_LIVE.md).
-6. **A monitored show's lineup must be imported.** eBay Live renders only the lot on the block;
-   the full list needs sign-in. Without a catalog import the copilot honestly abstains on
+6. **eBay Live ingestion is a scrape, not an API — and discovery needs the house session.**
+   eBay publishes no Live chat, lot or schedule API, so `src/ingest/ebaylive/` drives real
+   Chrome over eBay's own pages: the watcher reads a show's public `player.html` (no sign-in),
+   discovery reads the live grid, which renders **nothing** to an anonymous visitor (measured:
+   zero event links at forty seconds, against 224 for a signed-in session). The session is a
+   person's sign-in (`npm run ebay:signin`), exported as a cookie jar, read through the fixed-IP
+   proxy described under Deployed, and refreshed on a schedule; Discover says `signed-out`,
+   `pending`, `stale` or `blocked` rather than pretending nobody is on air. Subject to selector
+   drift on an eBay deploy and to eBay's terms on automated access. **The watcher does not
+   detect a show ending on its own**: a show ends when the seller detaches it (or the process
+   stops); until then it keeps polling. Full details and limits in
+   [`docs/EBAY_LIVE.md`](docs/EBAY_LIVE.md).
+7. **A monitored show's lineup must be imported or prepared.** eBay Live renders only the lot on
+   the block; the full list needs sign-in. Without a catalog the copilot honestly abstains on
    everything except the current lot.
-7. **Chat replies are drafted, never delivered.** Nothing posts back to eBay or Twitch. Both
-   live sources are read-only by construction with no send path — see `docs/TDD.md` §8 for why
-   that is a deliberate boundary rather than an unfinished feature.
-8. **Comparables prefer SOLD prices and fall back to asking.** Marketplace Insights (completed
-   sales, 90 days) is used where it answers; where it does not — sandbox carries no sales history
-   at all — the comparables come from active listings through Browse and every surface labels
-   them as asking prices. The two are never averaged together: asking prices skew high, and a
-   seller holding firm against a number they believe is a sale price is being misled. Market
-   lookups are fetched in the background and served from cache, never on the request path: one
-   sandbox Browse call measured 0.7–4.6 seconds against a 2-second end-to-end budget.
-9. **The eBay application unlocks the catalog, not the live stream.** Browse and Taxonomy need
-   only an application key; the seller's own listings need their consent (`EBAY_RUNAME` plus an
-   OAuth sign-in). eBay Live has no API in any tier, so discovery and the watcher stay a scrape.
-10. **Preparing a show reads the seller's listings two ways, and says which.** One seller has
-    three names: a display name on the Live card ("GoldStandardAuction"), a Live-page slug in the
-    seller link ("q_EImPfySam"), and the account username ("gold_standard_guy") that actually keys
-    their listings. Preparation resolves the username from the Live seller page, then tries the
-    Browse API seller filter — which a **sandbox** key rejects for every real seller, and which
-    eBay then silently drops while returning the whole market with a 200 and a warning in the
+8. **Chat replies are drafted, never delivered.** eBay Live exposes no chat-post API and the
+   scrape has no send path by construction, so a "sent" reply is recorded and audited and the
+   seller pastes it into the show's chat themselves. See `docs/TDD.md` §8 for why that is a
+   deliberate boundary rather than an unfinished feature.
+9. **Comparables prefer SOLD prices and fall back to asking — and production has only asking.**
+   Marketplace Insights (completed sales, 90 days) is limited-release; the production keyset is
+   not granted it, so the client narrows its scopes once (`invalid_scope`), sold lookups switch
+   off with one sentence on the catalog surface, and comparables come from active listings
+   through Browse, labelled as asking prices. The two are never averaged together: asking prices
+   skew high, and a seller holding firm against a number they believe is a sale price is being
+   misled. Market lookups are fetched in the background and served from cache, never on the
+   request path: one sandbox Browse call measured 0.7–4.6 seconds against a 2-second budget.
+10. **The eBay application unlocks the catalog, not the live stream.** Browse and Taxonomy need
+    only an application key; the seller's own listings need their consent (`EBAY_RUNAME` plus an
+    OAuth sign-in). eBay Live has no API in any tier, so discovery and the watcher stay a scrape.
+    The scopes stored on a connection are the scopes **requested**, not what eBay granted.
+11. **Preparing a show reads the seller's listings two ways, and says which.** One seller has
+    three names: a display name on the Live card, a Live-page slug in the seller link, and the
+    account username that actually keys their listings. Preparation resolves the username from
+    the Live seller page, then tries the Browse API seller filter — which eBay silently drops
+    for a seller it does not know, returning the whole market with a 200 and a warning in the
     body. That warning is treated as a failure, never as a result. The fallback reads the
-    seller's public results page through the signed-in profile (skipping "Shop on eBay" filler
-    and the seller's own "Live show link" placeholders), and the catalog records that it came
-    from a page read rather than the API.
-11. **The agent's conclusion is written, not measured.** At the end of a show the show's own agent
+    seller's public results page through the house session (skipping "Shop on eBay" filler and
+    the seller's own "Live show link" placeholders), and the catalog records that it came from a
+    page read rather than the API.
+12. **Guard settings are process-wide.** Layer B is armed with the attaching seller's policy as
+    their show starts, so with two sellers live at once the last to attach wins. Per-show
+    policy is the next step, not this one.
+13. **Prompt inputs are quoted and bounded, not sandboxed.** Buyer text, author names, host
+    transcript and the camera reading go into the per-turn context as JSON-quoted, length-capped,
+    control-stripped strings labelled "data, not instructions" (`quoted()` in
+    `src/compose/prompts.ts`). That is a bound on injection, not a proof against it; the guards
+    are the backstop.
+14. **Reports before 2026-09-15 carry no drafted replies.** Proposals were meant to be persisted
+    from the session-record work onward, but the INSERT never ran until it was fixed that day;
+    chat, actions, audit, transcript, frames and audio for those shows are intact.
+15. **The agent's conclusion is written, not measured.** At the end of a show the show's own agent
     is handed the report's numbers, the gaps, a sample of what the host said and what the camera
     showed, and asked for a summary, an outcome and typed next actions (`src/shows/conclusion.ts`).
     It can only cite that evidence, but it is still a model writing prose: read the counts first.
     The platform's own end-of-session summary is pulled beside it when the gateway produced one,
     matched by room and then by agent and time window — the report says which.
-
-12. **Host distributions are probability mass, and the head is honest about arousal.** "Excited
+16. **Host distributions are probability mass, and the head is honest about arousal.** "Excited
     41%" on the report is 41% of the mass across every utterance, not "excited 41% of the time",
     and the gateway's own note says the emotion head degrades on low-arousal states. Both are
     printed on the surface rather than smoothed away.
-
-8. **No auth, no tenancy.** Shows are isolated per SQLite file, but anyone who can reach the
-   port can drive every show. CORS is wide open, which is correct for a local operator tool and
-   wrong for anything deployed.
-9. **The `comparison` intent has no dedicated handler.** It retrieves and answers like any other
-   question rather than running a structured spec diff, even though `ResearchService` can produce one.
+17. **One Whissle agent per stream, and the workspace caps agents at fifty.** A show's agent is
+    retired a day after its report (`src/llm/agentGc.ts`, every six hours), a preparation nobody
+    attached is dropped after two days, and hitting the cap triggers one retirement pass and one
+    retry before the operator is told. Re-preparing a show retires the old agent. Fifty
+    concurrent unfinished shows would still hit it.
+18. **CORS is wide open.** Correct for a console on another origin talking to a bearer-token
+    API; wrong the day cookies are involved.

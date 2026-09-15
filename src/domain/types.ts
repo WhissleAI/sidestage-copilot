@@ -189,7 +189,7 @@ export interface AuditEntry {
   hash: string;
   prevHash: string;
   kind: AuditKind;
-  actorType: "copilot" | "seller" | "system";
+  actorType: string;
   summary: string;
   detail: Record<string, unknown>;
 }

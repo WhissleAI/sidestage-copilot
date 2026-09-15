@@ -12,8 +12,8 @@ the seeded catalog in `src/db/seed.ts`.
 
 `test/guardrails.eval.ts` · `npm run eval`
 
-**44 labelled cases**, each a `(catalog state, buyer question, drafted reply)` triple with the
-verdict a careful seller would give. **19 of the 44 should pass** — a suite made only of
+**46 labelled cases**, each a `(catalog state, buyer question, drafted reply)` triple with the
+verdict a careful seller would give. **21 of the 46 should pass** — a suite made only of
 violations measures nothing, because a chain that blocks everything would score perfectly on it.
 The pass cases are what hold false positives down, and a false positive is expensive: it puts a
 correct reply in front of the seller as a problem and trains them to click through warnings.
@@ -22,8 +22,8 @@ Several cases mutate catalog state before judging — landing a markdown, zeroin
 staleness checks are exercised against a genuinely moved target rather than a fixture.
 
 ```
-  guardrail chain over 44 labelled cases
-    caught 25  missed 0  false alarms 0  clean passes 19
+  guardrail chain over 46 labelled cases
+    caught 25  missed 0  false alarms 0  clean passes 21
     precision 1.000   recall 1.000   f1 1.000
     availability     fired on 4/4 of its own cases
     claim_grounding  fired on 4/4 of its own cases
@@ -38,12 +38,12 @@ a wrong answer sent to a buyer; a false alarm costs the seller a glance.
 
 ### What this number does and does not mean
 
-It means the chain behaves correctly on 44 cases chosen to cover each guard's decision boundary
+It means the chain behaves correctly on 46 cases chosen to cover each guard's decision boundary
 — including the adversarial ones: declining a lowball by naming it (must pass), accepting one
 below the floor (must block), "guaranteed authentic" on a certified listing (passes) versus an
 uncertified one (blocks).
 
-It does **not** mean the guards are right on the long tail. 44 cases is small, they were written
+It does **not** mean the guards are right on the long tail. 46 cases is small, they were written
 by the same person who wrote the guards, and a perfect score on a self-authored suite mostly
 demonstrates internal consistency. The suite's real value was as a bug-finder during
 development, not as a score afterwards.
@@ -178,9 +178,12 @@ serves them.
 5. **A repair pass roughly doubles the turn** (768 ms p50 on top). Bounding it to one is what
    keeps a `revise` from blowing the budget entirely.
 
-**The honest fix is not implemented:** token streaming, so the seller sees text as it is
-generated. The frontend contract already specifies a streaming `drafting` status; the backend
-emits proposals once, complete.
+**Token streaming is implemented** (`chatTurnStream` in `src/llm/whissle.ts`; the pipeline
+re-emits the proposal with `status: "drafting"` on every delta). It shortens time-to-first-token
+— measured first token at ~1.0 s on a reply completing in ~1.1 s — and does not change the
+numbers above, which are time-to-send: the guards judge the complete draft. The bench has not
+been re-run since; the cold-path breaches stand as measured. On the hosted stack on
+2026-09-15, proposals arrived in 0.5–1.5 s and a dry run on a cold path took 4.3 s.
 
 ### Cache correctness, not just speed
 
@@ -196,7 +199,8 @@ The bench exits non-zero if that reply is ever served from cache.
 
 ## 5. Unit tests
 
-`npm test` — 39 tests, no credentials required.
+`npm test` — about 170 tests across `test/*.test.ts` on Node's test runner, no LLM
+credentials required (a local Postgres is; `pretest` creates `sidestage_test`).
 
 | Area | What is proven |
 |---|---|
@@ -212,6 +216,12 @@ The bench exits non-zero if that reply is ever served from cache.
 | Cache | A version bump makes the old key unreachable; blocked replies are never cached |
 | Two-layer policy | Certificate-conditional rules stay out of the agent config, but exist app-side |
 | Proposer | Distinct-asker thresholds; proposed markdowns respect floor and cap |
+| Contract suite | The real routing table driven the way the browser does it: REST routes, the SSE `hello` envelope, the header the browser sends, empty and malformed bodies |
+| Tenancy | A stranger gets 404 on another account's show, report, record, export, timeline and media; lists and analytics are cut to the caller; a mutating route with no session is refused before the handler |
+| eBay client and adapter | Token minting and scope narrowing, a silently dropped seller filter is a failure, sold vs asking never conflated; the write adapter refuses when the remote moved, withdraws rather than deletes, and names a missing connection |
+| Account deletion | The challenge hash; a notice eBay signed verifies, the same bytes with a forged or missing signature do not |
+| Session record | A settled proposal is written and its decision stamped once |
+| Signals | Emotion and intent distributions kept whole on the transcript |
 
 ---
 

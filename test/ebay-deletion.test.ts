@@ -56,9 +56,35 @@ describe("eBay account-deletion notifications", () => {
       payload: { metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" }, notification: { notificationId: "n-test", data: { userId: "nobody-here", username: "nobody_here" } } },
     });
     assert.equal(r.statusCode, 200);
-    assert.equal(r.json().removed, 0);
+    // Acknowledged, but not honoured: nothing signed it. eBay's retry rules
+    // still want the 2xx.
+    assert.equal(r.json().honoured, false);
+    assert.equal(r.json().removed, undefined);
     const other = await app.inject({ method: "POST", url: "/api/ebay/account-deletion", headers: { "content-type": "application/json" }, payload: { hello: 1 } });
     assert.equal(other.statusCode, 200);
     assert.equal(other.json().ignored, true);
   });
+});
+
+// ── the signature is the only lock on this door ─────────────────────────────
+import { generateKeyPairSync, createSign } from "node:crypto";
+import { verifyNotification, parseSignatureHeader, toPem } from "../src/ingest/ebay/deletion.js";
+
+test("a notice eBay signed verifies; the same bytes with a forged or missing signature do not", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const pubPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  // eBay hands the key back stripped of PEM line breaks.
+  const stripped = pubPem.replace(/-----(BEGIN|END) PUBLIC KEY-----/g, "").replace(/\s+/g, "");
+  const body = JSON.stringify({ metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" }, notification: { notificationId: "n1", data: { username: "someone", userId: "u1" } } });
+  const s = createSign("SHA1"); s.update(body);
+  const header = Buffer.from(JSON.stringify({ kid: "k1", alg: "ecdsa", digest: "SHA1", signature: s.sign(privateKey, "base64") })).toString("base64");
+  const fetchKey = async (kid: string) => (kid === "k1" ? { key: stripped, digest: "SHA1" } : null);
+
+  assert.ok(parseSignatureHeader(header)?.kid === "k1");
+  assert.ok(toPem(stripped).includes("-----BEGIN PUBLIC KEY-----\n"));
+  assert.equal((await verifyNotification(body, header, fetchKey)).ok, true);
+  assert.equal((await verifyNotification(body + " ", header, fetchKey)).ok, false, "a changed body must not verify");
+  assert.equal((await verifyNotification(body, undefined, fetchKey)).ok, false, "no header, no deletion");
+  const forged = Buffer.from(JSON.stringify({ kid: "k1", signature: Buffer.from("nope").toString("base64") })).toString("base64");
+  assert.equal((await verifyNotification(body, forged, fetchKey)).ok, false);
 });

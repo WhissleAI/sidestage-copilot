@@ -85,7 +85,12 @@ export class EbayMarketplace implements MarketplaceAdapter {
       // should have said so before we got here.
       throw new MarketplaceApplyError("no eBay connection for this seller — connect one in Settings");
     }
-    const res = await this.fetcher(`${HOST[this.env]}${path}`, {
+    // eBay rate-limits per app and returns 429 (and 503 under load). A markdown
+    // the seller approved must not fail on the first one: back off and try
+    // twice more before the action is marked failed.
+    let res!: Response;
+    for (let attempt = 0; ; attempt++) {
+      res = await (async () => { return await this.fetcher(`${HOST[this.env]}${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -94,7 +99,13 @@ export class EbayMarketplace implements MarketplaceAdapter {
         "Content-Language": "en-US",
         ...(init.headers as Record<string, string> | undefined),
       },
-    });
+    }); })();
+      if ((res.status === 429 || res.status === 503) && attempt < 2) {
+        await new Promise((r) => setTimeout(r, 400 * 2 ** attempt + Math.random() * 200));
+        continue;
+      }
+      break;
+    }
     if (res.status === 204) return undefined as T;
     const text = await res.text().catch(() => "");
     if (!res.ok) {

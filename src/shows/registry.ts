@@ -14,6 +14,7 @@
 // that nothing is being watched.
 
 import { config } from "../config.js";
+import { db } from "../db/pg.js";
 import type { EventHub, EventName } from "../api/hub.js";
 import { ShowRuntime } from "./runtime.js";
 import type { ShowReport } from "./sessionRecord.js";
@@ -23,6 +24,8 @@ export const DEMO_SHOW_ID = "show_ep42";
 
 export interface ShowSummary {
   showId: string;
+  /** Whose show this is. Null for rows older than ownership. */
+  ownerAccountId: string | null;
   /** The Whissle agent answering for this show — one per catalog. */
   agentId: string;
   catalogId: string | null;
@@ -102,40 +105,61 @@ export class ShowRegistry {
    * The show is READ-ONLY: we hold no seller credentials for someone else's
    * stream, so every write action is refused at preflight (docs/TDD.md §8).
    */
-  async attachEbayLive(input: string, meta: { title?: string; host?: string } = {}): Promise<ShowRuntime> {
+  /** Attaches in flight, so two callers for one show share one runtime
+   *  instead of the second getting a half-built one out of the map. */
+  private attaching = new Map<string, Promise<ShowRuntime>>();
+
+  async attachEbayLive(
+    input: string,
+    meta: { title?: string; host?: string; ownerAccountId?: string | null; readOnly?: boolean } = {},
+  ): Promise<ShowRuntime> {
     const eventId = parseEventId(input);
     if (!eventId) throw new Error(`could not read an eBay Live event id out of "${input}"`);
 
-    const showId = `ebay_${eventId}`;
-    const existing = this.runtimes.get(showId);
-    if (existing) return existing;
+    // One event can be attached more than once over its life; each attach is
+    // its own session with its own report. A live runtime for the event is
+    // returned as-is; a finished session that already has a report is left
+    // alone and the new one takes the next id. Re-attaching used to reuse the
+    // row, reset its clock and overwrite the report.
+    const live = [...this.runtimes.values()].find((r) => r.externalId === eventId);
+    if (live) return live;
+    const base = `ebay_${eventId}`;
+    const showId = await this.nextSessionId(base, eventId);
+    const inFlight = this.attaching.get(showId);
+    if (inFlight) return inFlight;
 
-    if (this.runtimes.size > config.maxWatchedShows) {
+    if (this.runtimes.size >= config.maxWatchedShows) {
       throw new Error(`already watching ${this.runtimes.size} shows (MAX_WATCHED_SHOWS=${config.maxWatchedShows})`);
     }
 
-    const rt = new ShowRuntime({
-      showId,
-      title: meta.title || `eBay Live ${eventId}`,
-      sellerHandle: meta.host || "eBay Live seller",
-      source: "ebaylive",
-      externalId: eventId,
-      readOnly: true,
-      events: this.events,
-    });
-    this.runtimes.set(showId, rt);
-
-    try {
-      await rt.init();
-    await rt.start();
-    } catch (e) {
-      this.runtimes.delete(showId);
-      await rt.close().catch(() => {});
-      throw e;
-    }
-
-    this.hub.emit("shows", await this.list());
-    return rt;
+    const run = (async () => {
+      const rt = new ShowRuntime({
+        showId,
+        title: meta.title || `eBay Live ${eventId}`,
+        sellerHandle: meta.host || "eBay Live seller",
+        source: "ebaylive",
+        externalId: eventId,
+        // Read-only unless the caller proved the show is theirs (routes match
+        // the connected eBay username to the show's seller handle).
+        readOnly: meta.readOnly ?? true,
+        ownerAccountId: meta.ownerAccountId ?? null,
+        events: this.events,
+      });
+      try {
+        await rt.init();
+        await rt.loadOwner();
+        await rt.start();
+      } catch (e) {
+        await rt.close().catch(() => {});
+        throw e;
+      }
+      // Only a runtime that started is a runtime anyone may be handed.
+      this.runtimes.set(showId, rt);
+      this.hub.emit("shows", await this.list());
+      return rt;
+    })().finally(() => this.attaching.delete(showId));
+    this.attaching.set(showId, run);
+    return run;
   }
 
   async detach(showId: string): Promise<ShowReport | null> {
@@ -187,11 +211,45 @@ export class ShowRegistry {
     return this.runtimes.has(showId);
   }
 
-  async list(): Promise<ShowSummary[]> {
-    return Promise.all([...this.runtimes.values()].map(async (rt) => {
+  /** The id for a new session of this event: the base id if unused or reusable
+   *  (ended, no report), else base-2, base-3, … */
+  private async nextSessionId(base: string, eventId: string): Promise<string> {
+    const rows = await db()
+      .query<{ id: string; status: string; has_report: boolean }>(
+        `SELECT s.id, s.status, (r.show_id IS NOT NULL) AS has_report
+           FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
+          WHERE s.external_id = $1 ORDER BY s.started_at DESC`,
+        [eventId],
+      )
+      .then((r) => r.rows)
+      .catch(() => [] as { id: string; status: string; has_report: boolean }[]);
+    if (!rows.length) return base;
+    const reusable = rows.find((r) => !r.has_report);
+    if (reusable) return reusable.id;
+    const taken = new Set(rows.map((r) => r.id));
+    for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+  }
+
+  /** The account's newest live show, or none when it has none. */
+  activeFor(ownerId: string | null | undefined): string | undefined {
+    if (!ownerId) return undefined;
+    // Rows older than ownership belong to nobody and stay visible to everyone;
+    // every show attached since has exactly one owner.
+    const mine = [...this.runtimes.values()].filter((rt) => rt.ownerAccountId === ownerId || rt.ownerAccountId === null);
+    return mine.length ? mine[mine.length - 1]!.showId : undefined;
+  }
+
+  /** Every watched show, or only one account's. A show is one account's or
+   *  nobody's; there is no shared show. */
+  async list(ownerId?: string | null): Promise<ShowSummary[]> {
+    const mine = [...this.runtimes.values()].filter(
+      (rt) => ownerId === undefined || rt.ownerAccountId === ownerId || rt.ownerAccountId === null,
+    );
+    return Promise.all(mine.map(async (rt) => {
       const [s, listings] = await Promise.all([rt.show(), rt.repo.listings()]);
       return {
         showId: rt.showId,
+        ownerAccountId: rt.ownerAccountId,
         agentId: rt.agentId,
         catalogId: rt.catalogId,
         title: s.title,

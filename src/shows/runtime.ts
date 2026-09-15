@@ -1,14 +1,12 @@
 // One watched show = one ShowRuntime.
 //
-// A runtime owns its OWN SQLite file (data/shows/<showId>.db) and its own
-// pipeline, retriever, executor and audit chain. That is the tenancy boundary:
-// there are no cross-show queries, attaching a third show cannot slow or corrupt
-// the two already running, and a show that ends can be dropped by closing one
-// handle.
-//
-// The alternative — a `show_id` column on every table — would have meant every
-// query in the system remembering to filter, and one missed filter leaking
-// another seller's catalog into a reply.
+// A runtime owns its own pipeline, retriever, executor and audit chain, and
+// every row it writes carries its `show_id` in Postgres. The tenancy boundary
+// is two-fold: a runtime never queries across shows, and every show carries the
+// `owner_account_id` of the account that attached it — the API answers 404 to
+// anyone else, so a missed filter cannot leak one seller's catalog into
+// another's reply. Attaching a third show cannot slow or corrupt the two
+// already running, and a show that ends is dropped by closing one handle.
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -51,6 +49,9 @@ export interface ShowRuntimeOpts {
   source: "simulated" | "ebaylive";
   externalId?: string | null;
   readOnly?: boolean;
+  /** The account that attached this show. Every read and write of the show
+   *  is scoped to it; a show with no owner is visible to nobody. */
+  ownerAccountId?: string | null;
   events: RuntimeEvents;
   /** Use this database instead of a per-show file (the seeded demo show). */
   dbPath?: string;
@@ -260,6 +261,7 @@ export class ShowRuntime {
         source: this.o.source,
         externalId: this.o.externalId ?? null,
         readOnly: this.o.readOnly ?? false,
+        ownerAccountId: this.o.ownerAccountId ?? null,
         // Where a new show starts is a seller setting. L4 can never be it:
         // bounded auto-acting only ever runs against a mock marketplace.
         autonomyLevel: policy().automation.startingRung,
@@ -365,6 +367,24 @@ export class ShowRuntime {
   /** Point this show at the agent belonging to the catalog it just loaded. */
   useAgent(agentId: string): void {
     this.llm.setAgent(agentId);
+  }
+
+  /** Who this show belongs to. Null only for rows written before ownership
+   *  existed; those are nobody's and stay invisible until re-attached. */
+  private ownerCache: string | null | undefined;
+  get ownerAccountId(): string | null {
+    return this.ownerCache ?? this.o.ownerAccountId ?? null;
+  }
+  async loadOwner(): Promise<string | null> {
+    const r = await this.db.query<{ owner_account_id: string | null }>(
+      "SELECT owner_account_id FROM shows WHERE id = $1", [this.showId],
+    );
+    this.ownerCache = r.rows[0]?.owner_account_id ?? this.o.ownerAccountId ?? null;
+    return this.ownerCache;
+  }
+
+  get externalId(): string | null {
+    return this.o.externalId ?? null;
   }
 
   get agentId(): string {

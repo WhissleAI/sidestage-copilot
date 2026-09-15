@@ -25,14 +25,15 @@ Severity: **P0** ships broken · **P1** ships embarrassing · **P2** ships imper
 | Ingests a live chat stream | **Yes** | Real eBay Live chat, deduped by eBay's per-comment UUID |
 | Grounds replies in catalog, listing, policy data | **Yes** | Structured-first retrieval, hybrid R@1 0.842 / MRR 0.898 |
 | Enforces price, availability, policy, tone guardrails before send | **Yes** | Six deterministic guards, 1.00 precision and recall over 46 labelled cases |
-| Listing/inventory actions: push, swap, markdown, stock | **Partial** | All five kinds implemented with 2PC + rollback, but **never exercised on a real show** — see F-07 |
-| On-demand product research | **Partial** | Works, single-digit ms — but it is **only reachable from the command palette**; the reply path never calls it. F-08 |
-| Sub-2s reply latency | **Partial** | p50 982–1220 ms; p95 1950–3735 ms, 4–13% breaches |
+| Listing/inventory actions: push, swap, markdown, stock | **Partial** | All five kinds implemented with 2PC + rollback, undo window and compensation; a real eBay Sell Inventory adapter sits behind the same port and is armed per show — but a stream attached from a link stays read-only, so **no action has committed through it on a real show** — see F-07 |
+| On-demand product research | **Yes** (since the F-08 fix) | Single-digit ms over cached comps; called on the reply path for `comparison` and market-price questions and reachable from ⌘J. Measured 2026-09-15 on the hosted stack: 0.22–0.28 s |
+| Sub-2s reply latency | **Partial** | p50 982–1220 ms; p95 1950–3735 ms, 4–13% breaches on the bench. Streaming now shortens time-to-first-token, not time-to-send. 2026-09-15 hosted: proposals 0.5–1.5 s, a dry run cold at 4.3 s |
 | Depth in ≥1 area | **Three** | Retrieval, agentic-write safety, latency |
 | PRD / TDD diffed against implementation | **Yes** | Divergences stated inline; this document extends that |
 
 The two partials are honest gaps, not near-misses, and both are in the brief's
-mandatory list. They are the first things a reviewer will probe.
+mandatory list. They are the first things a reviewer will probe. (Research was a
+third partial when this was written; the F-08 fix closed it.)
 
 ---
 
@@ -158,7 +159,7 @@ available, wire the eBay Sell API behind the existing `MarketplaceAdapter` port.
 ### F-08 · Product research is orphaned  — **FIXED**
 
 `ResearchService` is real, correct, fast (single-digit ms) and **never called by
-the reply path**. It is reachable only from `Cmd+K`. So a buyer asking "is that a
+the reply path**. It is reachable only from the research palette (`⌘J` today; `⌘K` is the command bar). So a buyer asking "is that a
 good price?" gets an answer grounded in the listing, not in the comps the system
 already has.
 
@@ -210,19 +211,33 @@ verified by hand — 0 comments in 60s became 3 in 75s — but the watchdog's ow
 logic has no test. Its central judgement is "active show + silent chat = dead
 socket", and that discrimination is exactly the kind of thing that rots.
 
-### F-14 · No auth, no rate limiting on the API
+### F-14 · No auth, no rate limiting on the API  — **FIXED 2026-09-14 (auth) / 2026-09-15 (tenancy)**
 
 Anyone who can reach port 8790 can drive every show, approve actions and detach
 sessions. Correct for a local operator tool, stated in the README, and completely
 wrong for anything deployed. Worth restating here because "it's local" stops
 being true the moment someone demos it from a laptop on conference wifi.
 
-### F-15 · Restart durability is inconsistent
+**Fixed.** Accounts with email + password (scrypt) and bearer sessions on
+2026-09-14 (`src/auth/accounts.ts`, migration 014; the guest door closed in 015);
+ownership and per-account scoping on 2026-09-15 — see §10. Rate limiting on the
+API itself is still absent; the proposal token bucket and the per-show action
+budget are the only limits.
 
-Actions and the audit chain survive a restart (SQLite). Proposals, the reply
+### F-15 · Restart durability is inconsistent  — **FIXED 2026-09-15**
+
+Actions and the audit chain survive a restart (SQLite then; Postgres now). Proposals, the reply
 cache and the show context do not (in-memory). So after a crash the audit says a
 reply was sent and the console cannot show you which one. Either persist
 proposals or say plainly that they are ephemeral.
+
+**Fixed.** Chat and proposals are written to `chat_messages` and
+`reply_proposals` (`src/shows/sessionRecord.ts`); the transcript, frames and
+audio go beside them. The proposal INSERT was wired in the session-record work
+but did not actually run until 2026-09-15, so reports generated before that
+date carry no drafted replies — stated on the report rather than backfilled.
+The reply cache and the show context are still in-memory by design: a cache
+rebuilds itself, and show context is a rolling window of the last few minutes.
 
 ### F-16 · `views` is always 0 on observed lots
 
@@ -345,3 +360,36 @@ at the seam those tests stop above.
   (W-8: `usage/sessions` returns `agent_id: null` for text), so SideStage counts
   its own gateway calls. The panel carries that sentence rather than letting the
   number imply it came from billing.
+
+---
+
+## 10. Fix log — 2026-09-15
+
+Closed today, each verified against the code rather than the commit message:
+
+| What | Where |
+|---|---|
+| **Tenancy.** A show carries `owner_account_id` from attach. A preHandler in the routing table answers 404 — not 403, so another seller's show is not even confirmed to exist — for any show-bound route to a non-owner; `/api/shows`, `/api/reports`, `/api/home`, `/api/cost`, analytics and catalogs are scoped to the caller; the SSE `shows` list is cut per client; every non-GET needs a seller. Rows older than ownership have no owner and stay visible to everyone (documented legacy). `/api/shows/prepared` is workspace-wide on purpose | `src/api/routes.ts`, `src/api/hub.ts`, `src/shows/registry.ts`, `test/tenancy.test.ts` (6) |
+| **Guards at send.** `Pipeline.send()` refuses a blocked proposal (`SendRefused` → HTTP 409) whatever the client asks, and re-runs the whole chain on an operator-edited draft against its grounding facts and the current listings; the audit entry records `verdictAtSend` and `guardsAtSend` | `src/pipeline/pipeline.ts` |
+| **Deletion-notice signature.** A Marketplace Account Deletion notice is honoured only after `x-ebay-signature` (ECDSA over the raw body, key fetched by id) verifies; the route keeps its own raw-body parser. Before this, anyone who knew a seller's eBay username could disconnect them | `src/ingest/ebay/deletion.ts`, `test/ebay-deletion.test.ts` |
+| **Token sealing.** eBay access and refresh tokens are AES-256-GCM sealed under `EBAY_TOKEN_KEY` before they reach Postgres; pre-key rows stay readable; no key means plaintext and one warning | `src/ingest/ebay/seal.ts`, `oauth.ts` |
+| **Undo window enforced.** A rollback past `undoableUntil` is refused with the time the window closed, instead of silently running as an undo | `src/actions/executor.ts` |
+| **Compensation failure is loud.** If the local commit fails AND the compensating remote write fails, the action is marked failed with a message naming the listing to check on eBay, rather than reported as handled | `src/actions/executor.ts` |
+| **Agent GC.** A show's agent is retired a day after its report (boot + every six hours); preparations nobody attached are dropped after two days; hitting the 50-agent cap runs one retirement pass and retries once | `src/llm/agentGc.ts`, `src/llm/streamAgent.ts` |
+| **Proposal INSERT.** Proposals are actually recorded now (F-15) | `src/shows/sessionRecord.ts`, `test/session-record.test.ts` |
+| **Deploy no longer wipes catalogs.** `rsync --delete` excluded `fixtures/catalogs/ebay-*`, which the app writes on the box; a stale preparation whose file is gone is dropped at attach instead of answering 400 | `scripts/deploy-aws.sh`, `src/api/routes.ts` |
+| **Watcher on real Chrome.** `acquireBrowser` launches Google Chrome (`channel: "chrome"`) and falls back to the bundled build only where none exists; the bundled headless shell crashed its renderer on every attach on the deployed box | `src/ingest/ebaylive/watcher.ts`, `Dockerfile` |
+| **Discovery reports honestly.** `signed-out` when eBay's header says so, `pending` before the first read of a process, `stale` when the last good grid is old — never an empty grid dressed as "nobody live". The fixed-IP proxy and scheduled refresh are in the README | `src/ingest/ebaylive/discovery.ts`, `src/sellers/following.ts` |
+
+**Still open**, and why:
+
+| # | Finding | Status |
+|---|---|---|
+| F-07 | Write path never run against a real show | **Open, narrowed.** The eBay adapter is real and armed per show; since 2026-09-15 a show attaches writable when the connected eBay username matches its seller handle (`routes.ts` attach). It has still not been exercised on a live show the account owns. The adapter is exercised only by `test/ebay.test.ts` with an injected fetcher |
+| F-11 | `KbSync.scheduleSync` is dead code | **Open** |
+| F-12 | `Pipeline.proposals` and `seenActionKeys` never evicted | **Open** |
+| — | The watcher does not detect a show ending on its own; a session ends when the seller detaches it | **Open** |
+| — | Guard policy is process-wide: the last seller to attach arms Layer B for every live show. Per-show policy is next | **Open** |
+| — | L4 auto-act is locked as a starting rung only; `POST /api/autonomy` will set L4 whatever the write target | **Open** (policy, not code) |
+| — | Rate limiting on the API (the other half of F-14) | **Open** |
+

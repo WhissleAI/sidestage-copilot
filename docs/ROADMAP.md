@@ -118,7 +118,7 @@ Three real bugs the move exposed, none of them visible under show-per-file:
    where a value used to be, and TypeScript could not see it because the sites
    were inside object literals. Caught by reading the wire, not the types.
 
-### 2.2 Guest accounts + auth — **DONE**
+### 2.2 Guest accounts + auth — **DONE, then superseded**
 
 Today: **no auth at all.** Anyone who can reach port 8790 drives every show,
 approves actions and detaches sessions. Correct for a local tool, wrong the moment
@@ -141,13 +141,22 @@ omission. `audit.actor_id` now references the account, and the console shows
 which it is acting as — amber "watching · take control" for a guest, the
 operator's name once claimed. Five contract tests cover the boundary.
 
+**Superseded on 2026-09-14/15.** The guest door is closed (migration 015 ended
+every guest session): a seller registers with an email and a password
+(`src/auth/accounts.ts`, scrypt), every `/api/*` route except the front door,
+health, eBay's callbacks and the audio bridge needs a session, and every non-GET
+needs a seller. Ownership followed: a show belongs to the account that attached
+it, 404 to anyone else, lists and the SSE show list cut per caller. Rows older
+than ownership have no owner and stay visible to everyone. Details in
+`TDD.md` §6a and `REVIEW.md` §10.
+
 ### 2.3 Settings — **DONE**
 
 There is a real configuration surface hiding in the code with no UI:
 
 - The **guardrail policy object** (`src/guardrails/policy.ts`) — never-say list,
   discount cap, reply length, PII redaction. Already file-overridable via
-  `GUARDRAIL_POLICY_PATH`; it should be editable and per-seller
+  `GUARDRAIL_POLICY_PATH`; it should be editable and per-seller. **Still process-wide at run time:** attaching arms Layer B with that seller's saved policy, so the last seller to attach wins. Per-show policy is the next step
 - **Autonomy defaults** and the undo window
 - **Latency budget**, proposal rate cap, action budget per show
 - **Catalog management** — today a JSON file on disk
@@ -211,7 +220,7 @@ From [`REVIEW.md`](REVIEW.md) §6, restated with status.
 
 | # | Ask | Status |
 |---|---|---|
-| **W-3** | Token streaming on `chat/turn` | **SHIPPED** — [gateway #1101](https://github.com/WhissleAI/whissle_gateway_backend/pull/1101) merged and deployed to AWS 2026-09-13. `POST /api/agents/{id}/chat/turn/stream` is live: `open` → (`delta`\|`tool`)* → `done`, where `done` carries the byte-identical body the JSON door returns. SideStage does not consume it yet — see §4 |
+| **W-3** | Token streaming on `chat/turn` | **SHIPPED** — [gateway #1101](https://github.com/WhissleAI/whissle_gateway_backend/pull/1101) merged and deployed to AWS 2026-09-13. `POST /api/agents/{id}/chat/turn/stream` is live: `open` → (`delta`\|`tool`)* → `done`, where `done` carries the byte-identical body the JSON door returns. **Consumed** by `chatTurnStream` in `src/llm/whissle.ts` — see §4 |
 | **W-8** | Attribute METERING to an agent | **NARROWER THAN FIRST FILED.** `/api/orgs/{org}/usage/sessions` returns `agent_id: null` for every text session and `/usage/events` carries no agent field — so the *metering* rows cannot be attributed. But `/api/sessions` **does** carry `agent_id` and accepts `?agent_id=`, and `/api/sessions/{id}/trace` gives per-hop provider, model, failover, latency and token usage. Per-agent attribution is therefore possible, just through the calls API rather than the billing API, and at the cost of an N+1 (list, then trace each). The ask is to carry `agent_id` on the usage rows so the two views agree; the analytics page uses the trace path in the meantime |
 | **W-1** | Per-agent KB namespacing | Worked around with one agent per catalog. Costs an agent per seller |
 | **W-2** | KB upsert by caller-supplied id | Replace-by-delete today; racy and slow as catalogs grow |
