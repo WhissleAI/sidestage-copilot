@@ -45,6 +45,7 @@ export class ResearchService {
   /** Set when eBay refuses for a reason retrying cannot fix (no approval, no
    *  application configured). Stops a show spending its budget re-asking. */
   private marketOff: string | null = null;
+  private marketOffUntil = 0;
 
   constructor(private repo: Repo) {}
 
@@ -164,7 +165,7 @@ export class ResearchService {
    */
   async warm(listings: ListingWithDescription[]): Promise<void> {
     for (const l of listings.slice(0, 6)) {
-      if (this.marketOff) return;
+      if (this.marketOff && Date.now() < this.marketOffUntil) return;
       const hit = this.market.get(l.sku);
       if (hit && Date.now() - hit.at < MARKET_TTL_MS) continue;
       await this.refresh(l);
@@ -222,8 +223,11 @@ export class ResearchService {
         this.market.set(l.sku, { at: Date.now(), comps });
       } catch (e) {
         if (e instanceof EbayError && e.permanent) {
+          // Off for a while, not forever: a keyset can be granted a scope, and
+          // a 403 at 9pm should not still be the answer at 9am.
           this.marketOff = e.message;
-          console.warn(`[research] live comps off for this process: ${e.message}`);
+          this.marketOffUntil = Date.now() + 10 * 60_000;
+          console.warn(`[research] live comps off for ten minutes: ${e.message}`);
         }
       } finally {
         this.refreshing.delete(l.sku);

@@ -41,9 +41,15 @@ edited draft is a new draft: `Pipeline.send()` re-runs all six against the facts
 the original was grounded in and the listings as they stand now, refuses a
 block, and records `verdictAtSend` and `guardsAtSend` in the audit entry.
 
-**One limit, stated:** the policy is armed process-wide. Attaching a show arms
-Layer B with that seller's saved settings, so with two sellers live at once the
-last to attach wins. Per-show policy is next.
+**Whose settings.** Every guard reads `policy()`, and `policy()` reads an
+`AsyncLocalStorage` scope before the process default. Each request runs inside
+the caller's merged settings (an `onRequest` hook), and each show's
+watcher-driven work — a buyer's comment arriving from eBay — runs inside the
+owner's (`ShowRuntime.underOwnerPolicy`). Two sellers live at once are each
+checked against their own never-say list and discount cap; `GET /api/settings`
+returns `enforcing`, the policy the request was actually guarded under, so the
+two can be compared. The process default only covers work with no owner (the
+demo show).
 
 ---
 

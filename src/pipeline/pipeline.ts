@@ -371,12 +371,15 @@ export class Pipeline {
       };
       this.cache.set(key, result);
       this.finish(proposal, { ...result, spans: timer.result(config.latencyBudgetMs, false) }, msg);
+      this.evict();
     } catch (e) {
       // The gateway's shared LLM pool 429s a burst. Back off and retry rather
       // than dropping a buyer's question on the floor.
       if (e instanceof LlmError && e.isRateLimited && attempt < 3) {
         await sleep(350 * 2 ** attempt + Math.random() * 250);
-        return this.draft(msg, attempt + 1, previous);
+        // The retry replaces THIS proposal; counting it again inflated the
+        // answered-rate denominator by one per 429.
+        return this.draft(msg, attempt + 1, previous ?? proposal.id);
       }
       const failed: ReplyProposal = {
         ...proposal,
@@ -591,6 +594,22 @@ export class Pipeline {
       abstained: r.abstain,
       latencyMs: Date.now() - started,
     };
+  }
+
+  /** Keep the working set bounded: a long show asks thousands of questions
+   *  and every one of them used to live in memory (and in every `hello`).
+   *  Settled proposals beyond the newest 400 are dropped; the record in
+   *  Postgres is the durable copy. */
+  private evict(): void {
+    if (this.proposals.size <= 400) return;
+    const settled = [...this.proposals.values()]
+      .filter((p) => p.status === "sent" || p.status === "auto_sent" || p.status === "dismissed" || p.status === "blocked")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const p of settled.slice(0, this.proposals.size - 400)) {
+      this.proposals.delete(p.id);
+      this.grounding.delete(p.id);
+    }
+    if (this.seenActionKeys.size > 2000) this.seenActionKeys = new Set([...this.seenActionKeys].slice(-1000));
   }
 
   list(): ReplyProposal[] {

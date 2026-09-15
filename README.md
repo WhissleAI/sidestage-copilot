@@ -389,9 +389,11 @@ Stated plainly, because these are the things a reviewer would otherwise find.
     seller's public results page through the house session (skipping "Shop on eBay" filler and
     the seller's own "Live show link" placeholders), and the catalog records that it came from a
     page read rather than the API.
-12. **Guard settings are process-wide.** Layer B is armed with the attaching seller's policy as
-    their show starts, so with two sellers live at once the last to attach wins. Per-show
-    policy is the next step, not this one.
+12. **A show ends on silence, not on eBay's say-so.** Sellers reuse event ids and the player
+    page for a finished show reads as live the next week, so the watcher finishes a session
+    after fifteen minutes with no chat, no viewer change and no lot (`END_SILENCE_MS`), writing
+    the report as a detach would. A host who pauses the stream for longer than that gets a
+    finished session and must re-attach.
 13. **Prompt inputs are quoted and bounded, not sandboxed.** Buyer text, author names, host
     transcript and the camera reading go into the per-turn context as JSON-quoted, length-capped,
     control-stripped strings labelled "data, not instructions" (`quoted()` in

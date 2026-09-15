@@ -7,15 +7,12 @@
 // central question. `actorType` only ever held "seller" or "system"; "who
 // approved that markdown" had no answer because there was no who.
 //
-// The model is deliberately small:
-//
-//   guest   can WATCH a show and read proposals, but cannot send, approve or
-//           act. The read-only rung below L1 Suggest.
-//   seller  the operator. Everything.
-//
-// A guest account is minted on first contact and needs no credentials, because
-// the point is to let someone open the console and see a live show working —
-// not to build a sign-up flow nobody asked for.
+// The model is deliberately small: one kind, `seller`, the operator. Every
+// request that changes anything carries a seller session; a request with no
+// session can read the public routes and nothing else. (An earlier build had
+// an unauthenticated `guest` kind for watching a show; it is gone — a show is
+// scoped to the account that attached it, so there is nothing for a stranger
+// to watch.)
 
 import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
@@ -46,7 +43,7 @@ export class AuthError extends Error {
 }
 import type { Pool } from "../db/pg.js";
 
-export type AccountKind = "guest" | "seller";
+export type AccountKind = "seller";
 
 export interface Account {
   id: string;
@@ -65,37 +62,11 @@ export interface Session {
 /** How long a console session lives before it has to be re-minted. */
 const SESSION_DAYS = 30;
 
-const ADJECTIVES = ["swift", "quiet", "amber", "north", "clever", "brisk", "violet", "ember"];
-const NOUNS = ["lark", "falcon", "otter", "heron", "marten", "ibis", "sable", "wren"];
-
-function guestHandle(): string {
-  const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const n = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-  return `${a}-${n}-${randomBytes(2).toString("hex")}`;
-}
 
 export class Accounts {
   constructor(private d: Pool) {}
 
-  /**
-   * Mint a guest account and a session for it.
-   *
-   * One call, because a guest has nothing to verify. The token is the only
-   * secret and it is generated here rather than derived from anything about the
-   * account, so it cannot be guessed from a handle.
-   */
-  async createGuest(): Promise<Session> {
-    const id = `acc_${randomBytes(8).toString("hex")}`;
-    const handle = guestHandle();
-    await this.d.query(
-      "INSERT INTO accounts (id, kind, handle, display_name) VALUES ($1, 'guest', $2, $3)",
-      [id, handle, handle],
-    );
-    return this.openSession({ id, kind: "guest", handle, displayName: handle });
-  }
 
-  /** Promote a guest to the operator role. The console's "this is my show"
-   *  step; there is no password because there is nothing yet to protect. */
   /**
    * Register a seller. Email is the identity, the handle is derived from it
    * for the places that show a short name, and the account is a seller from
@@ -179,7 +150,7 @@ const toAccount = (r: AccountRow): Account => ({
   id: r.id, kind: r.kind as AccountKind, handle: r.handle, displayName: r.display_name || r.handle, email: r.email ?? null,
 });
 
-/** Can this actor change anything? A guest watches; only a seller acts. */
+/** Can this actor change anything? Only a signed-in seller acts. */
 export function canWrite(a: Account | null): boolean {
   return a?.kind === "seller";
 }

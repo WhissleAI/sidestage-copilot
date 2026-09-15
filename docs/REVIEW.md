@@ -187,14 +187,14 @@ not taking effect — the console header shows an event id to an operator who is
 watching "Sunday Baseball Marathon! MLB Singles w/ Jacob". Small, but it is the
 first thing on screen and it reads as unfinished.
 
-### F-11 · `KbSync.scheduleSync` is dead code
+### F-11 · `KbSync.scheduleSync` is dead code  — **FIXED 2026-09-15**
 
 Written, documented, debounced — never called. The knowledge base only syncs on
 attach and on explicit catalog apply, so a lineup that grows during a show never
 reaches the agent. Either wire it to the lot-observed path or delete it; carrying
 a documented method that nothing calls is worse than either.
 
-### F-12 · Unbounded in-memory growth
+### F-12 · Unbounded in-memory growth  — **FIXED 2026-09-15**
 
 `Pipeline.proposals` is a `Map` that is never evicted; `seenActionKeys` likewise.
 A busy eight-hour show accumulates every proposal it ever made. The chat ticker
@@ -379,6 +379,10 @@ Closed today, each verified against the code rather than the commit message:
 | **Proposal INSERT.** Proposals are actually recorded now (F-15) | `src/shows/sessionRecord.ts`, `test/session-record.test.ts` |
 | **Deploy no longer wipes catalogs.** `rsync --delete` excluded `fixtures/catalogs/ebay-*`, which the app writes on the box; a stale preparation whose file is gone is dropped at attach instead of answering 400 | `scripts/deploy-aws.sh`, `src/api/routes.ts` |
 | **Watcher on real Chrome.** `acquireBrowser` launches Google Chrome (`channel: "chrome"`) and falls back to the bundled build only where none exists; the bundled headless shell crashed its renderer on every attach on the deployed box | `src/ingest/ebaylive/watcher.ts`, `Dockerfile` |
+| **Per-seller guard policy.** `policy()` reads an `AsyncLocalStorage` scope before the process default; an `onRequest` hook runs each request under the caller's merged settings and `ShowRuntime` runs watcher-driven ingestion under the owner's. `GET /api/settings` returns `enforcing`, what the request was actually guarded under | `src/guardrails/policy.ts`, `src/settings/store.ts`, `src/api/routes.ts`, `src/shows/runtime.ts`, `test/policy-scope.test.ts` (3) |
+| **End of show.** Sellers reuse event ids, so the page cannot say a show is over; the watcher fires `onEnded` after 15 min with no chat, viewers or lots and the registry finishes the session with a report, as a detach would | `src/ingest/ebaylive/watcher.ts`, `src/shows/registry.ts` |
+| **F-11, F-12.** `scheduleSync` and its debounce removed; settled proposals beyond the newest 400 and their grounding are evicted after each finish, `seenActionKeys` trimmed at 2000 | `src/llm/kbSync.ts`, `src/pipeline/pipeline.ts` |
+| **Small correctness set.** A 429 retry no longer counts as a second proposal; `/api/budget` on an unknown show is 404; live-comps `marketOff` expires after ten minutes instead of latching for the process; the lot-naming timer is cleared on stop and `onLot`/`onComment` are ignored after it; an SSE client that stopped reading (>8 MB buffered) is dropped rather than buffered for ever; analytics windows by when a show finished; the session jar is written 0600 and its absolute path no longer leaves the box; the compose Postgres password comes from `POSTGRES_PASSWORD`; the guest kind and `/api/auth/claim` are gone | `pipeline.ts`, `routes.ts`, `research.ts`, `runtime.ts`, `hub.ts`, `analytics.ts`, `session.ts`, `docker-compose.yml`, `accounts.ts` |
 | **Discovery reports honestly.** `signed-out` when eBay's header says so, `pending` before the first read of a process, `stale` when the last good grid is old — never an empty grid dressed as "nobody live". The fixed-IP proxy and scheduled refresh are in the README | `src/ingest/ebaylive/discovery.ts`, `src/sellers/following.ts` |
 
 **Still open**, and why:
@@ -386,10 +390,8 @@ Closed today, each verified against the code rather than the commit message:
 | # | Finding | Status |
 |---|---|---|
 | F-07 | Write path never run against a real show | **Open, narrowed.** The eBay adapter is real and armed per show; since 2026-09-15 a show attaches writable when the connected eBay username matches its seller handle (`routes.ts` attach). It has still not been exercised on a live show the account owns. The adapter is exercised only by `test/ebay.test.ts` with an injected fetcher |
-| F-11 | `KbSync.scheduleSync` is dead code | **Open** |
-| F-12 | `Pipeline.proposals` and `seenActionKeys` never evicted | **Open** |
-| — | The watcher does not detect a show ending on its own; a session ends when the seller detaches it | **Open** |
-| — | Guard policy is process-wide: the last seller to attach arms Layer B for every live show. Per-show policy is next | **Open** |
+| F-13 | The watchdog (dead-socket reload, and now end-of-show on silence) has no test of its own | **Open** |
+| — | A SIGTERM keeps live shows resumable rather than finishing them: a deploy restart must not end every show on air. A show whose feed stays silent after the restart is finished by the end-of-show rule instead | **By design** |
 | — | L4 auto-act is locked as a starting rung only; `POST /api/autonomy` will set L4 whatever the write target | **Open** (policy, not code) |
 | — | Rate limiting on the API (the other half of F-14) | **Open** |
 

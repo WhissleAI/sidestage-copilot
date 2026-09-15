@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: sidestage
-      POSTGRES_PASSWORD: sidestage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sidestage}
       POSTGRES_DB: sidestage
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgres://sidestage:sidestage@db:5432/sidestage
+      DATABASE_URL: postgres://sidestage:${POSTGRES_PASSWORD:-sidestage}@db:5432/sidestage
       PORT: "8790"
       # The seller's eBay Live profile and every show's kept media live here.
       EBAY_PROFILE_DIR: /app/data/ebay-profile

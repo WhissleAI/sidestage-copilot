@@ -24,6 +24,7 @@
 //     person drives; we wait for the result and save the cookie jar.
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 import { dirname, join, resolve } from "node:path";
 import { chromium, type BrowserContext } from "playwright";
 
@@ -75,7 +76,7 @@ export function sessionStatus(): SessionStatus {
     savedAt: at.toISOString(),
     ageHours: Math.round(ageHours * 10) / 10,
     stale: ageHours > STALE_AFTER_H,
-    path: PATH,
+    path: basename(PATH),
   };
 }
 
@@ -93,7 +94,7 @@ export function loadSession(): Record<string, unknown> | undefined {
 
 export function saveSession(state: unknown): void {
   mkdirSync(dirname(PATH), { recursive: true });
-  writeFileSync(PATH, JSON.stringify(state, null, 2));
+  writeFileSync(PATH, JSON.stringify(state, null, 2), { mode: 0o600 });
 }
 
 /**

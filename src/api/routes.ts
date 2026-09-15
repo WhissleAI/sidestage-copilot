@@ -35,7 +35,7 @@ import {
   SettingsStore, sanitize, merge, diffFromDefaults, invalidPatterns, pushLayerA,
   type SettingsView,
 } from "../settings/store.js";
-import { policy, DEFAULT_POLICY } from "../guardrails/policy.js";
+import { policy, policyScope, DEFAULT_POLICY } from "../guardrails/policy.js";
 import { WhissleSessions } from "../llm/sessions.js";
 import { SessionSignals } from "../shows/signals.js";
 import { showRecord } from "../shows/record.js";
@@ -104,7 +104,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   // ── who is asking ─────────────────────────────────────────────────────────
   //
-  // Every request carries an actor, resolved once. A guest may READ everything
+  // Every request carries an actor, resolved once. A caller with no session may READ the open routes
   // and change nothing; only a seller can send a reply, approve an action or
   // detach a show. The distinction is enforced here rather than in each handler
   // so a route added later is not accidentally left open.
@@ -134,6 +134,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   const actorOf = (req: object): Account | null => actors.get(req) ?? null;
+
+  // Everything this request does — drafting, guarding, proposing — reads the
+  // CALLER's guard settings, not whatever was activated last. Callback-style
+  // on purpose: `policyScope.run(p, done)` puts the rest of the request
+  // lifecycle inside the scope.
+  app.addHook("onRequest", (req, _reply, done) => {
+    const a = actorOf(req as object);
+    if (!a) return done();
+    settings
+      .forAccount(a.id)
+      .then((p) => policyScope.run(p, done))
+      .catch(() => done());
+  });
 
   // ── whose show ────────────────────────────────────────────────────────────
   //
@@ -179,7 +192,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return a ? `seller:${a.handle}` : "seller";
   };
 
-  /** Refuse a write from a guest — or from nobody at all. */
+  /** Refuse a write from anyone who is not a signed-in seller. */
   const mustWrite = (
     req: object,
     reply: { code(n: number): { send(b: unknown): unknown } },
@@ -382,6 +395,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // in this process on the next reply, and on the agent itself for every other
   // channel it answers on.
   const settings = new SettingsStore(pgPool());
+  shows.policyFor = (accountId) => settings.forAccount(accountId);
 
   /** The agents a save has to reach: one per catalog, and the active show's. */
   const armTargets = async (): Promise<string[]> => {
@@ -403,7 +417,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     };
   };
 
-  app.get("/api/settings", async (req) => view(actorOf(req as object)?.id ?? null));
+  app.get("/api/settings", async (req) => ({ ...(await view(actorOf(req as object)?.id ?? null)), enforcing: policy() }));
 
   app.put<{ Body: unknown }>("/api/settings", async (req, reply) => {
     const actor = mustWrite(req as object, reply);
@@ -447,13 +461,6 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return view(actor.id, reports.find((r) => !r.ok) ?? reports[0] ?? null);
   });
 
-  app.post<{ Body: { displayName?: string } }>("/api/auth/claim", async (req, reply) => {
-    // "This is my show." Promotes the guest holding this session to operator.
-    const a = actorOf(req as object);
-    if (!a) return reply.code(401).send({ error: "no session to claim" });
-    const promoted = await accounts.promoteToSeller(a.id, (req.body?.displayName || a.handle).slice(0, 80));
-    return { account: promoted };
-  });
 
 
   // ── health ────────────────────────────────────────────────────────────────
@@ -552,9 +559,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   /** What this show has spent against the cap. The console polls it beside the
    *  cost rail; the `budget` stream event carries the moment it trips. */
-  app.get<{ Querystring: { showId?: string } }>("/api/budget", async (req) => {
-    const target = rt(req.query.showId, req as object);
-    return { showId: target.showId, ...budgetState(target.showId) };
+  app.get<{ Querystring: { showId?: string } }>("/api/budget", async (req, reply) => {
+    try {
+      const target = rt(req.query.showId, req as object);
+      return { showId: target.showId, ...budgetState(target.showId) };
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
   });
 
   /**
@@ -1422,16 +1433,6 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       const actor = mustWrite(req as object, reply, "attach a show");
       if (!actor) return reply;
-      // Layer B is a process-wide policy (see settings/store.ts): arm it with
-      // THIS seller's settings as their show starts, so the guards it runs
-      // under are theirs. Known limit: with two sellers live at once the last
-      // to attach wins; per-show policy is the next step, not this one.
-      try {
-        const mine = await settings.load(actor.id);
-        settings.activate(merge(mine.overrides));
-      } catch (e) {
-        console.warn(`  settings: could not arm ${actor.handle}'s guardrails — ${(e as Error).message}`);
-      }
       const input = (req.body?.eventId || req.body?.url || "").trim();
       if (!input) return reply.code(400).send({ error: "eventId or url is required" });
 

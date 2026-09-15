@@ -80,6 +80,13 @@ export class EventHub {
     const from = (data as { showId?: string } | null)?.showId;
     for (const [id, c] of this.clients) {
       if (event !== "shows" && from && from !== c.showId) continue;
+      // Backpressure: a console that stopped reading (a laptop lid, a tab in
+      // the background for an hour) must not grow a buffer for ever.
+      if (c.reply.raw.writableLength > 8 * 1024 * 1024) {
+        this.clients.delete(id);
+        try { c.reply.raw.destroy(); } catch { /* already gone */ }
+        continue;
+      }
       try {
         if (event === "shows" && Array.isArray(data)) {
           // The switcher's list, cut to this console's own shows. Rows older

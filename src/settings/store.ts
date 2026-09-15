@@ -41,6 +41,9 @@ export interface SettingsView {
   overrides: Partial<SellerGuardrailPolicy>;
   armed: ArmedReport | null;
   updatedAt: string | null;
+  /** What Layer B is checking THIS request against — read from the live
+   *  policy scope, not from the row. The two agree when tenancy works. */
+  enforcing?: SellerGuardrailPolicy;
 }
 
 /** Fields a settings client may set. Anything else in the body is ignored
@@ -151,6 +154,7 @@ export class SettingsStore {
   }
 
   async persist(accountId: string, overrides: Partial<SellerGuardrailPolicy>): Promise<void> {
+    this.perAccount.delete(accountId);
     await this.d.query(
       `INSERT INTO settings (account_id, policy, updated_at) VALUES ($1, $2::jsonb, now())
        ON CONFLICT (account_id) DO UPDATE SET policy = EXCLUDED.policy, updated_at = now()`,
@@ -161,6 +165,17 @@ export class SettingsStore {
   /** Re-arm Layer B for this process. The next reply drafted is checked by it. */
   activate(p: SellerGuardrailPolicy): void {
     setPolicy(p);
+  }
+
+  /** One seller's merged policy, cached a minute; `persist` invalidates. */
+  private perAccount = new Map<string, { p: SellerGuardrailPolicy; at: number }>();
+  async forAccount(accountId: string): Promise<SellerGuardrailPolicy> {
+    const hit = this.perAccount.get(accountId);
+    if (hit && Date.now() - hit.at < 60_000) return hit.p;
+    const { overrides } = await this.load(accountId);
+    const p = merge(overrides);
+    this.perAccount.set(accountId, { p, at: Date.now() });
+    return p;
   }
 }
 

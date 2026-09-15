@@ -33,13 +33,8 @@ before(async () => {
   ({ app, ctx } = await buildApp());
   await ctx.shows.ensureDemo();
 
-  const guest = (await app.inject({ method: "POST", url: "/api/auth/register", headers: { "content-type": "application/json" }, payload: { email: `t${Date.now()}${Math.random().toString(16).slice(2)}@test.local`, password: "password-123", displayName: "test" } })).json();
-  const bearer = { authorization: `Bearer ${guest.token}` };
-  await app.inject({
-    method: "POST", url: "/api/auth/claim", headers: { ...bearer, "content-type": "application/json" },
-    payload: { displayName: "contract-suite" },
-  });
-  auth = bearer;
+  const seller = (await app.inject({ method: "POST", url: "/api/auth/register", headers: { "content-type": "application/json" }, payload: { email: `t${Date.now()}${Math.random().toString(16).slice(2)}@test.local`, password: "password-123", displayName: "test" } })).json();
+  auth = { authorization: `Bearer ${seller.token}` };
 });
 
 after(async () => {

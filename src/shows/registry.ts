@@ -16,6 +16,7 @@
 import { config } from "../config.js";
 import { db } from "../db/pg.js";
 import type { EventHub, EventName } from "../api/hub.js";
+import type { SellerGuardrailPolicy } from "../guardrails/policy.js";
 import { ShowRuntime } from "./runtime.js";
 import type { ShowReport } from "./sessionRecord.js";
 import { parseEventId } from "../ingest/ebaylive/discovery.js";
@@ -66,6 +67,9 @@ export class ShowRegistry {
   private activeShowId: string | null = null;
 
   constructor(private hub: EventHub) {}
+
+  /** Set by the API layer: the merged guard settings for one account. */
+  policyFor: ((accountId: string) => Promise<SellerGuardrailPolicy>) | null = null;
 
   /** Fan a runtime's event out to consoles, tagged with its show. */
   private events = {
@@ -144,6 +148,15 @@ export class ShowRegistry {
         readOnly: meta.readOnly ?? true,
         ownerAccountId: meta.ownerAccountId ?? null,
         events: this.events,
+        policyFor: meta.ownerAccountId && this.policyFor
+          ? (() => this.policyFor!(meta.ownerAccountId!))
+          : undefined,
+        // The feed went silent for a quarter of an hour: finish the session
+        // the way a detach would, report and all, and free the slot.
+        onEnded: (id, why) => {
+          console.log(`  ${id}: ${why} — finishing session`);
+          void this.detach(id).catch((e) => console.warn(`  ${id}: finish after end failed — ${(e as Error).message}`));
+        },
       });
       try {
         await rt.init();

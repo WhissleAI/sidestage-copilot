@@ -20,6 +20,7 @@
 // drift. `npm run seed:agent` is what pushes Layer A to the gateway.
 
 import { readFileSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface NeverSayRule {
   /** A literal substring (case-insensitive) or, with `regex: true`, a pattern. */
@@ -143,10 +144,24 @@ export const DEFAULT_POLICY: SellerGuardrailPolicy = {
 
 let cached: SellerGuardrailPolicy | null = null;
 
+/**
+ * The policy for the work in flight.
+ *
+ * Guard settings are per seller, but every guard, the proposer and the
+ * composer read `policy()`. Rather than thread a policy through every call,
+ * the request hook and each show runtime run their work inside this scope
+ * with the owning seller's merged settings; `policy()` reads the scope first
+ * and falls back to the process default. Two sellers live at once no longer
+ * share whichever settings were activated last.
+ */
+export const policyScope = new AsyncLocalStorage<SellerGuardrailPolicy>();
+
 /** The active policy. `GUARDRAIL_POLICY_PATH` points at a JSON file that is
  *  shallow-merged over the defaults, so a seller can tighten or loosen the rules
  *  without a code change — and the same file drives the agent config. */
 export function policy(): SellerGuardrailPolicy {
+  const scoped = policyScope.getStore();
+  if (scoped) return scoped;
   if (cached) return cached;
   const path = process.env.GUARDRAIL_POLICY_PATH;
   if (!path) return (cached = DEFAULT_POLICY);

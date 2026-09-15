@@ -242,9 +242,11 @@ says was checked.
   check that silently passes is worse than no check.
 - **The repair pass is bounded to exactly one**, and only for `revise`. Unbounded repair is how
   a latency budget dies, and a draft that fails twice is a draft the seller should look at.
-- **Divergence:** the policy object is armed **process-wide**. Attaching a show arms Layer B with
-  that seller's settings, so with two sellers live at once the last to attach wins. Per-show
-  policy is the next step.
+- **Whose policy.** `policy()` reads an `AsyncLocalStorage` scope before the process default.
+  An `onRequest` hook runs each request inside the caller's merged settings; a show runtime
+  runs watcher-driven ingestion inside its owner's (`underOwnerPolicy`), looked up per comment
+  through a one-minute cache that a save invalidates. Two sellers live at once are guarded
+  separately (`test/policy-scope.test.ts`).
 
 ## 5. Latency budget
 
@@ -463,13 +465,12 @@ one the code checks.
 
 ## 9. What I would do next, in order
 
-1. **Per-show guardrail policy** rather than a process-wide one, so two sellers live at once
-   each run under their own never-say list and discount cap.
-2. **Clear `read_only` for a stream the connected eBay account provably owns**, so an armed
-   show can commit a markdown through the eBay adapter on air — the first live exercise of the
-   two-phase protocol against an API not designed for it (F-07).
-3. **End-of-show detection in the watcher**, so a session closes and its agent retires without
-   the seller remembering to detach.
+1. **Commit a markdown through the eBay adapter on air** from a show the connected account
+   owns — the first live exercise of the two-phase protocol against an API not designed for it
+   (F-07). Everything up to the write is in place; the write has not been watched happen.
+2. **Rate limiting on the API** (the other half of F-14).
+3. **A watchdog test** (F-13): the "active show + silent chat = dead socket" and "silent
+   everything = show over" judgements have no test of their own.
 4. **Evict finished proposals and action keys from memory** (F-12) and wire or delete
    `KbSync.scheduleSync` (F-11).
 5. **A neural embedder at the `Embedder` seam**, once a catalog is large enough that lexical

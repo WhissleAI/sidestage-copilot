@@ -113,7 +113,7 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
   }>(
     `SELECT s.id, s.title, s.started_at, s.status, r.report
        FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
-      WHERE s.started_at::timestamptz >= $1 AND s.status = 'ended'
+      WHERE COALESCE(r.generated_at, s.started_at::timestamptz) >= $1 AND s.status = 'ended'
         AND (s.owner_account_id IS NULL OR $2::text IS NULL OR s.owner_account_id = $2)
       ORDER BY s.started_at DESC`,
     [from.toISOString(), ownerId],

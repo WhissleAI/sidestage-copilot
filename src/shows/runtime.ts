@@ -32,7 +32,7 @@ import { ShowContextEngine } from "../ingest/showContext.js";
 import { Pipeline } from "../pipeline/pipeline.js";
 import { WhissleClient } from "../llm/whissle.js";
 import { meter } from "../llm/meter.js";
-import { policy } from "../guardrails/policy.js";
+import { policy, policyScope, type SellerGuardrailPolicy } from "../guardrails/policy.js";
 import { spendWindow } from "../llm/billing.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
 import { EbayLiveWatcher } from "../ingest/ebaylive/watcher.js";
@@ -55,6 +55,13 @@ export interface ShowRuntimeOpts {
   events: RuntimeEvents;
   /** Use this database instead of a per-show file (the seeded demo show). */
   dbPath?: string;
+  /** The owner's merged guard settings, looked up per call so a change made
+   *  mid-show applies to the next draft. Watcher-driven work (a buyer's
+   *  comment arriving from eBay) runs inside this policy; request-driven
+   *  work runs inside the caller's. */
+  policyFor?: () => Promise<SellerGuardrailPolicy>;
+  /** The watcher decided the show is over. The registry finishes the session. */
+  onEnded?: (showId: string, why: string) => void;
 }
 
 /** How long to let the host talk about a new lot before asking what it is. A
@@ -217,8 +224,24 @@ export class ShowRuntime {
    * about it, and asking in that instant gets a name built from the previous
    * lot's speech — confidently wrong, which is worse than unnamed.
    */
+  /** Timers waiting to name a lot; cleared on stop so a detached show cannot
+   *  wake up and write to a closed pool. */
+  private nameTimers = new Set<NodeJS.Timeout>();
+
+  /** Run watcher-driven work inside the owner's guard policy (see policy.ts). */
+  private async underOwnerPolicy<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.o.policyFor) return fn();
+    let p: SellerGuardrailPolicy | null = null;
+    try { p = await this.o.policyFor(); } catch { p = null; }
+    return p ? policyScope.run(p, fn) : fn();
+  }
+
   private async nameLot(listingId: string, lot: { title: string; priceCents: number }): Promise<void> {
-    await new Promise((r) => setTimeout(r, NAME_AFTER_MS));
+    await new Promise<void>((r) => {
+      const t = setTimeout(() => { this.nameTimers.delete(t); r(); }, NAME_AFTER_MS);
+      this.nameTimers.add(t);
+    });
+    if (!this.started) return;
     try {
       const show = await this.repo.show();
       const id = await enrichLot(this.llm, lot, this.showContext.current(), show.title);
@@ -466,11 +489,17 @@ export class ShowRuntime {
         // Straight into the same pipeline the simulated source feeds. eBay's own
         // per-comment UUID becomes the message id, so a re-attach cannot replay
         // a comment that was already answered.
-        void this.pipeline.ingest({ author: c.author, text: c.text, externalId: c.id });
+        if (!this.started) return;
+        void this.underOwnerPolicy(() => this.pipeline.ingest({ author: c.author, text: c.text, externalId: c.id }));
+      },
+
+      onEnded: (why) => {
+        emit("source", { source: "ebaylive", eventId, connected: false, detail: `ended — ${why}` });
+        this.o.onEnded?.(this.showId, why);
       },
 
       onLot: (lot) => {
-        if (!lot.title) return;
+        if (!lot.title || !this.started) return;
         void (async () => {
         // The live lot becomes a versioned listing. When the price moves, the
         // version bumps — which is exactly the input the staleness guard and the
@@ -525,6 +554,9 @@ export class ShowRuntime {
   }
 
   async stop(): Promise<void> {
+    this.started = false;
+    for (const t of this.nameTimers) clearTimeout(t);
+    this.nameTimers.clear();
     // Drain the reply path FIRST. A draft still waiting on the gateway will
     // come back to a database this method is about to close.
     await this.pipeline.stop();

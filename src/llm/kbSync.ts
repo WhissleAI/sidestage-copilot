@@ -26,9 +26,6 @@ interface KbDoc { id: string; title?: string; file_name?: string }
 import type { ShowRuntime } from "../shows/runtime.js";
 import { formatMoney } from "../domain/money.js";
 
-/** Wait this long after the last lineup change before writing. A card show
- *  opens a lot every ~40s; re-uploading per lot would be pointless churn. */
-const DEBOUNCE_MS = 45_000;
 
 export class KbSync {
   private timers = new Map<string, NodeJS.Timeout>();
@@ -79,18 +76,6 @@ export class KbSync {
     return { uploaded: true, lots: listings.length };
   }
 
-  /** Coalesce a burst of lineup changes into one upload. */
-  scheduleSync(rt: ShowRuntime): void {
-    const existing = this.timers.get(rt.showId);
-    if (existing) clearTimeout(existing);
-    this.timers.set(
-      rt.showId,
-      setTimeout(() => {
-        this.timers.delete(rt.showId);
-        void this.syncShow(rt).catch((e) => console.warn(`[kb] ${rt.showId}: ${(e as Error).message}`));
-      }, DEBOUNCE_MS),
-    );
-  }
 
   cancel(showId: string): void {
     const t = this.timers.get(showId);

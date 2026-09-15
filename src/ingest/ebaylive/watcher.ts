@@ -50,6 +50,8 @@ export interface WatcherEvents {
   onLot?: (l: LiveLot) => void;
   onViewers?: (n: number) => void;
   onStatus?: (s: { connected: boolean; detail: string }) => void;
+  /** The show has gone quiet for long enough that it is over. Fired once. */
+  onEnded?: (why: string) => void;
 }
 
 export interface WatcherOpts extends WatcherEvents {
@@ -63,6 +65,12 @@ export interface WatcherOpts extends WatcherEvents {
 const COMMENT_SILENCE_MS = 120_000;
 /** "Otherwise active" = a lot or viewer count moved within this window. */
 const ACTIVITY_WINDOW_MS = 90_000;
+/** No comment, no viewer change and no lot for this long: the show is over.
+ *  The page cannot be trusted to say so — sellers reuse event ids, and an
+ *  "ended" id is live again the following week — so the feed's own silence
+ *  is the signal. Fifteen minutes is longer than any break a host takes with
+ *  the stream still up. */
+const END_SILENCE_MS = 15 * 60_000;
 /** Reloading forever would hammer eBay if the selector itself broke. */
 const MAX_RELOADS = 20;
 
@@ -293,9 +301,18 @@ export class EbayLiveWatcher {
    * it would be churn. A show whose lots keep opening while chat has said
    * nothing for minutes has lost its feed.
    */
+  private ended = false;
+
   private async watchdog(): Promise<void> {
     const quietMs = Date.now() - this.lastCommentAt;
     const activeMs = Date.now() - this.lastActivityAt;
+    if (!this.ended && quietMs > END_SILENCE_MS && activeMs > END_SILENCE_MS) {
+      this.ended = true;
+      const why = `no chat, viewers or lots for ${Math.round(quietMs / 60_000)} min`;
+      this.o.onStatus?.({ connected: false, detail: `show appears to have ended — ${why}` });
+      this.o.onEnded?.(why);
+      return;
+    }
     if (quietMs < COMMENT_SILENCE_MS || activeMs > ACTIVITY_WINDOW_MS) return;
     if (this.reloads >= MAX_RELOADS) return;
 
