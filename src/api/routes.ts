@@ -738,7 +738,32 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     };
   });
 
-  app.get("/api/catalogs", async () => listCatalogs());
+  /**
+   * Every catalog, with where it came from. A catalog named `ebay-<eventId>`
+   * is a preparation of someone's live show; `ebay-<handle>` is the seller's
+   * own listings, imported; anything else shipped as a demo. The name alone
+   * told an operator none of that, so the Catalog page could not say which
+   * show a lineup belonged to or link back to it.
+   */
+  app.get("/api/catalogs", async () => {
+    const prepared = await preparer.list().catch(() => []);
+    const byCatalog = new Map(prepared.filter((p) => p.catalogId).map((p) => [p.catalogId as string, p]));
+    return listCatalogs().map((c) => {
+      const p = byCatalog.get(c.id);
+      // An event id is sixteen alphanumerics; a seller handle is not. A
+      // catalog shaped like a preparation whose row is gone (dropped, or made
+      // on another machine) is still a show's lineup, not "your listings".
+      const eventShaped = /^ebay-[A-Za-z0-9]{16}$/.test(c.id);
+      const origin = p
+        ? { kind: "prepared" as const, eventId: p.eventId, showTitle: p.title, host: p.host, sellerHandle: p.sellerHandle, preparedAt: p.preparedAt as string | null }
+        : eventShaped
+          ? { kind: "prepared" as const, eventId: c.id.slice(5), showTitle: c.name, host: c.seller?.name ?? "", sellerHandle: c.seller?.handle ?? null, preparedAt: null as string | null }
+          : c.id.startsWith("ebay-")
+            ? { kind: "imported" as const, handle: c.id.slice(5) }
+            : { kind: "seed" as const };
+      return { ...c, origin };
+    });
+  });
 
   /**
    * Is this catalog ready to run a show?
