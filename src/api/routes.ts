@@ -1217,7 +1217,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     ]);
     return {
       live: discovery.shows,
-      discovery: { reason: discovery.reason, session: discovery.session },
+      // `checkedAt` is when the grid was last actually read — the number the
+      // Discover tab should show beside Refresh. The session's age is a
+      // different fact and was being mistaken for it.
+      discovery: { reason: discovery.reason, session: discovery.session, checkedAt: gridCheckedAt() },
       prepared,
       preparing: [...preparing],
       watching: watched,
