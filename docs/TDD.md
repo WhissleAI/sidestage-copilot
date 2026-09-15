@@ -112,8 +112,9 @@ numbered by the server (`SessionSignals.recordAudio`; the bridge's own count is 
 frame, the transcript route the last utterance, and loud audio with no transcript for 45 s emits
 `listen: stalled` to the console while the bridge reconnects (`startStallWatch` in
 `src/api/audioBridge.ts`). Measured 2026-09-15: a session stopped transcribing with speech still
-flowing; the gateway lists no `bench-` listen sessions at all, so there is nothing upstream to
-reconcile against yet. **Divergence, historical:** the proposal INSERT did not run until
+flowing — the gateway's pipecat task had cancelled it at 300 s of "idle", judged on bot-speech
+frames a listen-only pipeline never emits. Fixed upstream (whissle_gateway_backend #1105: idle
+keyed on transcription, 30-minute bound, cause logged, session recorded as a `listen` row). **Divergence, historical:** the proposal INSERT did not run until
 2026-09-15, so reports generated before that date carry no drafted replies.
 
 ## 2. Catalog grounding

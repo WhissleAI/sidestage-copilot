@@ -371,12 +371,19 @@ Stated plainly, because these are the things a reviewer would otherwise find.
    Chunk numbering is the server's (a bridge reopened mid-show used to overwrite the first
    minutes with its new chunk 0 — measured 2026-09-15), and each kept frame gets a fuller
    reading from the show's agent after the show (`src/shows/frameDescriber.ts`), which the
-   timeline shows beside the utterance it was taken during. **The listen session can go deaf
-   while the audio it is fed is still speech** (measured the same day: ninety seconds of
-   speech-level chunks after the last utterance, and the gateway keeps no record of a
-   listen-only session to reconcile against). The backend flags it (`listen` event: loud audio,
-   no transcript for 45 s), the console says so instead of showing a frozen last line, and the
-   bridge mints a new session and republishes the same track, up to five times.
+   timeline shows beside the utterance it was taken during. **The listen session used to end at five
+   minutes** (measured the same day: ninety seconds of speech-level chunks after the last
+   utterance, and the gateway's log showed `connect 17:40:31.577 … disconnect 17:45:31.563`,
+   flush reason `task.on_pipeline_finished`). Cause: pipecat's `PipelineTask` cancels a pipeline
+   that has seen none of its idle-timeout frames for 300 s, and a listen-only pipeline never
+   emits the bot-speech or user-speech frames it watched. Fixed in the gateway
+   (whissle_gateway_backend PR #1105: the listen-only task is keyed on transcription with a
+   30-minute bound, the timeout logs its cause, and a listen session is recorded as a `calls`
+   row with `to_number = listen`, so `/api/sessions/{room}` resolves and the report's platform
+   summary can match it). This side keeps its own guard regardless: the backend flags loud
+   audio with no transcript for 45 s (`listen` event), the console says so instead of showing a
+   frozen last line, and the bridge mints a new session and republishes the same track, up to
+   five times.
 6. **eBay Live ingestion is a scrape, not an API — and discovery needs the house session.**
    eBay publishes no Live chat, lot or schedule API, so `src/ingest/ebaylive/` drives real
    Chrome over eBay's own pages: the watcher reads a show's public `player.html` (no sign-in),
