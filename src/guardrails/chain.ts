@@ -30,7 +30,12 @@ export function runChain(i: GuardInput, opts: { evidenceQuality?: number; abstai
 
   const blocked = guards.filter((g) => g.verdict === "block");
   const revise = guards.filter((g) => g.verdict === "revise");
-  const verdict: Verdict = blocked.length ? "block" : revise.length ? "revise" : "allow";
+  // A guard that asks for a revision no longer earns the draft a repair pass:
+  // the chain reports `block`, so the pipeline's `revise` branch (the single
+  // composer.repair call, pipeline.ts) is never taken and the card reaches the
+  // seller as held. Each guard's own result still says `revise`, so the pills
+  // and the audit entry still name which check asked for what.
+  const verdict: Verdict = blocked.length || revise.length ? "block" : "allow";
 
   const failures = [...blocked, ...revise].map((g) => ({ guard: g.guard, reason: g.reason || "failed" }));
 

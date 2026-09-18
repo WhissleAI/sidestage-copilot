@@ -26,7 +26,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { dirname, join, resolve } from "node:path";
-import { chromium, type BrowserContext } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 
 const PATH = resolve(process.env.EBAY_SESSION_PATH || "./data/ebay-session.json");
 /** The persistent browser profile `npm run ebay:signin` signs into. Preferred
@@ -130,7 +130,15 @@ export async function openContext(o: {
   viewport?: { width: number; height: number };
 }): Promise<{ ctx: BrowserContext; close: () => Promise<void> }> {
   const viewport = o.viewport ?? { width: 1440, height: 1200 };
-  const args = ["--disable-blink-features=AutomationControlled"];
+  const args = [
+    "--disable-blink-features=AutomationControlled",
+    // /dev/shm is tmpfs and its pages count against the container's memory
+    // limit, so a browser that fills it OOMs the app rather than slowing down.
+    // The watcher has always passed this; discovery did not, and discovery is
+    // the path that runs every five minutes forever.
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+  ];
   const proxy = discoveryProxy();
   const profile = profileDir();
   if (profile) {
@@ -141,7 +149,7 @@ export async function openContext(o: {
         ...(proxy ? { proxy } : {}),
       });
     const ctx = await persistent("chrome").catch(() => persistent());
-    return { ctx, close: () => ctx.close().catch(() => {}) };
+    return { ctx, close: () => closeAll(ctx) };
   }
   const launch = (channel?: "chrome") =>
     chromium.launch({ headless: o.headless, args, ...(channel ? { channel } : {}), ...(proxy ? { proxy } : {}) });
@@ -151,13 +159,34 @@ export async function openContext(o: {
     viewport, userAgent: o.userAgent,
     ...(state ? { storageState: state as never } : {}),
   });
-  return {
-    ctx,
-    close: async () => {
-      await ctx.close().catch(() => {});
-      await browser.close().catch(() => {});
-    },
-  };
+  return { ctx, close: () => closeAll(ctx, browser) };
+}
+
+/**
+ * Put the browser down, and say so when it will not go.
+ *
+ * Closing the CONTEXT is not closing the browser. On the persistent path this
+ * used to be the whole teardown, and `.catch(() => {})` meant a close that
+ * failed was indistinguishable from one that worked. Measured on the deployed
+ * box, 2026-09-18: four defunct `[chrome]` / `[chrome_crashpad]` entries left
+ * behind by every five-minute discovery poll, and a host that thrashed itself
+ * to a standstill after about twenty hours of it. So: close the context, then
+ * the browser it belongs to, and log whichever one refuses — a silent failure
+ * here is a leak nobody can see until the box stops answering.
+ */
+async function closeAll(ctx: BrowserContext, browser?: Browser): Promise<void> {
+  try {
+    await ctx.close();
+  } catch (e) {
+    console.warn(`  ebay: browser context would not close — ${(e as Error).message.slice(0, 120)}`);
+  }
+  const b = browser ?? ctx.browser() ?? null;
+  if (!b) return;
+  try {
+    await b.close();
+  } catch (e) {
+    console.warn(`  ebay: browser would not close — ${(e as Error).message.slice(0, 120)}`);
+  }
 }
 
 /**

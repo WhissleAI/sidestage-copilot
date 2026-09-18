@@ -4,6 +4,10 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Small, and bounded: the database is the one thing on this box that must
+    # not be paged out while something else misbehaves.
+    mem_limit: 420m
+    shm_size: "128mb"
     environment:
       POSTGRES_USER: sidestage
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sidestage}
@@ -19,6 +23,21 @@ services:
   app:
     build: .
     restart: unless-stopped
+    # PID 1 that REAPS. The app launches a real Chrome every discovery refresh,
+    # and Node as PID 1 does not wait() on orphaned grandchildren: measured on
+    # 2026-09-18, four defunct `[chrome]` / `[chrome_crashpad]` entries survived
+    # every five-minute poll. Zombies hold no memory, but they are the visible
+    # end of a browser that was not fully torn down, and the same box wedged
+    # after ~20 hours of that. tini reaps them.
+    init: true
+    # A ceiling, so a leak in the browser path can never again starve Postgres,
+    # Caddy and sshd on a 2 GB box — which is what "the site is down" looked
+    # like on 2026-09-18: TCP accepted on every port, nothing ever answering,
+    # 3.2M disk reads per three hours of pure page-thrash. Over this, the app
+    # is OOM-killed and restarted by `restart: unless-stopped`; under it,
+    # everything else keeps serving.
+    mem_limit: 1100m
+    memswap_limit: 1100m
     env_file: .env
     environment:
       DATABASE_URL: postgres://sidestage:${POSTGRES_PASSWORD:-sidestage}@db:5432/sidestage
@@ -43,12 +62,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # Chrome needs a bigger /dev/shm than Docker's 64 MB default.
-    shm_size: "1gb"
+    # Chrome needs more than Docker's 64 MB default, but /dev/shm is tmpfs and
+    # its pages count against mem_limit above — a 1 GB shm under a 1.1 GB limit
+    # is a way to OOM the container by filling a filesystem. Half that, and the
+    # browsers pass --disable-dev-shm-usage anyway (session.ts, watcher.ts).
+    shm_size: "512mb"
 
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    mem_limit: 128m
     ports:
       - "80:80"
       - "443:443"

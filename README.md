@@ -330,6 +330,24 @@ address, kept warm by the discovery poller (`DISCOVERY_REFRESH_MIN`, default 5).
 routes only the discovery browser, never the API client or the player attach. Attaching by
 link, reports, analytics and the eBay consent flow all run deployed without it.
 
+### The box, and what it can hold
+
+One t3.small (2 GB) runs Postgres, the app, a real Chrome and Caddy. On
+2026-09-18 that box wedged: every port accepted a TCP connection and nothing
+ever answered, because it was paging 3.2 million reads every three hours and
+no process could make progress. No OOM kill fired — swap absorbed the growth,
+so nothing was killed, everything was starved. The cause was the discovery
+browser: every five-minute poll left four defunct `[chrome]` entries behind,
+because Node as PID 1 does not reap orphaned grandchildren and the persistent
+path closed the context without closing the browser.
+
+Three things hold it now: `init: true` gives the app container a PID 1 that
+reaps, `closeAll` in `src/ingest/ebaylive/session.ts` closes the browser as
+well as the context and logs a close that fails, and `mem_limit` on each
+service means a leak in one can no longer starve the others — the app is
+OOM-killed and restarted while Postgres and Caddy keep serving. Discovery's
+Chrome also passes `--disable-dev-shm-usage` now, which the watcher always did.
+
 ## Known limitations or broken paths
 
 Stated plainly, because these are the things a reviewer would otherwise find.
