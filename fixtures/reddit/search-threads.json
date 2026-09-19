@@ -1,0 +1,55 @@
+{
+  "_recorded": "GET https://oauth.reddit.com/search?q=mechanical%20keyboards&sort=new&t=week&limit=4&type=link — a site-wide thread search. `created_utc` is the only time Reddit gives and it is genuinely when the conversation started, which is what reaches `startedAt`.",
+  "kind": "Listing",
+  "data": {
+    "after": "t3_1n5aa11",
+    "before": null,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "1n5b7kd",
+          "name": "t3_1n5b7kd",
+          "subreddit": "MechanicalKeyboards",
+          "title": "Which mechanical keyboards are actually worth it under $150?",
+          "selftext": "Looking for a TKL with hot-swap sockets. Everything I find is either $60 and mushy or $300.",
+          "author": "kbd_curious",
+          "permalink": "/r/MechanicalKeyboards/comments/1n5b7kd/which_mechanical_keyboards_are_actually_worth_it/",
+          "created_utc": 1789124400,
+          "num_comments": 27,
+          "over_18": false
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "id": "1n5c0aa",
+          "name": "t3_1n5c0aa",
+          "subreddit": "buildapc",
+          "title": "New build finished, now I need a keyboard",
+          "selftext": "Any recommendations for mechanical keyboards that are quiet enough for an office?",
+          "author": "fresh_build",
+          "permalink": "/r/buildapc/comments/1n5c0aa/new_build_finished_now_i_need_a_keyboard/",
+          "created_utc": 1789131600,
+          "num_comments": 8,
+          "over_18": false
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "id": "1n5cnsf",
+          "name": "t3_1n5cnsf",
+          "subreddit": "nsfwgear",
+          "title": "adults only thread",
+          "selftext": "",
+          "author": "someone",
+          "permalink": "/r/nsfwgear/comments/1n5cnsf/adults_only_thread/",
+          "created_utc": 1789135200,
+          "num_comments": 2,
+          "over_18": true
+        }
+      }
+    ]
+  }
+}

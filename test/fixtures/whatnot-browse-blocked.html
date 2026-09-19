@@ -1,0 +1,18 @@
+<!--
+  Cloudflare's managed challenge, as served to a plain HTTPS GET of
+  `whatnot.com/browse` on 2026-09-19: HTTP 403, ~5.6 KB, `<title>Just a
+  moment...</title>`, and `#challenge-error-text` as the one identifiable
+  element. Trimmed to the parts the extractor looks at.
+
+  The point of keeping it: a challenge page must never read as "nobody is
+  selling anything tonight".
+-->
+<body class="no-js">
+  <div class="main-wrapper">
+    <div class="main-content">
+      <h1><span>www.whatnot.com</span></h1>
+      <div id="challenge-error-text">Verify you are human by completing the action below.</div>
+      <div id="challenge-running">Verifying…</div>
+    </div>
+  </div>
+</body>

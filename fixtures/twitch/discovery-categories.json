@@ -1,0 +1,17 @@
+{
+  "_recorded": "GET https://api.twitch.tv/helix/search/categories?query=pokemon&first=3 — the shape Helix returns for a category search on an APP access token. Requires an app or user token and NO scope, which is the whole reason Twitch discovery needs no consent.",
+  "data": [
+    {
+      "id": "27471",
+      "name": "Pokémon Trading Card Game",
+      "box_art_url": "https://static-cdn.jtvnw.net/ttv-boxart/27471-52x72.jpg",
+      "igdb_id": ""
+    },
+    {
+      "id": "1728473193",
+      "name": "Pokémon Scarlet/Violet",
+      "box_art_url": "https://static-cdn.jtvnw.net/ttv-boxart/1728473193_IGDB-52x72.jpg",
+      "igdb_id": "217590"
+    }
+  ]
+}
