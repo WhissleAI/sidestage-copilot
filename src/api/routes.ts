@@ -49,7 +49,7 @@ import {
   SettingsStore, sanitize, merge, diffFromDefaults, invalidPatterns, pushLayerA,
   type SettingsView,
 } from "../settings/store.js";
-import { policy, policyScope, DEFAULT_POLICY } from "../guardrails/policy.js";
+import { policy, policyScope, runInPolicyScope, DEFAULT_POLICY } from "../guardrails/policy.js";
 import { PersonaStore, sanitizePersona, type Persona } from "../persona/store.js";
 import { VoiceCorpus } from "../persona/voice.js";
 import { withBoundaries } from "../persona/boundaries.js";
@@ -214,9 +214,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.addHook("onRequest", (req, _reply, done) => {
     const a = actorOf(req as object);
     if (!a) return done();
-    armedFor(a.id)
-      .then((p) => policyScope.run(p, done))
-      .catch(() => done());
+    // A settings read that fails falls back to the shipped defaults, never to
+    // "whatever the process last had" — see `runInPolicyScope`.
+    runInPolicyScope(() => armedFor(a.id), done);
   });
 
   // ── whose show ────────────────────────────────────────────────────────────
@@ -583,30 +583,40 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     await settings.persist(actor.id, overrides);
     // Layer B first: it is in-process and cannot fail, so the seller's own
     // console is never checking against a policy it does not show.
+    //
+    // Re-armed for THIS REQUEST's scope, not for the process. It used to call
+    // `settings.activate`, which is `setPolicy` — a process-global write on a
+    // per-account save. Every background path, and every request whose scope
+    // failed to load, then read the last writer's guardrails. The scope is the
+    // per-request mechanism and it is enough: the store's cache is invalidated
+    // by `persist`, so the seller's next request loads what they just saved.
     const active = merge(overrides);
-    settings.activate(active);
+    return policyScope.run(active, async () => {
+      // Layer A second, per agent, reporting rather than throwing — a gateway
+      // that refuses the push must not lose the edit. It projects `policy()`,
+      // which is why it runs inside the scope above.
+      const targets = await armTargets();
+      const reports = await Promise.all(
+        targets.map((id) => pushLayerA(config.whissle.base, config.whissle.apiKey, id)),
+      );
+      const armed = reports.find((r) => !r.ok) ?? reports[0] ?? null;
 
-    // Layer A second, per agent, reporting rather than throwing — a gateway
-    // that refuses the push must not lose the edit.
-    const targets = await armTargets();
-    const reports = await Promise.all(
-      targets.map((id) => pushLayerA(config.whissle.base, config.whissle.apiKey, id)),
-    );
-    const armed = reports.find((r) => !r.ok) ?? reports[0] ?? null;
-
-    return view(actor.id, armed ?? null);
+      return view(actor.id, armed ?? null);
+    });
   });
 
   app.post("/api/settings/reset", async (req, reply) => {
     const actor = mustWrite(req as object, reply);
     if (!actor) return;
     await settings.persist(actor.id, {});
-    settings.activate(DEFAULT_POLICY);
-    const targets = await armTargets();
-    const reports = await Promise.all(
-      targets.map((id) => pushLayerA(config.whissle.base, config.whissle.apiKey, id)),
-    );
-    return view(actor.id, reports.find((r) => !r.ok) ?? reports[0] ?? null);
+    // This account's scope, not the process's — same reason as the PUT above.
+    return policyScope.run(DEFAULT_POLICY, async () => {
+      const targets = await armTargets();
+      const reports = await Promise.all(
+        targets.map((id) => pushLayerA(config.whissle.base, config.whissle.apiKey, id)),
+      );
+      return view(actor.id, reports.find((r) => !r.ok) ?? reports[0] ?? null);
+    });
   });
 
 
@@ -649,9 +659,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     // Boundaries are guard rules the moment they are saved. Re-arm Layer B for
     // THIS request's scope so the seller's own dry-run checks against what they
     // just wrote rather than against the policy that was scoped in at the top
-    // of the request.
-    settings.activate(await armedFor(actor.id));
-    return personaView(actor.id);
+    // of the request. In the scope, and only in the scope: the comment always
+    // said "this request", and `settings.activate` wrote the whole process.
+    return policyScope.run(await armedFor(actor.id), () => personaView(actor.id));
   });
 
   app.post<{ Body: { paste?: unknown } }>("/api/persona/learn", async (req, reply) => {

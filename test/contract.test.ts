@@ -363,9 +363,15 @@ describe("who is allowed to act", () => {
 });
 
 describe("settings change what the guards enforce", () => {
-  test("a save re-arms Layer B in this process", async () => {
+  test("a save re-arms Layer B for this SELLER's next request", async () => {
     // The point of the settings surface: editing it changes what the NEXT
     // reply is checked against, not just what a form displays.
+    //
+    // For the seller who saved, and only for them. This used to assert that a
+    // save moved `policy()` — the PROCESS default — which is the same
+    // singleton mistake as the active show: with two sellers on the box, one
+    // save re-armed the other's guards (ACCESS-16). `enforcing` is `policy()`
+    // read inside the request, which is what the guards actually see.
     const before = (await inject({ method: "GET", url: "/api/settings", headers: auth })).json();
     assert.equal(before.policy.maxDiscountPct, 15);
 
@@ -376,11 +382,14 @@ describe("settings change what the guards enforce", () => {
     });
     assert.equal(saved.statusCode, 200);
     assert.equal(saved.json().policy.maxDiscountPct, 7);
-    // Layer B is the live module, not a copy of the response body.
-    assert.equal(policy().maxDiscountPct, 7);
+    const armed = (await inject({ method: "GET", url: "/api/settings", headers: auth })).json();
+    assert.equal(armed.enforcing.maxDiscountPct, 7, "the seller's own next request is not guarded by what they saved");
+    // And nobody else's work is: the process default is untouched.
+    assert.equal(policy().maxDiscountPct, 15);
 
     await inject({ method: "POST", url: "/api/settings/reset", headers: auth });
-    assert.equal(policy().maxDiscountPct, 15);
+    const reset = (await inject({ method: "GET", url: "/api/settings", headers: auth })).json();
+    assert.equal(reset.enforcing.maxDiscountPct, 15);
   });
 
   test("a regex that does not compile is refused, not stored", async () => {

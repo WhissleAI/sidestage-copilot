@@ -156,6 +156,33 @@ let cached: SellerGuardrailPolicy | null = null;
  */
 export const policyScope = new AsyncLocalStorage<SellerGuardrailPolicy>();
 
+/**
+ * Enter the scope for one unit of work, or fall back EXPLICITLY.
+ *
+ * The request hook used to be `load().then(p => run(p, done)).catch(() => done())`,
+ * and that `catch` is the bug: on a rejected promise the request carried on
+ * with no scope at all, so `policy()` read the process default — which, until
+ * this change, was whatever the last account to save settings had activated.
+ * One seller's replies were checked against another seller's never-say rules
+ * and discount ceiling during a database blip, silently, with nothing in the
+ * audit chain saying so.
+ *
+ * Failing to read a seller's settings is not permission to use somebody
+ * else's. The fallback is named here, once, and it is the shipped default.
+ */
+export function runInPolicyScope(
+  load: () => Promise<SellerGuardrailPolicy>,
+  done: () => void,
+): void {
+  load().then(
+    (p) => policyScope.run(p, done),
+    (e) => {
+      console.warn(`[guardrails] could not read this caller's settings — guarding with the defaults: ${(e as Error).message}`);
+      policyScope.run(DEFAULT_POLICY, done);
+    },
+  );
+}
+
 /** The active policy. `GUARDRAIL_POLICY_PATH` points at a JSON file that is
  *  shallow-merged over the defaults, so a seller can tighten or loosen the rules
  *  without a code change — and the same file drives the agent config. */
