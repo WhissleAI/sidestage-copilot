@@ -21,7 +21,6 @@ import { MockMarketplace } from "../actions/marketplace/mock.js";
 import { EbayMarketplace } from "../actions/marketplace/ebay.js";
 import { EbayOAuth } from "../ingest/ebay/oauth.js";
 import type { MarketplaceAdapter } from "../actions/marketplace/port.js";
-import type { RemoteListing } from "../actions/marketplace/port.js";
 import { ResearchService } from "../research/research.js";
 import { enrichLot, needsIdentity } from "../ingest/enrichLot.js";
 import { SessionRecord, buildReport, type ShowReport } from "./sessionRecord.js";
@@ -347,10 +346,9 @@ export class ShowRuntime {
       });
     }
 
-    const remote: RemoteListing[] = this.lotRows.map((l) => ({
-      id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
-    }));
-    this.market.reset(remote);
+    // The marketplace mirror is seeded by `refreshIndex`, above and on every
+    // later change to the listing set — not once, here, from a show that has
+    // not loaded its catalog yet.
   }
 
   private lotRows: ListingWithDescription[] = [];
@@ -409,6 +407,25 @@ export class ShowRuntime {
     await this.retriever.rebuild();
     this.lotRows = await this.repo.listings();
     this.lots = this.lotRows.map((l) => ({ id: l.id, title: `${l.title} size ${l.size}` }));
+
+    // Re-seed the marketplace mirror from the lots that exist NOW.
+    //
+    // This used to happen once, at the end of `init()`, from whatever the show
+    // held at that moment. A freshly attached show holds nothing: the catalog
+    // is applied after attach and live lots are discovered later still, so
+    // every lot a real show actually sells was unknown to the mock and
+    // `reserve` answered "listing lst_xxx does not exist remotely" — a green
+    // preflight checklist followed by a failed commit. The demo show was
+    // seeded before `init` ran, which is why nothing caught it.
+    //
+    // `refreshIndex` is the one place that reloads the local listing set, so it
+    // is the one place the mirror can be kept in step with it. Seeding from the
+    // local rows is also what makes the version check mean something: a lot
+    // whose price moved under a proposal now conflicts, which is what the
+    // optimistic concurrency is for, instead of vanishing.
+    this.market.reset(this.lotRows.map((l) => ({
+      id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
+    })));
 
     // Warm the market cache for the lots about to be asked about — the pinned
     // one first, then the front of the queue. eBay is slow enough that fetching

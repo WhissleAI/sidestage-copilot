@@ -65,7 +65,7 @@ export interface Catalog {
    * appeared on the seeded demo. A catalog that ships market data is what makes
    * the research path real rather than demonstrated.
    */
-  comps?: (Comp & { sku: string })[];
+  comps?: CatalogComp[];
   /**
    * Answers the seller has already given, carried forward between shows.
    *
@@ -78,6 +78,29 @@ export interface Catalog {
    */
   qa?: CatalogQa[];
 }
+
+/**
+ * A comparable as a catalog FILE carries it — which is not quite the shape the
+ * rest of the system uses.
+ *
+ * `Comp.priceCents` was called `soldPriceCents` until comps grew an asking/sold
+ * `basis`, and no catalog on disk was migrated. `Repo.insertComp` reads
+ * `priceCents`, so every one of those rows arrived as `undefined` and Postgres
+ * refused it — taking the WHOLE import down with it, because a throw in the
+ * middle of `applyCatalog` leaves a show with some of its items, none of its
+ * comps and no answers. Both fixture catalogs ship comps, so every real import
+ * of either one failed; the demo show never noticed because `db/seed.ts` writes
+ * its comps directly.
+ *
+ * Read both names here, once, and let the repo keep exactly one field.
+ */
+export type CatalogComp = Omit<Comp, "priceCents" | "basis"> & {
+  sku: string;
+  priceCents?: number;
+  /** The pre-`basis` name for `priceCents`. Still on every file we ship. */
+  soldPriceCents?: number;
+  basis?: Comp["basis"];
+};
 
 export interface CatalogQa {
   id: string;
@@ -219,6 +242,8 @@ export interface ApplyResult extends ImportResult {
   catalogName: string;
   agentId: string | null;
   policies: number;
+  /** Comparables that actually landed — not the number the file offered. */
+  comps: number;
   seller: SellerProfile;
 }
 
@@ -233,7 +258,18 @@ export interface ApplyResult extends ImportResult {
 export async function applyCatalog(repo: Repo, catalog: Catalog): Promise<ApplyResult> {
   const imported = await importCatalog(repo, catalog.items);
   for (const p of catalog.policies) await repo.upsertPolicy(p);
-  for (const c of catalog.comps ?? []) await repo.insertComp(c);
+  // A comp with no usable price is SKIPPED, not thrown. One malformed row
+  // costing a seller their whole catalog — items, policies and answers — is a
+  // far worse outcome than one missing comparable, and the count says how many.
+  let comps = 0;
+  for (const c of catalog.comps ?? []) {
+    const priceCents = c.priceCents ?? c.soldPriceCents;
+    if (!Number.isFinite(priceCents)) continue;
+    // Rows in this table are seeded SALES; anything sourced live from eBay is
+    // an asking price and never lands here (see `Repo.comps`).
+    await repo.insertComp({ ...c, priceCents: priceCents as number, basis: c.basis ?? "sold" });
+    comps++;
+  }
   // Answers carried forward from earlier shows. Without this the catalog could
   // hold them and no show would ever see one.
   for (const q of catalog.qa ?? [])
@@ -247,6 +283,7 @@ export async function applyCatalog(repo: Repo, catalog: Catalog): Promise<ApplyR
     catalogName: catalog.name,
     agentId: catalog.agentId ?? null,
     policies: catalog.policies.length,
+    comps,
     seller: catalog.seller,
   };
 }

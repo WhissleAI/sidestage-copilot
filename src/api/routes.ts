@@ -2486,7 +2486,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           // The stream agent created above already carries this seller's
           // persona and guardrails, and pointing at the shared catalog agent
           // would put this show's lots back into a corpus other shows read.
-          await target.retriever.rebuild();
+          await target.refreshIndex();
           for (const l of await target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
         }
 
@@ -2530,11 +2530,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!catalog) return reply.code(400).send({ error: "a known catalogId is required" });
       try {
         const target = rt(req.params.showId);
-        const applied = applyCatalog(target.repo, catalog);
+        // AWAITED, for the same reason the attach route awaits it. Unawaited,
+        // the response spread a pending promise as `{}` — no counts — and the
+        // rebuild below indexed the catalog the seller had just replaced,
+        // because the import had not landed yet.
+        const applied = await applyCatalog(target.repo, catalog);
         target.seller = catalog.seller;
         target.catalogId = catalog.id;
         if (catalog.agentId) target.useAgent(catalog.agentId);
-        await target.retriever.rebuild();
+        // `refreshIndex`, not `retriever.rebuild`: swapping the catalog changes
+        // the local listing set, and everything derived from it — the lot rows
+        // and the marketplace mirror the actions commit against — has to move
+        // with it. See ShowRuntime.refreshIndex.
+        await target.refreshIndex();
         for (const l of await target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
         const kbResult = await kb.syncShow(target).catch((e) => ({ uploaded: false, lots: 0, reason: (e as Error).message }));
         return { ...applied, kb: kbResult };
