@@ -68,6 +68,20 @@ export interface ShowRuntimeOpts {
   personaFor?: () => Promise<{ persona: Persona; voice: Fact[] } | null>;
   /** The watcher decided the show is over. The registry finishes the session. */
   onEnded?: (showId: string, why: string) => void;
+  /**
+   * Read a finished show, do not reopen it.
+   *
+   * A runtime built over a show that has ENDED — to draft follow-ups against
+   * the catalog it ran on (src/surfaces/dm/drafts.ts). Everything that would
+   * change what the show IS is skipped: the row keeps its `ended` status and
+   * its original clock, no show is created if the id is unknown, and comps are
+   * not warmed for lots nobody is bidding on. `start()` is never called, so no
+   * surface is opened and nothing is ingested.
+   *
+   * The alternative was a second, smaller composition of Repo + Retriever +
+   * Composer + guards, which is the same object graph with different bugs.
+   */
+  replay?: boolean;
 }
 
 /** How long to let the host talk about a new lot before asking what it is. A
@@ -274,6 +288,12 @@ export class ShowRuntime {
     // A show row may not exist yet; the demo show arrives pre-seeded.
     try {
       await this.repo.show();
+      // A replay is a reader. Putting the show back on air and restarting its
+      // clock is exactly what building follow-ups for it must not do.
+      if (this.o.replay) {
+        await this.refreshIndex();
+        return;
+      }
       // The row exists, so this is a RE-attach — a new session on a show that
       // ended. It goes back on air with a fresh clock. A row already `live`
       // (resume after a restart) keeps its clock; that is the WHERE clause.
@@ -285,6 +305,9 @@ export class ShowRuntime {
         [this.showId, new Date().toISOString()],
       );
     } catch {
+      // A replay names a show that already happened. Creating one would answer
+      // "what did these buyers ask" with an empty show rather than an error.
+      if (this.o.replay) throw new Error(`no show ${this.o.showId} to replay`);
       await this.repo.createShow({
         id: this.o.showId,
         title: this.o.title,
@@ -385,6 +408,11 @@ export class ShowRuntime {
     // on demand means never having an answer in time; fetching ahead means
     // nearly always having one. Fire-and-forget: a live show does not wait on
     // comparables, it just has better ones a minute later.
+    //
+    // Not on a replay: nobody is bidding on a lot from a show that ended, and
+    // a background fetch outliving the request that started it is how a closed
+    // pool gets written to.
+    if (this.o.replay) return;
     const pinnedFirst = [...this.lotRows].sort((a, b) =>
       a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1,
     );

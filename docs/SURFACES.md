@@ -92,6 +92,41 @@ adapter and none of it moved.
 A lot's high bidder and countdown ride in `onItem`'s `meta`, because they feed
 `upsertObservedLot` and dropping them would have changed what eBay Live records.
 
+## The follow-up inbox is a surface with no feed
+
+`dm` is the odd one, and deliberately. Every other surface is a place a
+conversation is happening; this one is a place a conversation already happened
+and stopped. On `ebay_47tK1SX0VsiHEXN1` — a real fragrance auction — 190
+comments produced 60 answerable drafts from 29 distinct buyers and the seller
+sent none of them. That is not a number for a report. It is 29 people who asked
+about a specific item and left.
+
+So `parseTarget` takes `show:<showId>` or `inbox:<handle>`, and `open()` throws
+`SurfaceUnavailable` naming `POST /api/shows/:showId/followups` instead —
+because an inbox built out of a show that has ENDED has nothing to hold a socket
+open for. It is the one wired adapter `/api/surfaces` reports as not attachable.
+
+Selection (`src/surfaces/dm/followups.ts`) is pure over the persisted
+`ShowRecord`: a buyer is a follow-up when the copilot could have answered them,
+they never got the answer, the seller did not settle it with a committed action
+on the listing they asked about, and the question was not hype. One row per
+buyer, not per question — two messages three hours later reads as a stranger who
+wants something.
+
+Drafting (`src/surfaces/dm/drafts.ts`) runs `Pipeline.dryRun`, not a second
+composer. Between the question and the follow-up the lot has very likely sold,
+and a standalone drafter would quote a price on something that is gone; running
+a three-hour-old question through the live guard chain against the catalog as it
+stands now is the only thing that makes answering it safe. A blocked draft is
+never stored — `followups.status` has no room for one, and a row that must be
+explained before it can be used is not "ready to send".
+
+Delivery is `draft-only` in code. eBay exposes no messaging API to us and
+Instagram's is behind an app review this project has not applied for, so
+`POST /api/followups/:id/sent` records a human's claim that they sent it from
+their own account. `sent_at` is stamped once, by `COALESCE`, so a retried press
+cannot move when a buyer was actually contacted.
+
 ## Posting is off until a human turns it on
 
 `surface_rooms` (migration 019) records a person deciding we may speak in a

@@ -14,6 +14,7 @@
 import type { SurfaceAdapter, SurfaceId, SurfaceTarget } from "./types.js";
 import { ebayLiveAdapter } from "./ebaylive/adapter.js";
 import { simulatedAdapter } from "./simulated/adapter.js";
+import { dmAdapter } from "./dm/adapter.js";
 
 const adapters = new Map<SurfaceId, SurfaceAdapter>();
 
@@ -52,3 +53,10 @@ export function resolve(input: string): { adapter: SurfaceAdapter; target: Surfa
 // registry costs nothing a caller did not already pay.
 register(ebayLiveAdapter);
 register(simulatedAdapter);
+// The follow-up inbox parses `show:<id>` and `inbox:<handle>` — prefixes no
+// other adapter looks at — and refuses `open()` with a typed error saying so,
+// because an inbox built from a show that has ENDED has no feed to watch.
+// Registered anyway: `resolve()` is how the console learns what a pasted
+// string is, and "that is a follow-up inbox, built this other way" is a far
+// better answer than "we do not recognise that".
+register(dmAdapter);

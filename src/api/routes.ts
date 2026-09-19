@@ -13,6 +13,9 @@ import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid, rememb
 import { SurfaceRooms } from "../surfaces/rooms.js";
 import { all as surfaceAdapters } from "../surfaces/registry.js";
 import { SURFACE_CAPABILITIES, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
+import {
+  FollowUpInbox, buildFollowUps, openDrafter, type FollowUpStatus,
+} from "../surfaces/dm/drafts.js";
 import { Preparer } from "../shows/prepareEvent.js";
 import { sessionStatus } from "../ingest/ebaylive/session.js";
 import { BudgetWatch, budgetState, setBudgetWatch } from "../llm/budget.js";
@@ -1612,7 +1615,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         id,
         label: surfaceAdapters().find((a) => a.id === id)?.label ?? id,
         capabilities: capabilitiesOf(id),
-        attachable: wired.has(id),
+        // Wired, and there is something to open. The follow-up inbox is the one
+        // surface where those come apart: it is built out of a show that has
+        // already ENDED, so its `open()` refuses by design. Reporting it as
+        // attachable would put it in the paste box and hand the operator a 409.
+        attachable: wired.has(id) && id !== "dm",
       })),
     };
   });
@@ -1664,6 +1671,96 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       return { surface, removed: room, rooms: await rooms.list(actor.id, surface) };
     },
   );
+
+  // ── the follow-up inbox ───────────────────────────────────────────────────
+  //
+  // The people who asked during a show and never got an answer. On
+  // `ebay_47tK1SX0VsiHEXN1` that was 29 buyers with 60 answerable questions and
+  // not one reply sent, which until now existed only as a number in a report.
+  //
+  // Nothing here delivers anything. `POST /:id/sent` records that a HUMAN sent
+  // the draft from their own account — see 021_followups.sql for why that is
+  // the whole product and not a limitation we are working around.
+  const followups = new FollowUpInbox(pgPool());
+  const FOLLOWUP_STATUSES = new Set<FollowUpStatus>(["draft", "sent", "dismissed"]);
+
+  /**
+   * Build the follow-ups for a finished show.
+   *
+   * Ownership is the same preHandler every `:showId` route gets: a stranger is
+   * told there is no such show. The show must have ENDED — mid-show, "who has
+   * not converted" is a question about people who are still in the room.
+   */
+  app.post<{ Params: { showId: string } }>("/api/shows/:showId/followups", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "build follow-ups");
+    if (!actor) return reply;
+    const showId = req.params.showId;
+    const row = (
+      await pgPool().query<{ status: string }>("SELECT status FROM shows WHERE id = $1", [showId])
+    ).rows[0];
+    if (!row) return reply.code(404).send({ error: `no show ${showId}` });
+    if (row.status !== "ended") {
+      return reply.code(409).send({
+        error: "this show is still on air — a follow-up is for someone who has left the room",
+        code: "still-live",
+      });
+    }
+
+    const record = await showRecord(pgPool(), showId);
+    // The show's own pipeline, rebuilt in replay mode when the runtime is gone:
+    // the same retrieval, the same voice and the same guards against the
+    // catalog as it stands NOW, which is the only thing that makes a
+    // three-hour-old question safe to answer (src/surfaces/dm/drafts.ts).
+    const opened = await openDrafter(shows, showId);
+    try {
+      return await buildFollowUps(pgPool(), {
+        showId, accountId: actor.id, record, drafter: opened.drafter,
+      });
+    } catch (e) {
+      return reply.code(500).send({ error: (e as Error).message });
+    } finally {
+      await opened.close().catch(() => {});
+    }
+  });
+
+  /** One account's inbox. Scoped in the statement, not by the caller. */
+  app.get<{ Querystring: { status?: string } }>("/api/followups", async (req, reply) => {
+    const actor = actorOf(req as object);
+    if (!actor) return reply.code(401).send({ error: "sign in to read your follow-ups" });
+    const raw = (req.query?.status ?? "").trim().toLowerCase();
+    if (raw && !FOLLOWUP_STATUSES.has(raw as FollowUpStatus)) {
+      return reply.code(400).send({ error: `status must be one of ${[...FOLLOWUP_STATUSES].join(", ")}` });
+    }
+    const status = raw ? (raw as FollowUpStatus) : null;
+    return { status, followups: await followups.list(actor.id, status) };
+  });
+
+  /**
+   * The seller sent it, from their own account.
+   *
+   * We record the fact. Idempotent, and `sent_at` is stamped once: a second
+   * press of the button is the same claim about the same message, and letting
+   * it move the timestamp would make the only evidence of when a buyer was
+   * contacted depend on how many times a console retried.
+   */
+  app.post<{ Params: { id: string } }>("/api/followups/:id/sent", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "mark a follow-up sent");
+    if (!actor) return reply;
+    const row = await followups.markSent(actor.id, req.params.id);
+    if (!row) return reply.code(404).send({ error: `no follow-up ${req.params.id}` });
+    if (row.status === "dismissed") {
+      return reply.code(409).send({ error: "that follow-up was dismissed", followup: row });
+    }
+    return { followup: row };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/followups/:id/dismiss", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "dismiss a follow-up");
+    if (!actor) return reply;
+    const row = await followups.dismiss(actor.id, req.params.id);
+    if (!row) return reply.code(404).send({ error: `no follow-up ${req.params.id}` });
+    return { followup: row };
+  });
 
   /**
    * Start a monitoring session: attach to a live eBay show AND load the catalog
