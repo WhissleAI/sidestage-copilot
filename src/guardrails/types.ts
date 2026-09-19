@@ -3,6 +3,7 @@ import type { Fact } from "../retrieval/facts.js";
 import type { Slots } from "../retrieval/slots.js";
 import type { ListingWithDescription } from "../domain/repo.js";
 import type { Draft } from "../compose/composer.js";
+import type { SurfaceCapabilities } from "../surfaces/types.js";
 
 export interface GuardInput {
   draft: Draft;
@@ -15,6 +16,13 @@ export interface GuardInput {
   currentListings: Map<string, ListingWithDescription>;
   slots: Slots;
   policies: PolicyClause[];
+  /** What the surface this reply is going out on can DO. Guards that reason
+   *  about a catalog ask this before assuming there is one: a Twitch reply
+   *  quoting "$60" is not a stale listing price, it is a number the host said. */
+  surface: SurfaceCapabilities;
+  /** The RULES OF THE ROOM in force here (corpus: "community"). Never an
+   *  answer to the buyer's question — a constraint on the answer. */
+  community: Fact[];
 }
 
 export interface Guard {

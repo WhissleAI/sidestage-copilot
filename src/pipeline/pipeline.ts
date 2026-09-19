@@ -32,6 +32,7 @@ import { Composer } from "../compose/composer.js";
 import { Retriever } from "../retrieval/retriever.js";
 import type { ResearchService } from "../research/research.js";
 import type { GuardInput } from "../guardrails/types.js";
+import { capabilitiesOf } from "../surfaces/types.js";
 import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
 import { admit, classify, classifySpeechAct, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
@@ -345,6 +346,8 @@ export class Pipeline {
           currentListings: new Map(listings.map((l) => [l.id, l])),
           slots: r.slots,
           policies,
+          surface: capabilitiesOf(show.source),
+          community: r.facts.filter((f) => f.corpus === "community"),
         };
       };
       this.grounding.set(proposal.id, { facts: r.facts, slots: r.slots, evidenceQuality: r.evidence[0]?.score ?? 0 });
@@ -479,7 +482,9 @@ export class Pipeline {
     let verdict = p.verdict;
     if (edited) {
       const g = this.grounding.get(id);
-      const [listings, policies] = await Promise.all([this.d.repo.listings(), this.d.repo.policies()]);
+      const [listings, policies, show] = await Promise.all([
+        this.d.repo.listings(), this.d.repo.policies(), this.d.repo.show(),
+      ]);
       const chain = runChain(
         {
           draft: { answer: sentText, claims: [], parsedOk: true, raw: sentText },
@@ -489,6 +494,8 @@ export class Pipeline {
           currentListings: new Map(listings.map((l) => [l.id, l])),
           slots: g?.slots ?? ({} as GuardInput["slots"]),
           policies,
+          surface: capabilitiesOf(show.source),
+          community: (g?.facts ?? []).filter((f) => f.corpus === "community"),
         },
         { evidenceQuality: g?.evidenceQuality ?? 0 },
       );
@@ -584,6 +591,8 @@ export class Pipeline {
         currentListings: new Map(listings.map((l) => [l.id, l])),
         slots: r.slots,
         policies,
+        surface: capabilitiesOf(show.source),
+        community: r.facts.filter((f) => f.corpus === "community"),
       },
       { evidenceQuality: r.evidence[0]?.score ?? 0, abstained: r.abstain },
     );

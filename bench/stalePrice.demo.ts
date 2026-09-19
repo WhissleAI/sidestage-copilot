@@ -14,6 +14,7 @@
 
 import { buildBench } from "./harness.js";
 import { formatMoney } from "../src/domain/money.js";
+import { capabilitiesOf } from "../src/surfaces/types.js";
 import { runChain } from "../src/guardrails/chain.js";
 import { Composer } from "../src/compose/composer.js";
 import { WhissleClient } from "../src/llm/whissle.js";
@@ -82,6 +83,8 @@ async function main(): Promise<void> {
     currentListings: new Map(nowListings.map((l) => [l.id, l])),
     slots: grounded.slots,
     policies: nowPolicies,
+    surface: capabilitiesOf(show.source),
+    community: [],
   });
 
   const verdict = runChain(guardInput(draft), { evidenceQuality: grounded.evidence[0]?.score ?? 0 });
