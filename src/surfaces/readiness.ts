@@ -126,9 +126,19 @@ export function duringPhrase(caps: SurfaceCapabilities): string {
   return acts ? "answers and acts" : "answers, you send";
 }
 
-/** What the surface leaves behind when the phase ends. */
+/**
+ * What the surface leaves behind when the phase ends.
+ *
+ * An async surface was described here as leaving a "weekly digest", which is
+ * the thing we would like it to leave and not the thing it leaves. No digest
+ * is built. What actually survives a Reddit watch or a follow-up inbox is the
+ * queue's own memory of what you sent and what you skipped, which is real and
+ * readable (`GET /api/drafts?status=sent`). Say that instead: a phase table
+ * whose last column promises an unbuilt feature is the same lie as a landing
+ * page doing it, just in smaller type.
+ */
 export const afterPhrase = (caps: SurfaceCapabilities): string =>
-  caps.tempo === "live" ? "report and follow-ups" : "weekly digest";
+  caps.tempo === "live" ? "report and follow-ups" : "a record of what you sent";
 
 /**
  * The order an operator should meet the surfaces in: the reference surface
@@ -312,7 +322,7 @@ function rowFor(
         missing: enabled ? null : "TIKTOK_LIVE_ENABLED",
         before: [
           {
-            label: "Turn TikTok Live on — it needs somebody at the keyboard",
+            label: "Turn TikTok Live on in the server settings",
             done: enabled,
             ...(enabled ? {} : { cta: "Set TIKTOK_LIVE_ENABLED" }),
           },

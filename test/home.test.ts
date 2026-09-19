@@ -147,7 +147,7 @@ describe("what each surface still needs", () => {
     assert.equal(r.tempo, "async");
     assert.equal(r.delivery, "draft-only");
     assert.equal(r.during, "drafts only");
-    assert.equal(r.after, "weekly digest");
+    assert.equal(r.after, "a record of what you sent");
     // Not only in a capability field: the promise that we never post is a
     // Before step, because that is where somebody decides whether to bother.
     assert.equal(
@@ -245,7 +245,7 @@ describe("what each surface still needs", () => {
     assert.equal(duringPhrase(capabilitiesOf("reddit")), "drafts only");
     assert.equal(duringPhrase(capabilitiesOf("dm")), "drafts only");
     assert.equal(afterPhrase(capabilitiesOf("ebaylive")), "report and follow-ups");
-    assert.equal(afterPhrase(capabilitiesOf("reddit")), "weekly digest");
+    assert.equal(afterPhrase(capabilitiesOf("reddit")), "a record of what you sent");
   });
 
   test("every row carries the whole phase story, for every surface", () => {
@@ -257,7 +257,7 @@ describe("what each surface still needs", () => {
       assert.ok(s.missing === null || typeof s.missing === "string", s.id);
       assert.ok(Array.isArray(s.before) && s.before.length > 0, s.id);
       assert.ok(["answers and acts", "answers, you send", "drafts only"].includes(s.during), s.id);
-      assert.ok(["report and follow-ups", "weekly digest"].includes(s.after), s.id);
+      assert.ok(["report and follow-ups", "a record of what you sent"].includes(s.after), s.id);
     }
   });
 });
