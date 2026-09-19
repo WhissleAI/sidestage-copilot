@@ -63,7 +63,20 @@ import { config } from "../config.js";
 import { WhissleClient } from "../llm/whissle.js";
 import { describeFrames, describing } from "../shows/frameDescriber.js";
 import { SendRefused } from "../pipeline/pipeline.js";
+import type { ShowRuntime } from "../shows/runtime.js";
 import type { AppContext } from "./context.js";
+
+/**
+ * What resolving a show needs from a request.
+ *
+ * Not `object`, and not optional: `rt()` takes one of these first, so the only
+ * thing that can resolve a show is a request that carries an actor. A show id
+ * is a string and a string is not a `Caller`, which is what makes
+ * `rt(req.query.showId)` — the shape of ACCESS-01 — a compile error rather
+ * than a cross-tenant read. `method` is read by the ownerless-show rule: a
+ * legacy row with no owner may be read and may not be written.
+ */
+type Caller = { method: string };
 
 /** A keyframe is ~40-120 KB of base64 at the size we send. This is the ceiling
  *  before the request is refused rather than paid for. */
@@ -111,14 +124,27 @@ export function readingText(raw: string): string {
 export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const { hub, shows, kb } = ctx;
 
-  /** Resolve the target show, or 404 with something actionable. */
-  // No showId means "my show": the caller's newest live one. It used to mean
-  // the process's single active show, which on a host with several sellers
-  // was somebody else's.
-  const rt = (showId?: string | null, req?: object) => {
+  /**
+   * Resolve the target show, or throw something a handler can 404 with.
+   *
+   * The REQUEST comes first and is not optional, and that is the whole point.
+   * No showId means "my show": the caller's newest live one. It used to mean
+   * the process's single active show, which on a host with several sellers was
+   * somebody else's — and the previous fix put the actor in this function but
+   * left `req` optional, so the eight unscoped read routes went on calling it
+   * `rt(showId)` and went on serving whichever show the box attached last.
+   * Optional was the bug. A caller with no request cannot resolve a show at
+   * all now, and the type system says so before the process does: the first
+   * parameter is the request, so `rt(showId)` does not compile.
+   */
+  const rt = (req: Caller, showId?: string | null): ShowRuntime => {
     if (showId) return shows.get(showId);
-    const a = req ? actorOf(req) : null;
-    return shows.get(shows.activeFor(a?.id));
+    const mine = shows.activeFor(actorOf(req)?.id);
+    // Deliberately the same sentence the registry uses for "nothing is being
+    // watched": from the caller's side those are the same fact. What it must
+    // never do is reach for a show that is not theirs.
+    if (!mine) throw new Error("no show is being monitored — paste an eBay Live link on Shows to start one");
+    return shows.get(mine);
   };
 
   // ── who is asking ─────────────────────────────────────────────────────────
@@ -346,7 +372,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Querystring: { showId?: string } }>("/api/show/fit", async (req, reply) => {
     let target;
     try {
-      target = rt(req.query.showId, req as object);
+      target = rt(req, req.query.showId);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
     }
@@ -371,7 +397,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   /** The PRD's success metrics for a show, live. */
   app.get<{ Querystring: { showId?: string } }>("/api/show/prd", async (req, reply) => {
     try {
-      const target = rt(req.query.showId, req as object);
+      const target = rt(req, req.query.showId);
       return await prdMetrics(pgPool(), target.showId);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
@@ -383,7 +409,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    *  exactly the guarantee the ladder exists to make. */
   app.get<{ Querystring: { showId?: string } }>("/api/autonomy/readiness", async (req, reply) => {
     try {
-      const target = rt(req.query.showId, req as object);
+      const target = rt(req, req.query.showId);
       const show = await target.show();
       return await promotionReadiness(pgPool(), show.autonomyLevel, actorOf(req as object)?.id ?? null);
     } catch (e) {
@@ -410,7 +436,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.get<{ Querystring: { showId?: string; days?: string } }>("/api/analytics", async (req, reply) => {
     let target;
     try {
-      target = rt(req.query.showId, req as object);
+      target = rt(req, req.query.showId);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
     }
@@ -646,7 +672,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     req.raw.on("close", () => hub.remove(id));
 
     try {
-      const target = rt(req.query.showId, req as object);
+      const target = rt(req, req.query.showId);
       hub.retarget(id, target.showId);
       // Both awaited BEFORE writing. An unresolved promise serialises to `{}`,
       // which would hand the console an empty hello it happily rendered as a
@@ -712,7 +738,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    *  cost rail; the `budget` stream event carries the moment it trips. */
   app.get<{ Querystring: { showId?: string } }>("/api/budget", async (req, reply) => {
     try {
-      const target = rt(req.query.showId, req as object);
+      const target = rt(req, req.query.showId);
       return { showId: target.showId, ...budgetState(target.showId) };
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
@@ -1171,7 +1197,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     // next attach — the seller answered the question thirty seconds ago.
     let appliedLive = false;
     try {
-      const live = rt(req.body?.showId ?? null, req as object);
+      const live = rt(req, req.body?.showId ?? null);
       if (live) {
         await live.repo.insertQa({ id: row.id, question: row.question, answer: row.answer, tags: row.tags ?? "" });
         await live.refreshIndex();
@@ -2529,7 +2555,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const catalog = getCatalog((req.body?.catalogId || "").trim());
       if (!catalog) return reply.code(400).send({ error: "a known catalogId is required" });
       try {
-        const target = rt(req.params.showId);
+        const target = rt(req, req.params.showId);
         const applied = applyCatalog(target.repo, catalog);
         target.seller = catalog.seller;
         target.catalogId = catalog.id;
@@ -2573,7 +2599,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    */
   app.post<{ Params: { showId: string }; Body: unknown }>("/api/shows/:showId/catalog", async (req, reply) => {
     try {
-      const target = rt(req.params.showId);
+      const target = rt(req, req.params.showId);
       const ct = String(req.headers["content-type"] || "");
       let items: CatalogItem[];
 
@@ -2613,7 +2639,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/audio/session", async (req, reply) => {
     let target;
     try {
-      target = rt(req.params.showId);
+      target = rt(req, req.params.showId);
     } catch (e) {
       return reply.code(404).send({ error: (e as Error).message });
     }
@@ -2665,7 +2691,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: "audio bytes are required" });
       let target;
       try {
-        target = rt(req.params.showId);
+        target = rt(req, req.params.showId);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -2754,7 +2780,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const text = (req.body?.text || "").trim();
     if (!text) return reply.code(400).send({ error: "text is required" });
     try {
-      const target = rt(req.params.showId);
+      const target = rt(req, req.params.showId);
 
       // Distributions, not labels. The gateway's own note on this head says
       // accuracy degrades sharply on low-arousal states, so collapsing it to one
@@ -2835,7 +2861,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const raw = Array.isArray(req.body?.levels) ? (req.body.levels as unknown[]) : null;
       if (!raw) return reply.code(400).send({ error: "levels must be an array" });
       try {
-        const target = rt(req.params.showId);
+        const target = rt(req, req.params.showId);
         const levels = raw
           .slice(-240)
           .map((n) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0));
@@ -2876,7 +2902,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       }
       let target;
       try {
-        target = rt(req.params.showId);
+        target = rt(req, req.params.showId);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -2927,7 +2953,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/kb-sync", async (req, reply) => {
     try {
-      return await kb.syncShow(rt(req.params.showId));
+      return await kb.syncShow(rt(req, req.params.showId));
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }
@@ -2940,7 +2966,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!mustWrite(req as object, reply)) return;
       try {
         try {
-          return await rt(req.query.showId, req as object).pipeline.send(req.params.id, req.body?.text, who(req as object));
+          return await rt(req, req.query.showId).pipeline.send(req.params.id, req.body?.text, who(req as object));
         } catch (e) {
           // A refusal is not a failure: the guards did their job at the last
           // moment they could. 409, with the reason, so the console can say it.
@@ -2958,7 +2984,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return rt(req.query.showId, req as object).pipeline.dismiss(req.params.id);
+        return rt(req, req.query.showId).pipeline.dismiss(req.params.id);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -2970,7 +2996,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return await rt(req.query.showId, req as object).pipeline.regenerate(req.params.id);
+        return await rt(req, req.query.showId).pipeline.regenerate(req.params.id);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -2983,7 +3009,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return await rt(req.query.showId, req as object).executor.approve(req.params.id, who(req as object));
+        return await rt(req, req.query.showId).executor.approve(req.params.id, who(req as object));
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -2995,7 +3021,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return rt(req.query.showId, req as object).executor.reject(req.params.id);
+        return rt(req, req.query.showId).executor.reject(req.params.id);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -3007,7 +3033,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        return await rt(req.query.showId, req as object).executor.rollback(req.params.id, who(req as object));
+        return await rt(req, req.query.showId).executor.rollback(req.params.id, who(req as object));
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -3027,7 +3053,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         return reply.code(400).send({ error: `level must be one of ${LADDER.join(", ")}` });
       }
       try {
-        const target = rt(req.query.showId, req as object);
+        const target = rt(req, req.query.showId);
         const show = await target.setAutonomy(level);
         const [entry] = await target.audit.list(1);
         if (entry) hub.emit("audit", { showId: target.showId, ...entry });
@@ -3057,7 +3083,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!actor) return;
       const reason = (req.body?.reason || "wrong fact").trim().slice(0, 80);
       try {
-        const target = rt(req.query.showId, req as object);
+        const target = rt(req, req.query.showId);
         const r = await pgPool().query<{ question: string; sent_text: string | null; draft: string }>(
           `UPDATE reply_proposals
               SET flagged_wrong = TRUE, flag_reason = $3, flagged_at = now()
@@ -3104,7 +3130,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const title = (req.body?.title || "").trim().slice(0, 200);
       if (title.length < 3) return reply.code(400).send({ error: "title is required" });
       try {
-        const target = rt(req.query.showId, req as object);
+        const target = rt(req, req.query.showId);
         const before = (await target.repo.listings()).find((l) => l.id === req.params.listingId);
         if (!before) return reply.code(404).send({ error: `no listing ${req.params.listingId}` });
 
@@ -3144,7 +3170,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const question = (req.body?.question || "").trim();
       if (!question) return reply.code(400).send({ error: "question is required" });
       try {
-        const target = rt(req.query.showId, req as object);
+        const target = rt(req, req.query.showId);
         return await target.pipeline.dryRun(question);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
@@ -3165,7 +3191,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       if (!mustWrite(req as object, reply)) return;
       try {
-        const target = rt(req.query.showId, req as object);
+        const target = rt(req, req.query.showId);
         // Read from the persisted record rather than memory: the operator may
         // be answering something that scrolled past a while ago.
         const row = (
@@ -3190,7 +3216,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const text = (req.body?.text || "").trim();
       if (!text) return reply.code(400).send({ error: "text is required" });
       try {
-        return rt(req.query.showId, req as object).pipeline.ingest({ author: (req.body?.author || "you").trim(), text });
+        return rt(req, req.query.showId).pipeline.ingest({ author: (req.body?.author || "you").trim(), text });
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
@@ -3204,7 +3230,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const query = (req.body?.query || "").trim();
       if (!query) return reply.code(400).send({ error: "query is required" });
       try {
-        const target = rt(req.query.showId, req as object);
+        const target = rt(req, req.query.showId);
         return target.research.run(query, req.body?.listingId ?? (await target.show()).pinnedListingId);
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
@@ -3213,23 +3239,40 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   );
 
   // ── read models ───────────────────────────────────────────────────────────
-  const read = <T>(fn: (showId?: string) => T) =>
-    async (req: { query: { showId?: string } }, reply: { code(n: number): { send(b: unknown): unknown } }) => {
+  /**
+   * A read model of ONE show — the caller's own.
+   *
+   * The show is resolved HERE, from the request, and handed to the route body
+   * already resolved. These eight bodies used to resolve it themselves as
+   * `rt(showId)`, back when `rt`'s request argument was optional: with no
+   * request there was no actor, with no actor there was no account to scope
+   * to, and the registry fell through to the process-global active show. Eight
+   * routes served whichever show the box attached last, to anyone signed in.
+   *
+   * Passing the runtime in rather than the id is the fix that cannot be
+   * forgotten by the next route added here: there is no id for a call site to
+   * resolve and nothing for it to omit.
+   */
+  const read = <T>(fn: (show: ShowRuntime) => T) =>
+    async (
+      req: Caller & { query: { showId?: string } },
+      reply: { code(n: number): { send(b: unknown): unknown } },
+    ) => {
       try {
-        return fn(req.query.showId);
+        return fn(rt(req, req.query.showId));
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }
     };
 
-  app.get<{ Querystring: { showId?: string; limit?: string } }>("/api/audit", read((s) => rt(s).audit.list(200)));
-  app.get<{ Querystring: { showId?: string } }>("/api/audit/verify", read((s) => rt(s).audit.verify()));
-  app.get<{ Querystring: { showId?: string } }>("/api/metrics", read((s) => rt(s).pipeline.metrics()));
-  app.get<{ Querystring: { showId?: string } }>("/api/show", read((s) => rt(s).show()));
-  app.get<{ Querystring: { showId?: string } }>("/api/listings", read((s) => rt(s).repo.listings()));
-  app.get<{ Querystring: { showId?: string } }>("/api/context", read((s) => rt(s).showContext.current()));
-  app.get<{ Querystring: { showId?: string } }>("/api/actions", read((s) => rt(s).executor.list()));
-  app.get<{ Querystring: { showId?: string } }>("/api/proposals", read((s) => rt(s).pipeline.list()));
+  app.get<{ Querystring: { showId?: string; limit?: string } }>("/api/audit", read((s) => s.audit.list(200)));
+  app.get<{ Querystring: { showId?: string } }>("/api/audit/verify", read((s) => s.audit.verify()));
+  app.get<{ Querystring: { showId?: string } }>("/api/metrics", read((s) => s.pipeline.metrics()));
+  app.get<{ Querystring: { showId?: string } }>("/api/show", read((s) => s.show()));
+  app.get<{ Querystring: { showId?: string } }>("/api/listings", read((s) => s.repo.listings()));
+  app.get<{ Querystring: { showId?: string } }>("/api/context", read((s) => s.showContext.current()));
+  app.get<{ Querystring: { showId?: string } }>("/api/actions", read((s) => s.executor.list()));
+  app.get<{ Querystring: { showId?: string } }>("/api/proposals", read((s) => s.pipeline.list()));
 }
 
 /**

@@ -20,6 +20,7 @@ import type { AppContext } from "../src/api/context.js";
 import { policy, DEFAULT_POLICY, setPolicy } from "../src/guardrails/policy.js";
 import { BudgetWatch, isOverBudget, setBudgetWatch } from "../src/llm/budget.js";
 import { db as pgPool } from "../src/db/pg.js";
+import { DEMO_SHOW_ID } from "../src/shows/registry.js";
 import { seed } from "../src/db/seed.js";
 import { spendWindow, type WhissleBilling } from "../src/llm/billing.js";
 import { get } from "node:http";
@@ -28,14 +29,24 @@ let app: FastifyInstance;
 let ctx: AppContext;
 /** A seller session. Every command route requires one. */
 let auth: Record<string, string>;
+let sellerId: string;
 
 before(async () => {
   ({ app, ctx } = await buildApp());
-  await ctx.shows.ensureDemo();
-
   const seller = (await app.inject({ method: "POST", url: "/api/auth/register", headers: { "content-type": "application/json" }, payload: { email: `t${Date.now()}${Math.random().toString(16).slice(2)}@test.local`, password: "password-123", displayName: "test" } })).json();
   auth = { authorization: `Bearer ${seller.token}` };
+  sellerId = seller.account.id;
+  // The demo show belongs to THIS suite's seller. It used to be attached to
+  // nobody, which is how the whole file drove it: every command route resolved
+  // "the show" from a process-global pointer. A show with no owner is now
+  // read-only and no account's default, so the suite says whose it is — which
+  // is also what a real console does.
+  await ctx.shows.ensureDemo(sellerId);
 });
+
+/** The suite's show: the demo, owned by the suite's seller. Named explicitly
+ *  because "the active show" is not a thing a caller can ask for any more. */
+const demo = () => ctx.shows.get(DEMO_SHOW_ID);
 
 after(async () => {
   // Both, in this order. Closing the HTTP server leaves the show runtimes and
@@ -452,7 +463,7 @@ describe("deleting a session", () => {
     // Put it back: the rest of this file runs against it, and a test that
     // leaves the fixture destroyed is a test that only passes first.
     await seed(pgPool());
-    await ctx.shows.ensureDemo();
+    await ctx.shows.ensureDemo(sellerId);
   });
 
   test("an unknown show is a 404, not a silent success", async () => {
@@ -463,7 +474,7 @@ describe("deleting a session", () => {
   });
 
   test("nobody without a session can delete a session", async () => {
-    const showId = ctx.shows.get().showId;
+    const showId = demo().showId;
     const r = await app.inject({ method: "DELETE", url: `/api/shows/${showId}` });
     assert.equal(r.statusCode, 401);
   });
@@ -505,7 +516,7 @@ describe("connecting eBay", () => {
   test("a show cannot be armed against eBay without a connection", async () => {
     // The alternative is an operator approving a markdown that fails at the
     // last step — after the audit entry says it was approved.
-    const showId = ctx.shows.get().showId;
+    const showId = demo().showId;
     const r = await inject({
       method: "POST", url: `/api/shows/${showId}/write-target`,
       headers: { ...auth, "content-type": "application/json" },
@@ -535,7 +546,7 @@ describe("closing a gap", () => {
     // The report has listed unanswered questions since it was written and there
     // was nothing to do about one except edit JSON by hand. This is the loop
     // closing: gap → answer → grounding, on this show and on the next one.
-    const showId = ctx.shows.get().showId;
+    const showId = demo().showId;
     const question = `do you ship to iceland ${Date.now()}`;
     const r = await inject({
       method: "POST", url: "/api/catalogs/kicksbyrae/qa",
@@ -546,7 +557,7 @@ describe("closing a gap", () => {
     const body = r.json();
     assert.equal(body.appliedLive, true, "the live show was not re-grounded");
 
-    const rows = await ctx.shows.get().repo.qa();
+    const rows = await demo().repo.qa();
     assert.ok(rows.some((q) => q.question === question), "the answer never reached the show");
 
     // And it is on disk for the next show.
@@ -582,7 +593,7 @@ describe("the spend cap", () => {
     // The cap was settable and enforced by nothing. This is the whole point of
     // it: past the limit the copilot does not draft, the question still arrives,
     // and the reason travels on the message rather than living in a log.
-    const showId = ctx.shows.get().showId;
+    const showId = demo().showId;
     // Opening balance $10, wallet now $0 → a $10 upper bound against a $1 cap.
     spendWindow.open(showId, 10);
     const watch = new BudgetWatch(
@@ -617,7 +628,7 @@ describe("the spend cap", () => {
   test("with nothing watching, nothing is capped", async () => {
     // The fallback matters: a deployment without billing scope must not behave
     // as though every show were out of money.
-    assert.equal(isOverBudget(ctx.shows.get().showId), false);
+    assert.equal(isOverBudget(demo().showId), false);
   });
 });
 
@@ -676,7 +687,7 @@ describe("sellers you follow", () => {
 
 describe("what a show leaves behind", () => {
   test("the timeline, the record and the export all answer for the demo show", async () => {
-    const showId = ctx.shows.get().showId;
+    const showId = demo().showId;
     const t = await inject({ method: "GET", url: `/api/shows/${showId}/timeline` });
     assert.equal(t.statusCode, 200);
     for (const k of ["host", "utterances", "frames", "audio"]) assert.ok(k in t.json(), `timeline missing ${k}`);
@@ -694,7 +705,7 @@ describe("what a show leaves behind", () => {
   });
 
   test("an audio chunk is numbered by the server and served back", async () => {
-    const showId = ctx.shows.get().showId;
+    const showId = demo().showId;
     process.env.SHOW_MEDIA_DIR = ".tmp/test-media";
     // The bridge's own count (seq=7) is only a retry key; the show's numbering
     // is the server's, so a bridge reopened mid-show cannot overwrite the
@@ -755,7 +766,7 @@ describe("the SSE envelope", () => {
     // Chat is emitted and forgotten — the runtime holds none of it. Before this
     // the firehose column started empty on every connect and stayed empty until
     // the next buyer typed, which reads as a broken feed rather than a late one.
-    const before = (await ctx.shows.get().snapshot()) as unknown as { chat: unknown[] };
+    const before = (await demo().snapshot()) as unknown as { chat: unknown[] };
     await inject({
       method: "POST",
       url: "/api/chat/inject",
@@ -765,7 +776,7 @@ describe("the SSE envelope", () => {
     // The write is fire-and-forget by design: a buyer's question must not wait
     // on a database round trip.
     await new Promise((r) => setTimeout(r, 400));
-    const after = (await ctx.shows.get().snapshot()) as unknown as {
+    const after = (await demo().snapshot()) as unknown as {
       chat: { author: string; text: string }[];
     };
     assert.ok(Array.isArray(after.chat));
@@ -781,7 +792,7 @@ describe("the SSE envelope", () => {
     // ended lot cannot be sold, pinned, or answered about.
     const r = await inject({ method: "GET", url: "/api/listings" });
     const pinned = (await inject({ method: "GET", url: "/api/show" })).json().pinnedListingId;
-    const snap = (await ctx.shows.get().snapshot()) as unknown as { listings: { id: string; state: string }[] };
+    const snap = (await demo().snapshot()) as unknown as { listings: { id: string; state: string }[] };
     for (const l of snap.listings) {
       assert.ok(l.state !== "ended" || l.id === pinned, `hello carried ended lot ${l.id}`);
     }
