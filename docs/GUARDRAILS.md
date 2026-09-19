@@ -1,21 +1,42 @@
 # Guardrails — what they check, and what they let through
 
-The six pills on every proposal card, in fixed order, so the operator learns the
-positions: **price · stock · policy · grounding · tone · pii**.
+Eight guards ship (`GUARDS` in `src/guardrails/guards.ts`). Six are drawn on
+every proposal card, in fixed order, so the operator learns the positions:
+**price · stock · policy · grounding · tone · pii**.
 
 ```
 − price   ✓ stock   ✓ policy   ✓ grounding   ✓ tone   ✓ pii
 ```
 
+Two more are **surface-conditional** and appear only where the surface has
+something for them to check:
+
+- **`community_rule`** — a room's own rules. `n/a` unless the surface declares
+  `communityRules` (eBay Live declares `false`) *and* a `community` fact was
+  retrieved.
+- **`sponsor`** — a sponsored segment. `n/a` unless a `sponsor` fact is in the
+  grounding set.
+
+Both run on every reply like the other six; where the condition is not met they
+return `n/a`, which is why a card can show six pills or eight.
+
 | Pill | Meaning |
 |---|---|
 | **✓ green** | `allow` — this guard checked the reply and found nothing wrong |
-| **⚠ amber** | `revise` — one bounded repair pass, then the seller sees it |
+| **⚠ amber** | `revise` — one bounded repair pass, then the seller sees whatever the re-guard says |
 | **✕ red** | `block` — never sendable without the seller editing it |
 | **− grey** | `n/a` — this guard had nothing to check (no price claim in a shipping answer) |
 
 `−` is **not** a failure. It is the most common source of confusion on the card
 and it means the guard was not applicable.
+
+**What `revise` costs.** A chain verdict of `revise` earns the draft exactly one
+repair attempt: the composer is handed the failing guards' reasons and rewrites,
+and the rewritten draft goes through the whole chain again. The second verdict is
+final — `block` refuses the send (HTTP 409), `revise` reaches the seller amber and
+sendable, `allow` is green. There is no second repair: unbounded repair is how a
+latency budget dies, and a draft that fails twice is a draft the seller should
+look at.
 
 ---
 
@@ -30,14 +51,14 @@ fails in the same direction at the same time, and adds a network hop inside a
 A guard that *throws* returns `block` (`chain.ts`). A crashing safety check that
 silently passes is worse than no check.
 
-All six run on every reply, even after one has blocked — so the operator sees the
-complete picture, and the eval can measure each guard's precision independently
-rather than only the first to fire.
+All eight run on every reply, even after one has blocked — so the operator sees
+the complete picture, and the eval can measure each guard's precision
+independently rather than only the first to fire.
 
 **And they run again at send.** A blocked proposal cannot be sent whatever the
 client asks — the console hides the button, but a keystroke or a curl is not the
 console — and the refusal comes back as HTTP 409 with the guard and reason. An
-edited draft is a new draft: `Pipeline.send()` re-runs all six against the facts
+edited draft is a new draft: `Pipeline.send()` re-runs the whole chain against the facts
 the original was grounded in and the listings as they stand now, refuses a
 block, and records `verdictAtSend` and `guardsAtSend` in the audit entry.
 
@@ -101,8 +122,8 @@ affordance instead of firing it.
 
 ### Layer B — inside this app (detective, state-aware, deterministic)
 
-The six guards below, run against catalog state **re-read at guard time** — not the
-state retrieval saw. The gap between those two is the whole point.
+The eight guards below, run against catalog state **re-read at guard time** — not
+the state retrieval saw. The gap between those two is the whole point.
 
 ### The deliberate asymmetry
 
@@ -117,7 +138,7 @@ in `test/copilot.test.ts`.
 
 ---
 
-## The six guards
+## The eight guards
 
 ### 1 · `price` — the signature check
 
@@ -177,6 +198,27 @@ hype beyond what condition notes support, no shouting, no profanity, never empty
 No email, phone number, card-like digit run or street address into public chat → **block**.
 A certificate number is **not** PII and passes.
 
+### 7 · `community_rule` — surface-conditional
+
+The rules of the room we are speaking in. `n/a` unless the surface declares
+`communityRules` (`src/surfaces/types.ts`; eBay Live declares `false`, so the
+reference surface is untouched by a guard written for subreddits) **and** a
+`community` fact reached the grounding set. Where both hold, a draft that trips
+a rule is **blocked**, and the reason names the rule and cites the fact — the
+operator's next question is always "says who".
+
+> **Not yet reached on any live surface.** Reddit fetches a subreddit's rules at
+> attach and uses them only to build a status string; the facts are never handed
+> to the retriever, so `i.community` is empty and this guard returns `n/a`
+> everywhere today. The guard is built and not yet fed.
+
+### 8 · `sponsor` — surface-conditional
+
+`n/a` unless a `sponsor` fact is in the grounding set. Where one is, a draft that
+talks about the sponsored thing must cite a sponsor fact — not merely *a* fact.
+Grounding on the host's own speech is exactly the improvisation a sponsor
+contract exists to prevent, so an uncited sponsored claim is a **block**.
+
 ---
 
 ## Confidence
@@ -199,7 +241,7 @@ never really checked. That combination is what exposed the transcript-only hole.
 Stated plainly, because the pills look more authoritative than they are:
 
 - **They do not check whether a reply is *good*** — only whether it is *safe*.
-  A correct, dull, unhelpful answer passes all six.
+  A correct, dull, unhelpful answer passes every one of them.
 - **They do not verify entailment.** `grounding` asks whether a claim is lexically
   connected to its fact, not whether the fact proves it.
 - **They cannot catch what retrieval never surfaced.** If the right fact was not
@@ -215,21 +257,38 @@ Stated plainly, because the pills look more authoritative than they are:
 pass** (a suite made only of violations measures nothing: a chain that blocks
 everything scores perfectly on it).
 
-```
-caught 25   missed 0   false alarms 0   clean passes 21
-precision 1.000   recall 1.000   f1 1.000
+Measured 2026-09-19 by running `test/guardrails.eval.ts`; this is that run's
+output, not a remembered one:
 
-availability     fired on 4/4 of its own cases
-claim_grounding  fired on 4/4
-pii              fired on 2/2
-policy           fired on 6/6
-price            fired on 4/4
-tone             fired on 5/5
 ```
+guardrail chain over 46 labelled cases
+  caught 25  missed 0  false alarms 0  clean passes 21
+  precision 1.000   recall 1.000   f1 1.000
+
+  availability     fired on 4/4 of its own cases
+  claim_grounding  fired on 4/4 of its own cases
+  pii              fired on 2/2 of its own cases
+  policy           fired on 6/6 of its own cases
+  price            fired on 4/4 of its own cases
+  tone             fired on 5/5 of its own cases
+```
+
+`community_rule` and `sponsor` are absent from that breakdown because the
+labelled set has no cases for them. Neither guard is measured at all.
 
 Thresholds asserted in the suite are **asymmetric** — recall ≥ 0.95, precision ≥
 0.90 — because a miss is a wrong answer sent to a buyer and a false alarm costs
 the seller a glance.
+
+**Read the score with two caveats, both structural.** The scoring test
+binarises: it asks whether the chain *stopped* a draft, so `revise` and `block`
+land in the same bucket and a chain that hard-blocks everything a softer rung
+should have handed back still scores 1.000. And a second test in the same file
+checks each case's exact verdict; on 2026-09-19 that one **failed**, 8 of 46
+cases reading `expected revise, got block`, so `npm run eval` exits non-zero
+while the scoreboard above prints perfect. Nothing in CI runs it: `npm test`
+globs `test/*.test.ts` and `npm run eval` globs `test/*.eval.ts`, and only a
+human types the second.
 
 **What that number does not mean.** 46 cases is small, they were written by the
 same person who wrote the guards, and a perfect score on a self-authored suite
