@@ -14,7 +14,7 @@
 // that nothing is being watched.
 
 import { config } from "../config.js";
-import { db } from "../db/pg.js";
+import { db, type Pool } from "../db/pg.js";
 import type { EventHub, EventName } from "../api/hub.js";
 import type { SellerGuardrailPolicy } from "../guardrails/policy.js";
 import type { Persona } from "../persona/store.js";
@@ -141,9 +141,8 @@ export class ShowRegistry {
 
     // One event can be attached more than once over its life; each attach is
     // its own session with its own report. A live runtime for the event is
-    // returned as-is; a finished session that already has a report is left
-    // alone and the new one takes the next id. Re-attaching used to reuse the
-    // row, reset its clock and overwrite the report.
+    // returned as-is; a session that ENDED is left alone, report or no report,
+    // and the new one takes the next id (`sessionIdFor`).
     const live = [...this.runtimes.values()].find((r) => r.externalId === externalId);
     if (live) return live;
     // `ebay_` is history, not a convention: every eBay Live show id in
@@ -268,23 +267,9 @@ export class ShowRegistry {
     return this.runtimes.has(showId);
   }
 
-  /** The id for a new session of this event: the base id if unused or reusable
-   *  (ended, no report), else base-2, base-3, … */
+  /** The id for a new session of this event. See `sessionIdFor`. */
   private async nextSessionId(base: string, eventId: string): Promise<string> {
-    const rows = await db()
-      .query<{ id: string; status: string; has_report: boolean }>(
-        `SELECT s.id, s.status, (r.show_id IS NOT NULL) AS has_report
-           FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
-          WHERE s.external_id = $1 ORDER BY s.started_at DESC`,
-        [eventId],
-      )
-      .then((r) => r.rows)
-      .catch(() => [] as { id: string; status: string; has_report: boolean }[]);
-    if (!rows.length) return base;
-    const reusable = rows.find((r) => !r.has_report);
-    if (reusable) return reusable.id;
-    const taken = new Set(rows.map((r) => r.id));
-    for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+    return nextSessionId(db(), base, eventId);
   }
 
   /** The account's newest live show, or none when it has none. */
@@ -346,4 +331,58 @@ export class ShowRegistry {
     await Promise.all([...this.runtimes.values()].map((rt) => rt.close().catch(() => {})));
     this.runtimes.clear();
   }
+}
+
+/**
+ * Which id a new session of this event takes.
+ *
+ * A row is reused only when it is still LIVE, which is the one case that is not
+ * a new session at all: a resume after a restart, reconnecting to a show that
+ * never stopped. Everything else gets the next id — `base-2`, `base-3`, …
+ *
+ * It used to reuse any row with no REPORT, and that is a different question
+ * with a much worse answer. `show_id` is overloaded: it is both "this event"
+ * and "this session of this event", and making report generation the thing that
+ * tells them apart made a downstream artefact load-bearing for identity. A
+ * report that failed to build — a gateway timeout, a schema drift — therefore
+ * handed the dead session's id to the NEXT attach of the same event, and
+ * everything keyed on `show_id` merged: chat, proposals, the audit chain, the
+ * signals, the sales. The "ended, no report" row an operator had just been told
+ * to go and look at silently went back on air, the eventual report counted the
+ * previous session's comments and blocks as its own, and the old utterances and
+ * frames landed at negative offsets on the new session's timeline.
+ *
+ * Cross-account it was worse: `ShowRuntime.init` puts a reused row back to
+ * `live` and resets its clock but never rewrites `owner_account_id`, so a
+ * second account re-attaching an event kept the first account's ownership —
+ * B's session answered 404 to B's own report route and the finished report
+ * belonged to A, while `show_costs.account_id` was written as B.
+ *
+ * Exported as a rule over rows, separately from the read, so it can be argued
+ * with in a test without a database, a browser or an event that exists.
+ */
+export function sessionIdFor(
+  base: string,
+  rows: { id: string; status: string }[],
+): string {
+  if (!rows.length) return base;
+  // A resume, not a new session. Nothing else about a live row is reusable.
+  const live = rows.find((r) => r.status === "live");
+  if (live) return live.id;
+  const taken = new Set(rows.map((r) => r.id));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+}
+
+/** `sessionIdFor` over the rows this event already has. A read that fails
+ *  yields the base id rather than blocking the attach. */
+export async function nextSessionId(d: Pool, base: string, eventId: string): Promise<string> {
+  const rows = await d
+    .query<{ id: string; status: string }>(
+      "SELECT id, status FROM shows WHERE external_id = $1 ORDER BY started_at DESC",
+      [eventId],
+    )
+    .then((r) => r.rows)
+    .catch(() => [] as { id: string; status: string }[]);
+  return sessionIdFor(base, rows);
 }
