@@ -16,6 +16,9 @@ import { SURFACE_CAPABILITIES, SurfaceUnavailable, capabilitiesOf, type SurfaceI
 import { surfaceReadiness } from "../surfaces/readiness.js";
 import { behindBand, nowBand } from "./home.js";
 import {
+  draftFromFollowUp, draftQueue, draftsFromSession, type DraftStatus,
+} from "./drafts.js";
+import {
   FollowUpInbox, buildFollowUps, openDrafter, type FollowUpStatus,
 } from "../surfaces/dm/drafts.js";
 import { Preparer } from "../shows/prepareEvent.js";
@@ -1974,6 +1977,145 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const row = await followups.dismiss(actor.id, req.params.id);
     if (!row) return reply.code(404).send({ error: `no follow-up ${req.params.id}` });
     return { followup: row };
+  });
+
+  // ── the drafts queue ──────────────────────────────────────────────────────
+  //
+  // Every reply waiting on the operator, across every surface that cannot
+  // deliver, in one shape. Additive: `/api/followups` is untouched and remains
+  // the inbox's own endpoint — this is the queue the Drafts page and the NOW
+  // band are both talking about.
+  //
+  // Two sources, and they are read the way `/api/home` reads them so the count
+  // and the list cannot disagree: the registry's own list of sessions on air,
+  // filtered to async surfaces, with the SAME tenancy filter (an account's own
+  // sessions plus the pre-ownership rows that belong to nobody); and the
+  // follow-up inbox, which is strictly one account's.
+  //
+  // Nothing here sends anything. See src/api/drafts.ts.
+  const DRAFT_STATUSES = new Set<DraftStatus>(["open", "sent", "dismissed", "blocked"]);
+
+  /** The live async sessions this account can see, with what each is holding. */
+  const asyncSessions = async (accountId: string) => {
+    const watched = await shows.list(accountId);
+    return watched
+      .filter((s) => s.status === "live" && capabilitiesOf(s.source).tempo === "async")
+      .map((summary) => ({
+        summary,
+        // `list()` just told us these are being watched; a runtime that went
+        // away between the two lines is an empty queue, not a 500.
+        proposals: shows.has(summary.showId) ? shows.get(summary.showId).pipeline.list() : [],
+      }));
+  };
+
+  app.get<{ Querystring: { surface?: string; status?: string } }>("/api/drafts", async (req, reply) => {
+    const actor = actorOf(req as object);
+    if (!actor) return reply.code(401).send({ error: "sign in to read your drafts" });
+
+    const rawStatus = (req.query?.status ?? "").trim().toLowerCase();
+    if (rawStatus && !DRAFT_STATUSES.has(rawStatus as DraftStatus)) {
+      return reply.code(400).send({ error: `status must be one of ${[...DRAFT_STATUSES].join(", ")}` });
+    }
+    const rawSurface = (req.query?.surface ?? "").trim().toLowerCase();
+    if (rawSurface && !Object.prototype.hasOwnProperty.call(SURFACE_CAPABILITIES, rawSurface)) {
+      return reply.code(404).send({ error: `no surface called "${req.query.surface}"` });
+    }
+
+    const [sessions, inbox] = await Promise.all([
+      asyncSessions(actor.id),
+      followups.queue(actor.id),
+    ]);
+    const queue = draftQueue({ sessions, followups: inbox });
+
+    // `waiting` is the WHOLE account's waiting queue, whatever the filters say:
+    // it is the number home prints, and a per-surface tab must not change it
+    // underneath the heading. The filters shape `drafts` only.
+    const drafts = queue.drafts.filter(
+      (d) =>
+        (!rawSurface || d.surface === rawSurface) &&
+        (!rawStatus || d.status === rawStatus),
+    );
+    return {
+      surface: rawSurface || null,
+      status: rawStatus || null,
+      waiting: queue.waiting,
+      drafts,
+    };
+  });
+
+  /**
+   * One draft out of the queue, by the id the queue gave it.
+   *
+   * The queue merges two id namespaces, so this resolves the same way: a
+   * follow-up row first (scoped to the account in the statement), then the
+   * proposals of the account's own live async sessions. A draft that is
+   * neither is a 404 — including somebody else's, which is not confirmed to
+   * exist.
+   */
+  const findDraft = async (accountId: string, id: string) => {
+    const row = await followups.get(accountId, id);
+    if (row) {
+      const title = (
+        await pgPool().query<{ title: string }>("SELECT title FROM shows WHERE id = $1", [row.showId])
+      ).rows[0]?.title ?? null;
+      return { kind: "followup" as const, row, title };
+    }
+    for (const s of await asyncSessions(accountId)) {
+      if (s.proposals.some((p) => p.id === id)) return { kind: "proposal" as const, session: s.summary };
+    }
+    return null;
+  };
+
+  /**
+   * The operator pasted it in themselves.
+   *
+   * Recorded, never inferred — we cannot see the subreddit, so the person who
+   * sent it is the only honest source. This records a claim; it delivers
+   * nothing. `Pipeline.send` writes the audit entry and moves the proposal's
+   * status, and there is no code path from it to Reddit at all: the action list
+   * has no `post_reply` and preflight refuses actions a surface does not
+   * declare (docs/SURFACES.md).
+   */
+  app.post<{ Params: { id: string } }>("/api/drafts/:id/sent", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "mark a draft sent");
+    if (!actor) return reply;
+    const found = await findDraft(actor.id, req.params.id);
+    if (!found) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+    if (found.kind === "followup") {
+      const row = await followups.markSent(actor.id, req.params.id);
+      if (!row) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+      if (row.status === "dismissed") {
+        return reply.code(409).send({ error: "that draft was dismissed", draft: draftFromFollowUp(row, found.title) });
+      }
+      return { draft: draftFromFollowUp(row, found.title) };
+    }
+    try {
+      const p = await shows.get(found.session.showId).pipeline.send(req.params.id, undefined, who(req as object));
+      return { draft: draftsFromSession(found.session, [p])[0] ?? null };
+    } catch (e) {
+      // A guard held it: there is nothing to have sent. 409 with the reason,
+      // the same answer the console gets.
+      if (e instanceof SendRefused) return reply.code(409).send({ error: (e as Error).message, refused: true });
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/drafts/:id/dismiss", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "dismiss a draft");
+    if (!actor) return reply;
+    const found = await findDraft(actor.id, req.params.id);
+    if (!found) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+    if (found.kind === "followup") {
+      const row = await followups.dismiss(actor.id, req.params.id);
+      if (!row) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+      return { draft: draftFromFollowUp(row, found.title) };
+    }
+    try {
+      const p = shows.get(found.session.showId).pipeline.dismiss(req.params.id);
+      return { draft: draftsFromSession(found.session, [p])[0] ?? null };
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
   });
 
   /**

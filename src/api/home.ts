@@ -34,6 +34,31 @@ export interface DraftQueues {
   bySurface: { surface: SurfaceId; count: number }[];
 }
 
+/**
+ * The drafts figure, from one place.
+ *
+ * Home says how many drafts are waiting and Drafts shows them; the two numbers
+ * have to be the same number, and "the same number computed twice" is the
+ * arrangement that lasts until one side learns about a new status. So both
+ * endpoints hand their per-surface entries to this — `now.drafts` from the
+ * registry's own `awaiting` counts, `GET /api/drafts` from the drafts it is
+ * about to return — and get back a structure that is deep-equal, ORDER
+ * INCLUDED, when the queue is the same.
+ *
+ * Order is first appearance, which the callers make meaningful by passing
+ * sessions in registry order with the follow-up inbox last. A surface with
+ * nothing waiting is omitted rather than listed as zero: an empty queue is not
+ * a queue, and a row of zeroes reads as something to go and look at.
+ */
+export function queueCounts(entries: { surface: SurfaceId; count: number }[]): DraftQueues {
+  const bySurface = new Map<SurfaceId, number>();
+  for (const e of entries) bySurface.set(e.surface, (bySurface.get(e.surface) ?? 0) + e.count);
+  const queues = [...bySurface.entries()]
+    .filter(([, count]) => count > 0)
+    .map(([surface, count]) => ({ surface, count }));
+  return { total: queues.reduce((a, q) => a + q.count, 0), bySurface: queues };
+}
+
 export interface NowBand {
   live: LiveSession[];
   drafts: DraftQueues;
@@ -81,16 +106,16 @@ export function nowBand(shows: ShowSummary[], followupsReady: number): NowBand {
   // An asynchronous session has nobody sitting in front of it: everything it
   // writes goes to a queue. The follow-up inbox is that same queue for a show
   // that already ended, which is what the `dm` surface is.
-  const bySurface = new Map<SurfaceId, number>();
-  for (const s of onAir) {
-    if (capabilitiesOf(s.source).tempo !== "async") continue;
-    bySurface.set(s.source, (bySurface.get(s.source) ?? 0) + s.awaiting);
-  }
-  if (followupsReady > 0) bySurface.set("dm", (bySurface.get("dm") ?? 0) + followupsReady);
-
-  const queues = [...bySurface.entries()]
-    .filter(([, count]) => count > 0)
-    .map(([surface, count]) => ({ surface, count }));
+  //
+  // The entries are built in the order `GET /api/drafts` builds its own —
+  // async sessions as the registry lists them, then the inbox — because
+  // `queueCounts` preserves it and a test compares the two payloads whole.
+  const drafts = queueCounts([
+    ...onAir
+      .filter((s) => capabilitiesOf(s.source).tempo === "async")
+      .map((s) => ({ surface: s.source, count: s.awaiting })),
+    { surface: "dm" as SurfaceId, count: followupsReady },
+  ]);
 
   return {
     live: onAir.map((s) => ({
@@ -103,7 +128,7 @@ export function nowBand(shows: ShowSummary[], followupsReady: number): NowBand {
       blocked: s.blocked,
       readOnly: s.readOnly,
     })),
-    drafts: { total: queues.reduce((a, q) => a + q.count, 0), bySurface: queues },
+    drafts,
   };
 }
 

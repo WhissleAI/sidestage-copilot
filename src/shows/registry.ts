@@ -23,6 +23,7 @@ import { ShowRuntime } from "./runtime.js";
 import { describeFrames } from "./frameDescriber.js";
 import type { ShowReport } from "./sessionRecord.js";
 import { resolve as resolveSurface } from "../surfaces/registry.js";
+import { isWaiting } from "../api/drafts.js";
 import type { SurfaceId } from "../surfaces/types.js";
 
 export const DEMO_SHOW_ID = "show_ep42";
@@ -319,7 +320,11 @@ export class ShowRegistry {
         viewers: s.viewers,
         listings: listings.length,
         proposals: rt.pipeline.list().length,
-        awaiting: rt.pipeline.list().filter((p) => p.status === "ready" || p.status === "needs_review").length,
+        // One definition of "waiting on a human", shared with the drafts queue
+        // (src/api/drafts.ts). Home's count and the Drafts page's list are the
+        // same number because they ask the same function, not because two
+        // places list the same two statuses.
+        awaiting: rt.pipeline.list().filter(isWaiting).length,
         blocked: rt.pipeline.list().filter((p) => p.status === "blocked").length,
       };
     }));

@@ -86,6 +86,9 @@ const toRow = (r: Row): FollowUpRow => ({
 const COLUMNS =
   "id, show_id, account_id, buyer, question, message_id, draft, status, created_at, sent_at, dismissed_at";
 
+/** The same columns, for the one statement that joins another table. */
+const QUALIFIED = COLUMNS.split(", ").map((c) => `f.${c}`).join(", ");
+
 /**
  * The inbox itself.
  *
@@ -105,6 +108,28 @@ export class FollowUpInbox {
       [accountId, status ?? null],
     );
     return r.rows.map(toRow);
+  }
+
+  /**
+   * The inbox as the drafts queue reads it: every row, and the TITLE of the
+   * session it came out of.
+   *
+   * The title is the join. A follow-up's origin is the show a buyer asked in,
+   * and the queue prints it beside a Reddit draft's `r/mechmarket`; printing
+   * `ebay_47tK1SX0VsiHEXN1` there told the operator nothing they could act on.
+   * LEFT JOIN on purpose — deleting a session does not delete the people who
+   * asked in it, and a follow-up whose show row is gone still has a draft in it
+   * worth sending.
+   */
+  async queue(accountId: string): Promise<{ row: FollowUpRow; sessionTitle: string | null }[]> {
+    const r = await this.d.query<Row & { session_title: string | null }>(
+      `SELECT ${QUALIFIED}, s.title AS session_title
+         FROM followups f LEFT JOIN shows s ON s.id = f.show_id
+        WHERE f.account_id = $1
+        ORDER BY f.created_at DESC, f.buyer`,
+      [accountId],
+    );
+    return r.rows.map((x) => ({ row: toRow(x), sessionTitle: x.session_title }));
   }
 
   async forShow(accountId: string, showId: string): Promise<FollowUpRow[]> {
