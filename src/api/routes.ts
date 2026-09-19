@@ -64,6 +64,7 @@ import { WhissleClient } from "../llm/whissle.js";
 import { describeFrames, describing } from "../shows/frameDescriber.js";
 import { SendRefused } from "../pipeline/pipeline.js";
 import type { ShowRuntime } from "../shows/runtime.js";
+import { GateBusy, RateLimiter } from "./rateLimit.js";
 import type { AppContext } from "./context.js";
 
 /**
@@ -192,6 +193,52 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // no bearer token. The `state` is what proves the callback is ours, and it is
   // checked in the handler rather than here.
   const OPEN = [/^\/health$/, /^\/api\/auth\/(register|login)$/, /^\/api\/ebay\/callback/, /^\/api\/ebay\/account-deletion/, /^\/api\/twitch\/callback/, /^\/audio-bridge/];
+
+  // ── how often one caller may knock ────────────────────────────────────────
+  //
+  // Two limits, and the tight one is on the door that costs 16 MB before the
+  // caller is authenticated (see rateLimit.ts and `scryptGate`). The numbers
+  // are set so that a person cannot reach them and a script cannot miss them:
+  //
+  //   auth   20 a minute per address. Signing in is something an operator does
+  //          once; twenty leaves room for a fat-fingered password, a browser
+  //          retry, and a small team behind one office address.
+  //   open   240 a minute for anything else from one address. The console
+  //          polls — the cost rail every few seconds, home, drafts — and four
+  //          a second is far above that and far below a flood.
+  //
+  // `/health` is exempt: it is a liveness probe on a timer and answering it is
+  // free. `/api/stream` is one long-lived request, so it costs the bucket one
+  // hit and then nothing.
+  const limiter = new RateLimiter();
+  const AUTH_LIMIT = { windowMs: 60_000, max: 20 };
+  const OPEN_LIMIT = { windowMs: 60_000, max: 240 };
+  /** And a limit per EMAIL, wherever it is tried from: the per-address one
+   *  does nothing about a distributed guess at one seller's password, which is
+   *  the shape an actual credential-stuffing run has. Ten tries at one account
+   *  in ten minutes is far past a person who has forgotten their password. */
+  const LOGIN_ACCOUNT_LIMIT = { windowMs: 10 * 60_000, max: 10 };
+  const authPath = /^\/api\/auth\/(register|login|password)$/;
+  app.addHook("onRequest", async (req, reply) => {
+    const path = req.url.split("?")[0]!;
+    if (path === "/health") return;
+    const isAuth = authPath.test(path);
+    // Keyed by address. Behind Caddy that is the forwarded client (server.ts
+    // trusts exactly one hop, so a header a client sets itself is not it).
+    const v = limiter.hit(`${isAuth ? "auth" : "open"}:${req.ip}`, isAuth ? AUTH_LIMIT : OPEN_LIMIT);
+    if (!v.ok) {
+      return reply
+        .code(429)
+        .header("retry-after", String(v.retryAfterS))
+        .send({
+          error: isAuth
+            ? `too many sign-in attempts — try again in ${v.retryAfterS}s`
+            : `too many requests — try again in ${v.retryAfterS}s`,
+          retryAfterS: v.retryAfterS,
+        });
+    }
+  });
+
   app.addHook("onRequest", async (req, reply) => {
     const header = req.headers.authorization;
     const q = (req.query ?? {}) as { token?: string };
@@ -300,21 +347,41 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return null;
   };
 
+  /** What to answer a failed sign-in with. `GateBusy` is the password hasher
+   *  refusing a queue it cannot hold — the box is busy, not the caller wrong,
+   *  so it is a 503 and not a 400. */
+  const statusOf = (e: unknown): number =>
+    e instanceof AuthError ? e.status : e instanceof GateBusy ? e.status : 500;
+
   app.post<{ Body: { email?: string; password?: string; displayName?: string } }>("/api/auth/register", async (req, reply) => {
     try {
       const s = await accounts.register(req.body?.email ?? "", req.body?.password ?? "", req.body?.displayName ?? "");
       return { token: s.token, account: s.account, expiresAt: s.expiresAt };
     } catch (e) {
-      return reply.code(e instanceof AuthError ? e.status : 500).send({ error: (e as Error).message });
+      return reply.code(statusOf(e)).send({ error: (e as Error).message });
     }
   });
 
   app.post<{ Body: { email?: string; password?: string } }>("/api/auth/login", async (req, reply) => {
+    // Per ACCOUNT as well as per address, so guessing one seller's password
+    // from a thousand addresses is bounded too. Keyed on what was typed, not
+    // on whether it exists — an account that is rate-limited differently from
+    // a non-account is an account oracle.
+    const who = (req.body?.email ?? "").trim().toLowerCase();
+    if (who) {
+      const v = limiter.hit(`login-account:${who}`, LOGIN_ACCOUNT_LIMIT);
+      if (!v.ok) {
+        return reply
+          .code(429)
+          .header("retry-after", String(v.retryAfterS))
+          .send({ error: `too many sign-in attempts for that account — try again in ${v.retryAfterS}s`, retryAfterS: v.retryAfterS });
+      }
+    }
     try {
       const s = await accounts.login(req.body?.email ?? "", req.body?.password ?? "");
       return { token: s.token, account: s.account, expiresAt: s.expiresAt };
     } catch (e) {
-      return reply.code(e instanceof AuthError ? e.status : 500).send({ error: (e as Error).message });
+      return reply.code(statusOf(e)).send({ error: (e as Error).message });
     }
   });
 
@@ -368,7 +435,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         );
         return { ok: true, ...out };
       } catch (e) {
-        return reply.code(e instanceof AuthError ? e.status : 500).send({ error: (e as Error).message });
+        return reply.code(statusOf(e)).send({ error: (e as Error).message });
       }
     },
   );

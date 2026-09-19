@@ -16,6 +16,7 @@
 
 import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
+import { Gate } from "../api/rateLimit.js";
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: string, len: number, opts: { N: number; r: number; p: number; maxmem: number }) => Promise<Buffer>;
 
@@ -23,15 +24,35 @@ const scrypt = promisify(scryptCb) as (pw: string, salt: string, len: number, op
  *  the parameters travel in the hash so they can be raised later without a
  *  reset. `maxmem` is explicit: Node refuses anything past 32 MB by default. */
 const SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
+
+/**
+ * How many password hashes may be in flight AT ONCE, process-wide.
+ *
+ * 16 MB each, run before the caller is authenticated, in a container capped at
+ * 1100 MB: seventy concurrent logins from one unauthenticated caller took the
+ * process out, and `restart: unless-stopped` served up the next seventy. Rate
+ * limiting bounds arrivals and does not bound this — seventy in flight is the
+ * same 1.1 GB whether they arrived over a second or a minute.
+ *
+ * Six slots is ~96 MB of scrypt at the worst moment and about sixty hashes a
+ * second, which no real sign-in rate comes near. Past `maxWaiting` the request
+ * is refused rather than queued: an unbounded queue is the same leak with a
+ * longer fuse.
+ */
+export const scryptGate = new Gate(6, 64);
+
+const hash = (pw: string, salt: string, opts: { N: number; r: number; p: number; maxmem: number }) =>
+  scryptGate.run(() => scrypt(pw, salt, 64, opts));
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16).toString("hex");
-  const key = await scrypt(password, salt, 64, SCRYPT);
+  const key = await hash(password, salt, SCRYPT);
   return `scrypt$${SCRYPT.N}$${salt}$${key.toString("hex")}`;
 }
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   const [algo, n, salt, hex] = stored.split("$");
   if (algo !== "scrypt" || !salt || !hex) return false;
-  const key = await scrypt(password, salt, 64, { ...SCRYPT, N: Number(n) || SCRYPT.N });
+  const key = await hash(password, salt, { ...SCRYPT, N: Number(n) || SCRYPT.N });
   const want = Buffer.from(hex, "hex");
   return key.length === want.length && timingSafeEqual(key, want);
 }
