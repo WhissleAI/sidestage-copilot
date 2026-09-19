@@ -1,10 +1,11 @@
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { all, get, register, resolve } from "../src/surfaces/registry.js";
 import { capabilitiesOf, hasCorpus, SurfaceUnavailable, type SurfaceAdapter } from "../src/surfaces/types.js";
 import { parseEventId } from "../src/ingest/ebaylive/discovery.js";
 import { preflight, type PreflightContext } from "../src/actions/preflight.js";
-import type { ListingWithDescription } from "../src/domain/repo.js";
+import { Repo, type ListingWithDescription } from "../src/domain/repo.js";
+import { db as pgPool, closeDb, migrate } from "../src/db/pg.js";
 
 // One box, any surface. The console's paste field used to hand its contents
 // straight to `parseEventId`, so the only two outcomes were "an eBay Live show"
@@ -174,3 +175,48 @@ describe("preflight asks the surface first", () => {
     assert.equal(preflight("markdown_price", null, { newPriceCents: 1 }, ctx("ebaylive")).ok, false);
   });
 });
+
+describe("the surface column", () => {
+  test("a show that names only its source still reads back correctly", async () => {
+    // migration 018 adds `surface` NULLABLE on purpose. A NOT NULL DEFAULT
+    // 'ebaylive' would mean every INSERT that sets only `source` — the seeder,
+    // the fixtures, any statement written before today — silently stamps a
+    // simulated show as an eBay Live one.
+    const d = pgPool();
+    await migrate(d);
+    const id = `test_surface_${Math.random().toString(36).slice(2, 8)}`;
+    await d.query(
+      `INSERT INTO shows (id, title, seller_handle, started_at, source, autonomy_level, undo_window_s)
+       VALUES ($1, 'legacy row', 'someone', $2, 'simulated', 'L1_SUGGEST', 90)`,
+      [id, new Date().toISOString()],
+    );
+    try {
+      const show = await new Repo(d, id).show();
+      assert.equal(show.source, "simulated", "the surface column must not overwrite what source said");
+    } finally {
+      await d.query("DELETE FROM shows WHERE id = $1", [id]).catch(() => {});
+    }
+  });
+
+  test("a show attached through the registry writes both columns", async () => {
+    const d = pgPool();
+    await migrate(d);
+    const id = `test_surface_${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      await new Repo(d, id).createShow({
+        id, title: "eBay Live x", sellerHandle: "someone", source: "ebaylive",
+        externalId: "x", autonomyLevel: "L1_SUGGEST", undoWindowS: 90,
+      });
+      const r = await d.query<{ source: string; surface: string }>(
+        "SELECT source, surface FROM shows WHERE id = $1", [id],
+      );
+      assert.deepEqual(r.rows[0], { source: "ebaylive", surface: "ebaylive" }, "writing one and not the other is how they drift");
+    } finally {
+      await d.query("DELETE FROM shows WHERE id = $1", [id]).catch(() => {});
+    }
+  });
+});
+
+// The two database tests above open the shared pool. Close it so the file does
+// not hold the process open after the last assertion.
+after(async () => { await closeDb(); });

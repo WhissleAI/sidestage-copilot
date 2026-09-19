@@ -7,8 +7,14 @@
 -- `source` today has to change, and nothing that reads a legacy row sees a null.
 -- The new name is the one a Twitch or Reddit session writes, because "the
 -- source of chat" stops describing a subreddit thread the moment there is one.
-ALTER TABLE shows ADD COLUMN IF NOT EXISTS surface TEXT NOT NULL DEFAULT 'ebaylive';
-UPDATE shows SET surface = source WHERE source IS NOT NULL AND source <> surface;
+--
+-- Nullable, with no default, on purpose. A NOT NULL DEFAULT 'ebaylive' would
+-- mean every INSERT that sets only `source` — the seeder, the fixtures, any
+-- statement written before today — silently stamps a simulated show as an eBay
+-- Live one. NULL cannot lie: it reads back through COALESCE as whatever
+-- `source` already said.
+ALTER TABLE shows ADD COLUMN IF NOT EXISTS surface TEXT;
+UPDATE shows SET surface = source WHERE surface IS NULL AND source IS NOT NULL;
 
 -- An asynchronous conversation is a TREE, not a stream.
 --
