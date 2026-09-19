@@ -3213,7 +3213,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!query) return reply.code(400).send({ error: "query is required" });
       try {
         const target = rt(req.query.showId, req as object);
-        return target.research.run(query, req.body?.listingId ?? (await target.show()).pinnedListingId);
+        // `facts` is the reply path's copy of the same evidence, carrying a
+        // sparse vector per fact. The card renders `evidence`; a browser has
+        // no use for the vectors and every reason not to be sent them.
+        const { facts: _reply, ...card } = await target.research.run(
+          query, req.body?.listingId ?? (await target.show()).pinnedListingId,
+        );
+        return card;
       } catch (e) {
         return reply.code(404).send({ error: (e as Error).message });
       }

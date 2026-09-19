@@ -266,11 +266,11 @@ export class Pipeline {
    * Dedupes against what retrieval already found, so a listing's price is not
    * cited twice under two ids.
    */
-  private async researchEvidence(
+  private async researchGrounding(
     msg: ChatMessage,
-    already: Evidence[],
+    already: Fact[],
     pinnedId: string | null,
-  ): Promise<Evidence[]> {
+  ): Promise<{ fact: Fact; score: number }[]> {
     const wants =
       msg.intent === "comparison" ||
       /\b(good (?:price|deal)|worth it|going for|market value|overpriced|fair price|too much)\b/i.test(msg.text);
@@ -278,8 +278,13 @@ export class Pipeline {
 
     // A buyer is waiting on this one; the market lookup gets the short budget.
     const card = await this.d.research.run(msg.text, pinnedId, { caller: "reply" });
-    const seen = new Set(already.map((e) => e.factId));
-    return card.evidence.filter((e) => !seen.has(e.factId));
+    const seen = new Set(already.map((f) => f.factId));
+    // The score is research's, not re-derived here: an asking-price median and
+    // a sold-comp median are weighted differently and that judgement belongs
+    // where the basis is known.
+    return (card.facts ?? [])
+      .filter((f) => !seen.has(f.factId))
+      .map((fact) => ({ fact, score: card.evidence.find((e) => e.factId === fact.factId)?.score ?? 0.8 }));
   }
 
   private async draft(msg: ChatMessage, attempt = 0, previous?: string): Promise<void> {
@@ -313,11 +318,18 @@ export class Pipeline {
     this.addHostFacts(msg.text, r);
     // "Is that a good price?" and "how does it compare to the other one?" are
     // market questions, and the comps that answer them were already on disk —
-    // the reply path just never asked. Research is a local query costing
-    // single-digit milliseconds and it returns Evidence in the same shape as
-    // everything else, so a reply built on it stays guard-checkable.
-    for (const e of await this.researchEvidence(msg, r.evidence, show.pinnedListingId)) {
-      r.evidence.push(e);
+    // the reply path just never asked.
+    //
+    // Onto BOTH sides. `r.evidence` is the operator's citation chips;
+    // `r.facts` is what the composer is given, what `buildContextBlock`
+    // renders as GROUNDING FACTS and what becomes `factById` for the guards.
+    // Pushing only the first is what made the card show a "Market · asking
+    // now" chip beside a reply saying the host would cover it: the model was
+    // never told the median, and a reply that cited one anyway would have been
+    // blocked for citing an id that resolves to nothing.
+    for (const { fact, score } of await this.researchGrounding(msg, r.facts, show.pinnedListingId)) {
+      r.facts.push(fact);
+      r.evidence.push(toEvidence(fact, score));
     }
     timer.mark("retrieve");
 

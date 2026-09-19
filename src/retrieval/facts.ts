@@ -45,6 +45,19 @@ export interface Fact {
   vector: SparseVec;
 }
 
+/**
+ * Build a fact outside the catalog indexer.
+ *
+ * `tokens` and `vector` are precomputed at index build, and a fact assembled by
+ * hand without them is a fact the retriever cannot score and `cacheKey` cannot
+ * hash. Research builds its market facts through this for exactly that reason;
+ * `hostFacts` predates it and still writes its own, which is the next thing to
+ * fold in here.
+ */
+export const mkFact = (
+  f: Omit<Fact, "tokens" | "vector" | "corpus"> & { corpus?: CorpusKind },
+): Fact => mk(f);
+
 function mk(f: Omit<Fact, "tokens" | "vector" | "corpus"> & { corpus?: CorpusKind }): Fact {
   const indexable = `${f.label} ${f.text}`;
   // Everything this function built before surfaces existed came out of the

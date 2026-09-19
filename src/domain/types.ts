@@ -7,6 +7,9 @@
 // way, because neither file emits a value the other needs.
 import type { SurfaceId } from "../surfaces/types.js";
 import type { CorpusKind } from "../retrieval/corpus.js";
+// Same type-only cycle as `SurfaceId` above: `retrieval/facts.ts` names
+// `EvidenceSource` from here, and nothing is emitted either way.
+import type { Fact } from "../retrieval/facts.js";
 
 export type AutonomyLevel =
   | "L0_OBSERVE" | "L1_SUGGEST" | "L2_ONE_TAP" | "L3_AUTO_REPLY" | "L4_AUTO_ACT";
@@ -420,6 +423,19 @@ export interface ResearchCard {
   specDiff?: { attribute: string; ours: string; theirs: string }[];
   latencyMs: number;
   evidence: Evidence[];
+  /**
+   * The same market evidence as GROUNDING FACTS, for the reply path.
+   *
+   * `evidence` is what the operator's card renders. `facts` is what the
+   * composer is given, what the guards check a claim against, and what a
+   * citation has to resolve to — and for a long time the research path pushed
+   * only the first, so the model was never shown the median it had just been
+   * billed for and `claimGroundingGuard` would have blocked a reply that cited
+   * it as a fabricated id. Typed as optional because only `ResearchService`
+   * fills it; `/api/research` strips it, since a sparse vector per fact is of
+   * no use to a browser.
+   */
+  facts?: Fact[];
 }
 
 /** A policy clause — the grounding source for shipping/returns/authenticity claims. */
