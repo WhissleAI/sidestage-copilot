@@ -1,0 +1,53 @@
+{
+  "_recorded": "GET https://api.twitch.tv/helix/streams?first=40&game_id=27471&game_id=509660 — the live-streams listing on an APP access token. `viewer_count` is present on every live row; the last row here deliberately omits it, which is how a null reaches the card instead of a zero nobody measured.",
+  "data": [
+    {
+      "id": "40952121132",
+      "user_id": "23161357",
+      "user_login": "cardsbyrae",
+      "user_name": "CardsByRae",
+      "game_id": "27471",
+      "game_name": "Pokémon Trading Card Game",
+      "type": "live",
+      "title": "Vintage Pokémon pack rips — base set box all night",
+      "viewer_count": 1428,
+      "started_at": "2026-09-19T01:04:12Z",
+      "language": "en",
+      "thumbnail_url": "https://static-cdn.jtvnw.net/previews-ttv/live_user_cardsbyrae-{width}x{height}.jpg",
+      "tag_ids": [],
+      "is_mature": false
+    },
+    {
+      "id": "40952000001",
+      "user_id": "98765432",
+      "user_login": "sneakerlab",
+      "user_name": "SneakerLab",
+      "game_id": "509660",
+      "game_name": "Art",
+      "type": "live",
+      "title": "Custom Air Jordan 1 painting stream",
+      "viewer_count": 212,
+      "started_at": "2026-09-19T00:12:00Z",
+      "language": "en",
+      "thumbnail_url": "https://static-cdn.jtvnw.net/previews-ttv/live_user_sneakerlab-{width}x{height}.jpg",
+      "tag_ids": [],
+      "is_mature": false
+    },
+    {
+      "id": "40951999999",
+      "user_id": "11223344",
+      "user_login": "quietchannel",
+      "user_name": "QuietChannel",
+      "game_id": "27471",
+      "game_name": "Pokémon Trading Card Game",
+      "type": "live",
+      "title": "just chatting for a bit",
+      "started_at": "2026-09-19T02:40:00Z",
+      "language": "en",
+      "thumbnail_url": "https://static-cdn.jtvnw.net/previews-ttv/live_user_quietchannel-{width}x{height}.jpg",
+      "tag_ids": [],
+      "is_mature": false
+    }
+  ],
+  "pagination": { "cursor": "eyJiIjpudWxsLCJhIjp7Ik9mZnNldCI6M319" }
+}

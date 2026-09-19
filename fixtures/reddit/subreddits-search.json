@@ -1,0 +1,62 @@
+{
+  "_recorded": "GET https://oauth.reddit.com/subreddits/search?q=mechanical%20keyboards&limit=4 — the shape Reddit returns for a subreddit search. The private and over-18 rows are kept deliberately: they are rooms nobody can watch or that nobody asked to put a seller's copilot in, and the source has to drop them.",
+  "kind": "Listing",
+  "data": {
+    "after": "t5_2s5oq",
+    "before": null,
+    "children": [
+      {
+        "kind": "t5",
+        "data": {
+          "display_name": "MechanicalKeyboards",
+          "display_name_prefixed": "r/MechanicalKeyboards",
+          "title": "Mechanical Keyboards — switches, keycaps and builds",
+          "public_description": "For people who love the sound and feel of a mechanical keyboard. Show your build, ask about switches, keycaps and lubing.",
+          "subscribers": 1284003,
+          "over18": false,
+          "subreddit_type": "public",
+          "url": "/r/MechanicalKeyboards/"
+        }
+      },
+      {
+        "kind": "t5",
+        "data": {
+          "display_name": "mechmarket",
+          "display_name_prefixed": "r/mechmarket",
+          "title": "Mechanical Keyboard Marketplace",
+          "public_description": "Buy, sell and trade mechanical keyboards, switches and keycaps. Every post needs the [Region] [H] [W] title format.",
+          "subscribers": 412887,
+          "over18": false,
+          "subreddit_type": "public",
+          "url": "/r/mechmarket/"
+        }
+      },
+      {
+        "kind": "t5",
+        "data": {
+          "display_name": "keebtrade_private",
+          "display_name_prefixed": "r/keebtrade_private",
+          "title": "Invite-only keyboard trading",
+          "public_description": "Approved members only.",
+          "subscribers": 900,
+          "over18": false,
+          "subreddit_type": "restricted",
+          "url": "/r/keebtrade_private/"
+        }
+      },
+      {
+        "kind": "t5",
+        "data": {
+          "display_name": "notsafekeebs",
+          "display_name_prefixed": "r/notsafekeebs",
+          "title": "NSFW keyboard art",
+          "public_description": "Adults only.",
+          "subscribers": 4100,
+          "over18": true,
+          "subreddit_type": "public",
+          "url": "/r/notsafekeebs/"
+        }
+      }
+    ]
+  }
+}

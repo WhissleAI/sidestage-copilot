@@ -134,6 +134,13 @@ export class ShowRuntime {
   private hostAudio: ScriptedHostAudio | null = null;
   private started = false;
 
+  /** Which surface this runtime is watching, without a database read. The
+   *  registry answers "is a Reddit room open right now" from it, which is a
+   *  question the Reddit rate budget has to be able to ask cheaply. */
+  get surface(): SurfaceId {
+    return this.o.source;
+  }
+
   constructor(private o: ShowRuntimeOpts) {
     this.showId = o.showId;
     this.llm = new WhissleClient({

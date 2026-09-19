@@ -1,0 +1,78 @@
+<!--
+  A Whatnot search / tag page, hand-trimmed to the shape measured on 2026-09-19
+  against `whatnot.com/search?query=…` and `whatnot.com/tag/sports_cards` through
+  headless real Chrome.
+
+  Hand-written rather than captured, for the reason `whatnot-live.html` is: a
+  capture would ship real sellers' room ids and show titles into the repo, and
+  the Cloudflare challenge in front of a plain GET means it could not be
+  re-captured on demand anyway. Every attribute and nesting below is the real
+  one — `data-testid="livestream-card"`, the `/live/<uuid>` link twice per card
+  (thumbnail and title), the un-truncated title in a `title` attribute because
+  the visible text is line-clamped, the host's `/user/<handle>`, Whatnot's own
+  category link, the seller's tag list in a `span[title]`, and the "Live · 2.2k"
+  badge with its middle dot and K suffix.
+
+  Third card has no live badge on purpose: that is a scheduled or replay card,
+  which must come back `liveNow: false` with NO viewer count rather than zero.
+-->
+<body>
+  <header>
+    <a href="/">Home</a>
+    <a href="/browse">Browse</a>
+  </header>
+  <nav>
+    <a href="/tag/trading_card_games"><span>Trading Card Games 19.1K Viewers</span></a>
+    <a href="/tag/sneakers_streetwear"><span>Sneakers &amp; Shoes 9.1K Viewers</span></a>
+  </nav>
+  <div class="grid">
+    <section data-testid="livestream-card" data-type="LivestreamCard">
+      <a href="/user/raecards"><span><strong>raecards</strong></span></a>
+      <div>
+        <a href="/live/c04a283d-93f4-4e1f-b025-5e90e2456f25">
+          <span>Live · 2.2k</span>
+        </a>
+      </div>
+      <div>
+        <a href="/live/c04a283d-93f4-4e1f-b025-5e90e2456f25">
+          <strong title="Vintage base set box break, $1 starts">Vintage base set box break, $1 s…</strong>
+        </a>
+        <div>
+          <strong><a href="/tag/pokemon_cards"><span>Pokémon Cards</span></a></strong>
+          <span title="$1 Starts, Vintage, Sudden Death">$1 Starts, Vintage, Sudden Death</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-testid="livestream-card" data-type="LivestreamCard">
+      <a href="/user/soleluxe"><span><strong>soleluxe</strong></span></a>
+      <div>
+        <a href="/live/7cf882bd-100a-49f1-9510-b64d3b476019"><span>Live · 171</span></a>
+      </div>
+      <div>
+        <a href="/live/7cf882bd-100a-49f1-9510-b64d3b476019">
+          <strong title="Air Jordan 1 grails, every pair authenticated">Air Jordan 1 grails, every pai…</strong>
+        </a>
+        <div>
+          <strong><a href="/tag/sneakers_streetwear"><span>Sneakers &amp; Shoes</span></a></strong>
+          <span title="Grails, Authenticated">Grails, Authenticated</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-testid="livestream-card" data-type="LivestreamCard">
+      <a href="/user/quietseller"><span><strong>quietseller</strong></span></a>
+      <div>
+        <a href="/live/6d3209c8-0072-4711-ba8b-bdecac7d6c43"><span>Starts in 2 hours</span></a>
+      </div>
+      <div>
+        <a href="/live/6d3209c8-0072-4711-ba8b-bdecac7d6c43">
+          <strong title="Sunday night coin auction">Sunday night coin auction</strong>
+        </a>
+        <div>
+          <strong><a href="/tag/coins_and_money"><span>Coins &amp; Money</span></a></strong>
+        </div>
+      </div>
+    </section>
+  </div>
+</body>

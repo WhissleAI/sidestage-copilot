@@ -296,6 +296,18 @@ export class ShowRegistry {
     return mine.length ? mine[mine.length - 1]!.showId : undefined;
   }
 
+  /**
+   * Is a session open on this surface right now, in this process?
+   *
+   * Synchronous and free, unlike `list()`, which reads every runtime's show row
+   * and its listings. The Reddit rate budget asks this on the discovery path —
+   * "is somebody watching a room whose headroom I would be spending" — and a
+   * question asked to AVOID work must not cost a round trip per runtime.
+   */
+  anyLiveOn(surface: SurfaceId): boolean {
+    return [...this.runtimes.values()].some((rt) => rt.surface === surface);
+  }
+
   /** Every watched show, or only one account's. A show is one account's or
    *  nobody's; there is no shared show. */
   async list(ownerId?: string | null): Promise<ShowSummary[]> {

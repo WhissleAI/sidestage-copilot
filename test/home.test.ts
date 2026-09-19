@@ -479,9 +479,14 @@ describe("GET /api/home", () => {
     assert.ok(Array.isArray(body.now.drafts.bySurface));
     // The prepared list is the same list, not a second opinion about it.
     assert.deepEqual(body.next.prepared, body.prepared);
-    // Only eBay Live has a grid we can read, and saying so is what stops the
-    // UI implying the other six are broken.
-    assert.deepEqual(body.next.discoverable, ["ebaylive"]);
+    // `discoverable` is COMPUTED now, not the constant `["ebaylive"]` it used
+    // to be. In the suite there is no eBay Live session, no Twitch key and no
+    // Reddit credential, so the only surface Discover can actually read is the
+    // one that needs nothing — and TikTok Live, which has no index to read at
+    // all, is never in it whatever the environment says.
+    assert.ok(Array.isArray(body.next.discoverable));
+    assert.deepEqual(body.next.discoverable, ["whatnot"]);
+    assert.equal(body.next.discoverable.includes("tiktoklive"), false);
     assert.ok(Array.isArray(body.behind.reports));
     assert.equal(typeof body.behind.followups.total, "number");
     assert.equal(typeof body.behind.followups.ready, "number");

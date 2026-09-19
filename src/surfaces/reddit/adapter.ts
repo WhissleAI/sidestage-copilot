@@ -158,7 +158,7 @@ export const redditAdapter: SurfaceAdapter = {
     // Before anything is scheduled: five values, and the refusal names the
     // first one missing so the attach route can 409 with something actionable.
     requireCreds();
-    const client = new RedditClient();
+    const client = redditClient();
 
     // The room's rules, fetched at attach rather than at draft time. They are
     // the constraints every draft in this room is checked against, they change
@@ -182,15 +182,34 @@ export const redditAdapter: SurfaceAdapter = {
   },
 };
 
+/**
+ * ONE Reddit client for this process, and therefore one rate-limit budget.
+ *
+ * Reddit meters per account, not per caller. A poller watching a subreddit, the
+ * rules fetch behind it and Discover searching for an operator's interests all
+ * spend from the same 600-requests-per-10-minutes window — so a second client
+ * is not a second budget, it is the same budget with two halves that cannot see
+ * each other, each convinced it has the whole thing. `RedditClient` reads
+ * `x-ratelimit-*` off every response and paces BEFORE the request that would
+ * spend the last of it (api.ts); that pacing only works if everything goes
+ * through the same instance.
+ *
+ * Built lazily so importing the adapter — which the registry does at startup —
+ * does not construct a client against credentials that may not be there.
+ */
+let shared: RedditClient | null = null;
+export function redditClient(): RedditClient {
+  shared ??= new RedditClient();
+  return shared;
+}
+
 // One cache for the process, because the rules of a room are a property of the
-// room and not of whoever happens to be watching it. Built lazily so importing
-// the adapter — which the registry does at startup — does not construct a
-// client against credentials that may not be there.
+// room and not of whoever happens to be watching it.
 let sharedRules: CommunityRules | null = null;
 
 /** Where the draft path asks what is in force in a room. */
 export function rules(): CommunityRules {
-  sharedRules ??= new CommunityRules(new RedditClient());
+  sharedRules ??= new CommunityRules(redditClient());
   return sharedRules;
 }
 

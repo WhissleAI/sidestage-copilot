@@ -398,3 +398,53 @@ switch that shows as on and is refused every time.
 The asymmetry is the whole argument: the undo window can delete a comment, it
 cannot unsee it, and one wrong post costs an account that has been in a
 community for years.
+
+## Discovery is a question asked of every surface
+
+`GET /api/discover` returns one `DiscoverSourceResult` per surface — `surface`, a one-sentence
+`method`, `hits[]`, and `unavailable`. **A surface that cannot answer still returns a source**,
+with an empty `hits` array and, where the gap is a variable, `missing` spelled exactly as
+`SurfaceUnavailable` spells it. A missing tab reads as a broken product; a tab that says what it
+needs reads as a door the platform never opened.
+
+Every hit carries at least one `why` — which interest matched and where — unless the caller named
+a surface and passed `all=1`. `viewers`, `startedAt` and `host` are null when the source did not
+say them; nothing is fabricated to fill a column.
+
+| Surface | How | Needs |
+|---|---|---|
+| eBay Live | the house-session grid already polled by `sellers/following.ts`, filtered and ranked by interest | the eBay Live session |
+| Whatnot | `whatnot.com/search?query=…` in real Chrome — see below | nothing (`WHATNOT_DISCOVERY=0` stops it) |
+| Twitch | Helix `search/categories` per interest, then ONE `streams?game_id=…` — on the **app token**, no scope, no consent | `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` |
+| Reddit | `/subreddits/search` for rooms, `/search` for threads, through the process-wide client | the five `REDDIT_*` |
+| TikTok Live | none — no public index exists to read | — (**not** `TIKTOK_LIVE_ENABLED`; that is the attach gate) |
+
+`dm` and `simulated` are not places to find something and have no source. `youtubelive` has no
+adapter in this build and is not a surface anything here can discover.
+
+Twitch discovery's requirement is **narrower than attaching's**. Listing what is live acts as
+nobody, so it needs the application key and not the bot account — an operator with keys and no
+consent can browse Twitch and not attach to it, and the two refusals say different things.
+
+Reddit discovery spends the SAME rate budget the poller does (`redditClient()` is one instance for
+the process). While a Reddit room is being watched and the window is nearly spent, discovery
+refuses with *"Reddit's rate budget is reserved for the room you are watching"* rather than taking
+headroom from the drafts somebody is waiting on.
+
+### Whatnot's grid: measured, shipped, and honest about where it was measured
+
+A plain GET of `/browse`, `/explore`, `/tag/<x>` or `/search` is **403 Cloudflare** with a
+5.6 KB `Just a moment...` body. The same URLs in **headless real Chrome through `openContext`**
+are **200**, and the tag and search pages carry room ids, hosts, un-truncated titles, categories
+and a live badge (2026-09-19).
+
+Nothing was added to get past the block — same Chrome, same user agent the room watcher uses, no
+rotation, no challenge handling. What is unverified is a **datacentre** address, so there are two
+detections rather than one: the challenge by its own markup, and a `shell` selector for the worse
+case of a 200 that renders nothing, which would otherwise be indistinguishable from a quiet night.
+Both come back as `unavailable` with a plain reason. Attaching to a room by pasting its link is
+unaffected by either.
+
+The read is bounded because the box is a t3.small that has been taken down by unreaped Chromes
+before: at most two queries, one page, one browser, under a process-wide lock, opened and closed
+inside it.
