@@ -197,6 +197,15 @@ export interface ReplyProposal {
   spans: SpanBreakdown;
   createdAt: string;
   sentText?: string;
+  /**
+   * The rules of the ROOM this draft was checked against (corpus: "community").
+   *
+   * Beside the evidence, never among it. A rule is a constraint on the reply
+   * and an answer abstains when it has no EVIDENCE — folding rules into that
+   * list would make a draft with rules and no grounding look grounded to the
+   * autonomy ladder.
+   */
+  rules?: Evidence[];
   /** The operator's own past reply this draft was written in the manner of.
    *  Style, not evidence — the console renders it as "written the way you
    *  answered this in March", beside the citations rather than among them. */

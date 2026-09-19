@@ -119,6 +119,34 @@ export class CommunityRules {
     return this.cache.get(subreddit.replace(/^\/?r\//i, ""))?.facts ?? [];
   }
 
+  /**
+   * Read a room's rules in the background, once.
+   *
+   * The draft path must never block on a network call, so it asks `cached()`
+   * and gets whatever is in hand. This is how a room we have not read yet
+   * becomes a room we have: a watch on a PROFILE lands comments in rooms
+   * nobody attached — the rules that bind the reply are that room's — and the
+   * first draft there goes out unchecked (the guard says n/a, honestly) while
+   * this fetches, so the next one is checked.
+   *
+   * In-flight fetches are tracked so twenty comments from one subreddit in one
+   * poll do not become twenty reads of the same rules page.
+   */
+  warm(subreddit: string): void {
+    const sub = subreddit.replace(/^\/?r\//i, "");
+    if (!sub || this.inFlight.has(sub) || this.cached(sub).length) return;
+    this.inFlight.add(sub);
+    void this.forSubreddit(sub)
+      .catch(() => {
+        // A room whose rules we could not read is still a room worth watching.
+        // The guard reports n/a, which is honestly "we had nothing to check
+        // against" rather than "we checked and found nothing wrong".
+      })
+      .finally(() => this.inFlight.delete(sub));
+  }
+
+  private inFlight = new Set<string>();
+
   forget(subreddit?: string): void {
     if (subreddit) this.cache.delete(subreddit.replace(/^\/?r\//i, ""));
     else this.cache.clear();

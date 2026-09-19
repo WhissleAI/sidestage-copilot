@@ -17,6 +17,7 @@
 // subreddit's rules in as constraints on whatever gets drafted.
 
 import { capabilitiesOf, type SurfaceAdapter, type SurfaceCapabilities, type SurfaceConnection, type SurfaceEvents, type SurfaceTarget } from "../types.js";
+import type { Fact } from "../../retrieval/facts.js";
 import { RedditClient, requireCreds } from "./api.js";
 import { RedditPoller, type RedditWatch } from "./poll.js";
 import { CommunityRules } from "./rules.js";
@@ -180,7 +181,44 @@ export const redditAdapter: SurfaceAdapter = {
     await poller.start();
     return poller;
   },
+
+  /** The rules in force where this reply will land, from the cache the attach
+   *  filled. One line, over the process-wide store; the behaviour is
+   *  `constraintsFrom` below, which is where it is documented and tested. */
+  constraintsFor(t: SurfaceTarget, room?: string | null): Fact[] {
+    return constraintsFrom(rules(), t, room);
+  },
 };
+
+/**
+ * The rules in force where a reply will land.
+ *
+ * Answered from cache, never fetched here: this is called while a draft is
+ * being guarded, and a reply path that waited on a rules fetch would either
+ * block on a network call or compose without them. A room we have not read yet
+ * is warmed in the background and checked from the next draft on — which is the
+ * case a watch on a PROFILE creates, where comments arrive from rooms nobody
+ * attached and each one's own rules are the ones that bind the answer.
+ *
+ * These go to `GuardInput.community`, never to the retriever. A rule is a
+ * constraint on the reply; ranking it against the question would mean a draft
+ * is checked only against the rules that happen to sound like what was asked.
+ *
+ * Takes its store as an argument so the suite can drive it with Reddit's own
+ * recorded `/about/rules` payload and no key — the adapter method above passes
+ * the process-wide one, which is the only difference between them.
+ */
+export function constraintsFrom(
+  store: CommunityRules,
+  t: SurfaceTarget,
+  room?: string | null,
+): Fact[] {
+  const sub = (room || t.meta?.subreddit || "").replace(/^\/?r\//i, "").trim();
+  if (!sub) return [];
+  const cached = store.cached(sub);
+  if (!cached.length) store.warm(sub);
+  return cached;
+}
 
 /**
  * ONE Reddit client for this process, and therefore one rate-limit budget.

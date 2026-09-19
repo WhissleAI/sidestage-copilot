@@ -186,7 +186,12 @@ export function originOfSession(s: ShowSummary): DraftOrigin {
 export function rulesOf(p: ReplyProposal): AppliedRule[] {
   const held = p.guards.find((g) => g.guard === "community_rule" && g.verdict === "block");
   const heldId = held?.detail?.expected ?? null;
-  return p.evidence
+  // The rules the guard chain was actually handed, which since the per-room
+  // constraint input is where they live (`ReplyProposal.rules`). Evidence is
+  // the fallback: a surface that grounds in a community corpus puts them there,
+  // and so did every proposal written before rules had a field of their own.
+  const rules = p.rules?.length ? p.rules : p.evidence;
+  return rules
     .filter((e) => e.corpus === "community")
     .map((e) => ({
       factId: e.factId,

@@ -78,8 +78,43 @@ export interface PipelineDeps {
   executor: ActionExecutor;
   proposer: ActionProposer;
   showContext: ShowContextEngine;
+  /**
+   * The RULES OF THE ROOM this message was written in, as constraints.
+   *
+   * A second input beside the retriever, and deliberately not part of it.
+   * `GuardInput.community` used to be `retrieved.facts.filter(community)`, and
+   * the retriever's index is the seller's listings and policies — so no
+   * producer of a community fact (a subreddit's rules, a sponsor's "do not
+   * claim") had any route to the guard chain at all, and `communityRuleGuard`
+   * returned n/a on every real watch. A rule is not grounding to be ranked
+   * against a question: it is in force whether or not it resembles what was
+   * asked. The surface adapter answers this from what it has already fetched
+   * (src/surfaces/types.ts, `constraintsFor`); absent on a surface with no
+   * rooms, which is every live-commerce surface.
+   */
+  constraints?: (m: ChatMessage) => Fact[];
   audit: AuditLog;
   events: PipelineEvents;
+}
+
+/**
+ * The constraints in force on this reply, from both doors.
+ *
+ * The per-room input is the one that matters and is checked first; anything
+ * with `corpus: "community"` that also came back from retrieval is kept, so a
+ * surface that does ground in a community corpus (Twitch's sponsor
+ * prohibitions, once they are indexed) is not silently dropped. Deduped by
+ * `factId`, because a rule enforced twice reads as two rules.
+ */
+function constraintsOf(fromRoom: Fact[], retrieved: Fact[]): Fact[] {
+  const out: Fact[] = [];
+  const seen = new Set<string>();
+  for (const f of [...fromRoom, ...retrieved]) {
+    if (f.corpus !== "community" || seen.has(f.factId)) continue;
+    seen.add(f.factId);
+    out.push(f);
+  }
+  return out;
 }
 
 /** Said the same way in the firehose, in the report and in the audit entry. */
@@ -305,10 +340,20 @@ export class Pipeline {
     }
     timer.mark("retrieve");
 
+    // The rules of the room, from the surface rather than from retrieval.
+    // Read ONCE per draft and used for the guard chain, the cache key and the
+    // card, so the three cannot disagree about what was in force.
+    const roomRules = constraintsOf(this.d.constraints?.(msg) ?? [], r.facts);
+
     // 2. cache, keyed on the versions of every listing the grounding touched.
     //    A regenerate deliberately skips it: the seller is asking for something
     //    OTHER than the answer we already have.
-    const key = cacheKey({ question: msg.text, facts: r.evidence });
+    //
+    //    The rules are part of the key. A cached verdict is a statement about a
+    //    draft in a ROOM — a profile watch answers in several — and a rule
+    //    edited by a moderator makes every answer written under the old one
+    //    unreachable rather than merely stale.
+    const key = cacheKey({ question: msg.text, facts: [...r.evidence, ...roomRules] });
     const hit = previous ? null : this.cache.get(key);
     if (hit) {
       proposal = await this.finish(proposal, {
@@ -375,7 +420,7 @@ export class Pipeline {
           slots: r.slots,
           policies,
           surface: capabilitiesOf(show.source),
-          community: r.facts.filter((f) => f.corpus === "community"),
+          community: roomRules,
         };
       };
       this.grounding.set(proposal.id, { facts: r.facts, slots: r.slots, evidenceQuality: r.evidence[0]?.score ?? 0 });
@@ -401,6 +446,9 @@ export class Pipeline {
         // was asked to write them in.
         ...(draft.styleRef ? { styleRef: draft.styleRef } : {}),
         evidence: r.evidence,
+        // The rules that were in force, beside the evidence rather than among
+        // it: a constraint is not a citation, and `abstained` counts evidence.
+        ...(roomRules.length ? { rules: roomRules.map((f) => toEvidence(f, 0)) } : {}),
         guards: chain.guards,
         verdict: chain.verdict,
         confidence: chain.confidence,
@@ -453,6 +501,7 @@ export class Pipeline {
       guards: ReplyProposal["guards"]; verdict: ReplyProposal["verdict"];
       confidence: number; repaired: boolean; spans: ReplyProposal["spans"];
       styleRef?: StyleRef;
+      rules?: Evidence[];
     },
     msg: ChatMessage,
   ): Promise<ReplyProposal> {
@@ -540,7 +589,10 @@ export class Pipeline {
           slots: g?.slots ?? ({} as GuardInput["slots"]),
           policies,
           surface: capabilitiesOf(show.source),
-          community: (g?.facts ?? []).filter((f) => f.corpus === "community"),
+          // An EDIT is checked against the room's rules too. The operator
+          // rewriting a draft is the likeliest moment for a rule to be broken,
+          // because the guards have already passed once.
+          community: constraintsOf(this.d.constraints?.(p.message) ?? [], g?.facts ?? []),
         },
         { evidenceQuality: g?.evidenceQuality ?? 0 },
       );

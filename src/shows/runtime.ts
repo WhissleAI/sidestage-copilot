@@ -233,6 +233,12 @@ export class ShowRuntime {
       executor: this.executor,
       proposer: this.proposer,
       showContext: this.showContext,
+      // The rules of the room, asked of the surface rather than of the
+      // retriever. See `SurfaceAdapter.constraintsFor`: the retriever's index
+      // is this seller's listings and policies, so a subreddit's rules could
+      // never have reached it, and the guard that enforces them had nothing to
+      // enforce on every real watch.
+      constraints: (m) => this.roomConstraints(m.room ?? null),
       audit: this.audit,
       events: {
         onChat: (m) => {
@@ -250,6 +256,29 @@ export class ShowRuntime {
         },
       },
     });
+  }
+
+  /**
+   * What this room forbids, for the guard chain.
+   *
+   * Surface-agnostic on purpose: the runtime asks the adapter and does not know
+   * what a subreddit is. An adapter with no rooms does not implement it and the
+   * answer is nothing, which is exactly what every live-commerce session gets —
+   * `communityRuleGuard` then reads `communityRules: false` off the capability
+   * table and returns n/a, as it always has.
+   *
+   * Never throws: a broken constraints lookup must cost a draft its rule check
+   * and say so in the guard row, not cost a buyer their answer.
+   */
+  private roomConstraints(room: string | null): Fact[] {
+    const target = this.target;
+    if (!target) return [];
+    try {
+      return surfaceAdapter(this.o.source)?.constraintsFor?.(target, room) ?? [];
+    } catch (e) {
+      console.warn(`  ${this.showId}: room rules unavailable — ${(e as Error).message}`);
+      return [];
+    }
   }
 
   /** Lot titles for the context engine, refreshed with the retriever's index. */

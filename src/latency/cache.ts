@@ -27,6 +27,10 @@ export interface CachedReply {
   answer: string;
   claims: Claim[];
   evidence: Evidence[];
+  /** The rules of the room this answer was checked against. Part of the key,
+   *  so a hit is an answer written under the same rules — carried so the card
+   *  renders them rather than going blank on the second identical question. */
+  rules?: Evidence[];
   guards: GuardResult[];
   verdict: Verdict;
   confidence: number;
