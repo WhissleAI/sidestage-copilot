@@ -21,6 +21,8 @@ correct reply in front of the seller as a problem and trains them to click throu
 Several cases mutate catalog state before judging — landing a markdown, zeroing stock — so the
 staleness checks are exercised against a genuinely moved target rather than a fixture.
 
+Measured 2026-09-19; this is the run's stdout:
+
 ```
   guardrail chain over 46 labelled cases
     caught 25  missed 0  false alarms 0  clean passes 21
@@ -33,8 +35,19 @@ staleness checks are exercised against a genuinely moved target rather than a fi
     tone             fired on 5/5 of its own cases
 ```
 
+`community_rule` and `sponsor` do not appear because the labelled set has no cases for either.
+Two of the eight shipped guards are unmeasured.
+
 Thresholds asserted in the suite are **asymmetric**: recall ≥ 0.95, precision ≥ 0.90. A miss is
 a wrong answer sent to a buyer; a false alarm costs the seller a glance.
+
+**`npm run eval` exits non-zero today, under that perfect scoreboard.** The scoring test
+binarises — it asks only whether the chain *stopped* a draft, so `revise` and `block` score
+identically — while a second test in the same file checks each case's exact verdict. On
+2026-09-19 that second test failed, 8 of 46 reading `expected revise, got block`. Nothing runs
+either automatically: `npm test` globs `test/*.test.ts`, `npm run eval` globs `test/*.eval.ts`,
+and only a human types the second. A red eval that nothing runs is how the rest of this document
+went stale.
 
 ### What this number does and does not mean
 
@@ -69,26 +82,38 @@ acceptable alternates where more than one fact genuinely answers). The point is 
 so "structured-first plus hybrid similarity" is backed by what each piece contributes rather
 than by assertion.
 
+Measured 2026-09-19, twice, identical both times — the suite is deterministic, so this table
+is that run's stdout rather than a transcription:
+
 ```
   retrieval over 38 labelled buyer questions
     mode              R@1     R@3     R@5     MRR
-    lexical           0.526   0.737   0.789   0.642
-    ngram             0.447   0.605   0.632   0.530
-    fused             0.526   0.658   0.737   0.631
+    lexical           0.553   0.763   0.763   0.657
+    ngram             0.526   0.605   0.684   0.604
+    fused             0.579   0.711   0.789   0.668
     structured-only   0.842   0.895   0.921   0.875
-    hybrid            0.842   0.921   0.947   0.897
+    hybrid            0.842   0.921   0.974   0.898
 ```
 
 **Reading it honestly:**
 
-- **Structured lookup does the work.** It alone reaches R@1 0.842; the similarity legs alone
-  reach 0.526. That is the core claim of the design, and it is the largest single effect here.
+- **Structured lookup does the work.** It alone reaches R@1 0.842; the best similarity leg
+  alone reaches 0.579. That is the core claim of the design, and it is the largest single
+  effect here.
 - **Similarity adds tail recall, not head precision.** Hybrid ties structured-only at R@1 and
-  improves R@3 (0.895 → 0.921) and R@5 (0.921 → 0.947). It catches the questions slot
+  improves R@3 (0.895 → 0.921) and R@5 (0.921 → 0.974). It catches the questions slot
   resolution does not reach — past Q&A, condition prose.
-- **RRF fusion does not beat BM25 alone on clean text** (MRR 0.631 vs 0.642). Fusing a weaker
-  leg costs a little ranking quality. That is a real negative result, and §3 is why the leg
-  stays anyway.
+- **The negative result this section used to carry has reversed, and is withdrawn.** Through
+  2026-09-15 this doc reported that RRF fusion *lost* to BM25 alone on clean text (MRR 0.631 vs
+  0.642) and §3 existed to justify keeping the leg anyway. Measured now, fused 0.668 **beats**
+  lexical 0.657, and fused leads on R@1 and R@5 too. The leg no longer needs the typo argument
+  to earn its place on clean text; §3 still holds and is now a second reason rather than the
+  only one.
+
+> The fusion figures moved because the retriever and the fact set moved under them, not because
+> the labelled questions changed — it is still 38. Nobody re-ran this suite between those
+> changes and 2026-09-19, which is how a doc ends up asserting the opposite of what the code
+> does. The fix is not a better number; it is running it.
 
 `recall@1` is weighted most heavily because the composer is instructed to answer from the facts
 it is given: a gold fact ranked fifth of eight is much weaker grounding than one ranked first.
@@ -98,14 +123,16 @@ it is given: a gold fact ranked fifth of eight is much weaker grounding than one
 | # | Bug | Effect |
 |---|---|---|
 | 1 | **The abstain path was dead code.** The anaphora fallback was written `(ANAPHORA.test(lower) \|\| true)` — unconditional — so every question resolved to the pinned lot and nothing ever abstained. The RRF-score threshold could not fire either: rank 1 always scores `1/(k+1)`. | Abstention is now driven by slot resolution failing, with a weak-BM25 backstop. |
-| 2 | **Policy questions ranked the listing field above the governing clause** — "do i pay customs to the uk" returned this pair's domestic shipping line first. Separately, "does it come with the original box" resolved to the Supreme **Box** Logo hoodie. | `POLICY_LED` fields let the clause lead; generic title tokens are stoplisted. R@1 0.737 → **0.842**, MRR 0.836 → **0.897**. |
+| 2 | **Policy questions ranked the listing field above the governing clause** — "do i pay customs to the uk" returned this pair's domestic shipping line first. Separately, "does it come with the original box" resolved to the Supreme **Box** Logo hoodie. | `POLICY_LED` fields let the clause lead; generic title tokens are stoplisted. Hybrid R@1 0.737 → **0.842** and MRR 0.836 → **0.897** when the fix landed; hybrid measures 0.842 / 0.898 today. |
 
 ### A negative result worth stating
 
-**Similarity score is unusable as a confidence signal on a catalog this size.** Measured top
-BM25 scores:
+**Similarity score is unusable as a confidence signal on a catalog this size.** Top BM25
+scores, measured by hand while the feature was being considered and **not reproduced since** —
+the suite does not print these, so treat the ranges as of 2026-09-15 and pending
+re-measurement:
 
-| | BM25 range |
+| | BM25 range (2026-09-15, not re-measured) |
 |---|---|
 | ungrounded questions ("whats the weather like") | 0.0 – 5.7 |
 | grounded questions ("how much for the pandas") | 2.0 – 10.7 |
@@ -118,22 +145,27 @@ guard outcomes and evidence rank instead.
 
 ## 3. Does the n-gram leg earn its place?
 
-Same suite. §2 shows fusing the trigram leg **costs** MRR on clean questions. The leg exists for
-typo tolerance, which the labelled set — written in full sentences — under-represents. So the
+Same suite. This section was written when §2 showed fusion **costing** MRR on clean questions;
+it no longer does, so what follows is now the second argument for the leg rather than the only
+one. The leg exists for typo tolerance, which the labelled set — written in full sentences —
+under-represents. So the
 suite perturbs every question with deterministic keyboard-style typos (transpose, drop, double)
 and averages over five seeds.
 
+Measured 2026-09-19, same run as §2:
+
 ```
   ngram-leg ablation (MRR)
-    clean questions      lexical 0.642   fused 0.631
-    misspelled questions lexical 0.369   fused 0.510
-    degradation          lexical 42.5%   fused 19.2%
+    clean questions      lexical 0.657   fused 0.668
+    misspelled questions lexical 0.390   fused 0.537
+    degradation          lexical 40.7%   fused 19.7%
 ```
 
-**Verdict: it stays.** It costs 1.7% MRR on clean text and **halves degradation** under typos
-(42.5% → 19.2%). Live-chat buyers type fast on phones, so the misspelled column is the realistic
-one. The test asserts this directly and says in its failure message that if fusion ever stops
-winning here, the leg is dead weight and should be removed.
+**Verdict: it stays, and the case is now unconditional.** It no longer costs anything on clean
+text — fusion is ahead there too — and it still roughly **halves degradation** under typos
+(40.7% → 19.7%). Live-chat buyers type fast on phones, so the misspelled column is the
+realistic one. The test asserts this directly and says in its failure message that if fusion
+ever stops winning here, the leg is dead weight and should be removed.
 
 ---
 
@@ -145,7 +177,13 @@ Replays a seeded script through the real pipeline against the real Whissle agent
 cold (every reply hits the LLM), then the **same questions again** so the version-keyed cache
 serves them.
 
-**Three consecutive runs, 24 questions each:**
+> **Pending re-measurement.** Every figure in this section was measured on **2026-09-15** and
+> has not been reproduced since; the bench needs `WHISSLE_API_KEY` and a live gateway, so it
+> cannot be run from a checkout without one. The tail here is the shared hosted pool (see
+> conclusion 3), which means these numbers age faster than anything else in this document.
+> Quote them with the date attached or re-run `npm run bench -- 24` first.
+
+**Three consecutive runs, 24 questions each — 2026-09-15:**
 
 | run | cold p50 | cold p95 | cold p99 | breaches | cached p50 | cached p95 |
 |---|---|---|---|---|---|---|
@@ -153,7 +191,7 @@ serves them.
 | 2 | 1211 ms | 3735 ms | 5983 ms | 12.5% | 2 ms | 1131 ms |
 | 3 | 982 ms | 1950 ms | 2403 ms | 4.2% | 2 ms | 992 ms |
 
-**Per-stage, run 1:**
+**Per-stage, run 1 — 2026-09-15:**
 
 ```
     admit          p50     0  p95     0
@@ -199,8 +237,9 @@ The bench exits non-zero if that reply is ever served from cache.
 
 ## 5. Unit tests
 
-`npm test` — about 170 tests across `test/*.test.ts` on Node's test runner, no LLM
-credentials required (a local Postgres is; `pretest` creates `sidestage_test`).
+`npm test` — **479 tests** across `test/*.test.ts` on Node's test runner (counted from a run on
+2026-09-19), no LLM credentials required (a local Postgres is; `pretest` creates
+`sidestage_test`).
 
 | Area | What is proven |
 |---|---|
