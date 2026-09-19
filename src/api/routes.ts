@@ -641,12 +641,20 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   // ── health ────────────────────────────────────────────────────────────────
-  app.get("/health", async () => ({
-    ok: true,
-    llm: ctx.llmName,
-    shows: await shows.list(),
-    clients: hub.size,
-  }));
+  //
+  // Liveness, and nothing else. This is the one route on the box that answers
+  // an unauthenticated caller, and it used to answer with `shows.list()` — no
+  // owner argument, which the registry reads as "every runtime in the
+  // process". Every field of `ShowSummary` went with it: show id, owner
+  // account id, agent id, catalog id, title, seller handle, the eBay event id,
+  // whether writes were armed against real eBay, viewer and proposal counts.
+  // Anyone who curled it during a show learned who was selling what, under
+  // which account, and whether the copilot could move real prices.
+  //
+  // A probe needs to know the process answers. The console's own status dot
+  // (AppShell) reads nothing but the status code, and a seller who wants the
+  // session list has `GET /api/shows`, which is scoped to their account.
+  app.get("/health", async () => ({ ok: true }));
 
   // ── the event stream ──────────────────────────────────────────────────────
   app.get<{ Querystring: { showId?: string } }>("/api/stream", async (req, reply) => {

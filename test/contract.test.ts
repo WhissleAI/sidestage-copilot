@@ -99,13 +99,18 @@ describe("the seam that broke", () => {
 });
 
 describe("read routes answer the shape the console destructures", () => {
-  test("GET /health", async () => {
-    const r = await inject({ method: "GET", url: "/health" });
+  test("GET /health proves the process is alive and says nothing else", async () => {
+    // Deliberately UNauthenticated: this is the one route open to the
+    // internet, and it used to answer with every live session on the box —
+    // show id, owner account, agent id, seller handle, the eBay event, and
+    // whether writes were armed against real eBay. The console's status dot
+    // reads the status code and nothing else, so there is nothing to carry.
+    const r = await app.inject({ method: "GET", url: "/health" });
     assert.equal(r.statusCode, 200);
     const b = r.json();
     assert.equal(b.ok, true);
-    assert.equal(typeof b.llm, "string");
-    assert.ok(Array.isArray(b.shows));
+    assert.deepEqual(Object.keys(b), ["ok"], `/health published ${JSON.stringify(b)}`);
+    assert.doesNotMatch(r.body, /show|agent|account|seller|catalog/i);
   });
 
   test("GET /api/show carries the fields the top bar reads", async () => {
