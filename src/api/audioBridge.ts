@@ -20,14 +20,18 @@
 //    without a user picking the tab, so this is a page the seller opens and
 //    clicks once — it cannot be started from the backend, by anyone.
 
-export const AUDIO_BRIDGE_HTML = `<!doctype html>
+const BRIDGE_TEMPLATE = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>SideStage — host audio bridge</title>
-<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.9/dist/livekit-client.umd.min.js"></script>
-<style>
+<script
+  src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.9/dist/livekit-client.umd.js"
+  integrity="sha384-ouw3qxbIF/FTyrIeofW9B0lHzqXBX/41rOdLpTsJ1ekvAZZ8ZiWOBfOSEceN7U4F"
+  crossorigin="anonymous"
+  referrerpolicy="no-referrer"></script>
+<style nonce="__NONCE__">
   :root { color-scheme: dark; }
   body { margin:0; background:#0A0B0D; color:#E8EAED; font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif; }
   main { max-width:720px; margin:0 auto; padding:32px 20px; }
@@ -76,7 +80,7 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
   </div>
 </main>
 
-<script>
+<script nonce="__NONCE__">
 (function () {
   var API = location.origin;
   var room = null, stream = null, visualTimer = null, visualEl = null;
@@ -505,3 +509,49 @@ export const AUDIO_BRIDGE_HTML = `<!doctype html>
 </script>
 </body>
 </html>`;
+
+/**
+ * The bridge page, with this response's nonce in it.
+ *
+ * The page has no CSP and no SRI until 2026-09-19: it pulled a script from a
+ * CDN with nothing pinning the bytes, and the token it is handed sits in
+ * `location.search` — so a CDN compromise read an account's thirty-day
+ * session out of the address bar of a page the operator was told to open.
+ * Both halves are answered now: the script is pinned by hash, and the policy
+ * below allows exactly that origin and the two inline blocks carrying this
+ * nonce.
+ *
+ * The integrity hash is of `dist/livekit-client.umd.js` from the npm package
+ * `livekit-client@2.5.9` — the file that actually ships in the tarball,
+ * verified byte-identical to jsDelivr's copy. Deliberately NOT the `.min.js`
+ * jsDelivr synthesises on the fly: nothing in the registry fixes those bytes,
+ * so an SRI hash of them is pinned to a minifier's output rather than to a
+ * published artifact.
+ */
+export function audioBridgeHtml(nonce: string): string {
+  return BRIDGE_TEMPLATE.replace(/__NONCE__/g, nonce);
+}
+
+/**
+ * What this page is allowed to do.
+ *
+ * `connect-src` is the loose one, and honestly so: the LiveKit room this page
+ * publishes into is minted per session by the gateway, so its host is not
+ * known when the page is served. What the policy does pin is the thing that
+ * matters here — no script may run except the pinned CDN bundle and the
+ * page's own nonced block, so there is nothing on the page to exfiltrate the
+ * token with.
+ */
+export function bridgeCsp(nonce: string): string {
+  return [
+    "default-src 'none'",
+    `script-src https://cdn.jsdelivr.net 'nonce-${nonce}'`,
+    `style-src 'nonce-${nonce}'`,
+    "connect-src 'self' https: wss:",
+    "img-src 'self' data:",
+    "media-src 'self' blob:",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}

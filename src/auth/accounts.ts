@@ -78,6 +78,17 @@ export interface Session {
   token: string;
   account: Account;
   expiresAt: string;
+  /** Set on a session that may only act on ONE show — the audio bridge's.
+   *  Null/absent on a console session, which is every row written before
+   *  migration 025. */
+  scopeShowId?: string | null;
+}
+
+/** A resolved token: who, and how far it reaches. */
+export interface Resolved {
+  account: Account;
+  /** The show this token is confined to, or null for a console session. */
+  scopeShowId: string | null;
 }
 
 /** How long a console session lives before it has to be re-minted. */
@@ -141,15 +152,42 @@ export class Accounts {
   }
 
   /**
+   * A session that can do ONE thing, for one show, for an hour.
+   *
+   * The audio bridge is a bare HTML page in a tab: it cannot carry a bearer
+   * header, so its token rides in the URL — the address bar, the history, and
+   * whatever the operator copies when they send the link to their other
+   * machine. Handing it the console session put a thirty-day key to the whole
+   * account there. This is what belongs in a URL instead: minted by the show's
+   * owner, accepted only on that show's audio and visual ingest, and gone in
+   * an hour whether or not anyone remembers it.
+   */
+  async openBridgeSession(account: Account, showId: string, minutes = 60): Promise<Session> {
+    const token = `sbt_${randomBytes(24).toString("hex")}`;
+    const expiresAt = new Date(Date.now() + minutes * 60_000).toISOString();
+    await this.d.query(
+      "INSERT INTO auth_sessions (token, account_id, expires_at, scope_show_id) VALUES ($1, $2, $3, $4)",
+      [token, account.id, expiresAt, showId],
+    );
+    return { token, account, expiresAt, scopeShowId: showId };
+  }
+
+  /**
    * Resolve a bearer token to an account, or null.
    *
    * Expiry is enforced in the QUERY rather than in JavaScript: a check the
    * database performs cannot be skipped by a caller that forgot to run it.
    */
   async resolve(token: string | null): Promise<Account | null> {
+    return (await this.resolveSession(token))?.account ?? null;
+  }
+
+  /** As `resolve`, and says how far the token reaches. The API layer needs
+   *  both: who is asking, and whether this token may ask THIS. */
+  async resolveSession(token: string | null): Promise<Resolved | null> {
     if (!token) return null;
-    const r = await this.d.query<AccountRow>(
-      `SELECT a.* FROM auth_sessions s
+    const r = await this.d.query<AccountRow & { scope_show_id: string | null }>(
+      `SELECT a.*, s.scope_show_id FROM auth_sessions s
        JOIN accounts a ON a.id = s.account_id
        WHERE s.token = $1 AND s.expires_at > now()`,
       [token],
@@ -157,7 +195,7 @@ export class Accounts {
     if (!r.rows[0]) return null;
     // Best-effort liveness, never on the critical path of the answer.
     void this.d.query("UPDATE auth_sessions SET last_seen = now() WHERE token = $1", [token]).catch(() => {});
-    return toAccount(r.rows[0]);
+    return { account: toAccount(r.rows[0]), scopeShowId: r.rows[0].scope_show_id ?? null };
   }
 
   async endSession(token: string): Promise<void> {

@@ -39,7 +39,7 @@ import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
 import { prdMetrics } from "../shows/prdMetrics.js";
 import { promotionReadiness } from "../autonomy/promotion.js";
-import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
+import { audioBridgeHtml, bridgeCsp } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
 import { extractJsonObject } from "../compose/composer.js";
 import { meter } from "../llm/meter.js";
@@ -57,6 +57,7 @@ import { WhissleSessions } from "../llm/sessions.js";
 import { SessionSignals } from "../shows/signals.js";
 import { showRecord } from "../shows/record.js";
 import { challengeResponse, honourDeletion, parseNotice, verifyNotification } from "../ingest/ebay/deletion.js";
+import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { db as pgPool } from "../db/pg.js";
 import { config } from "../config.js";
@@ -239,16 +240,61 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
+  /**
+   * The four places a token may travel in the URL, and nowhere else.
+   *
+   * A token in a query string lands in the address bar, in history, and in
+   * anything the operator copies. Four things cannot send a header and so have
+   * no alternative: an `EventSource`, a page the browser navigates to, and the
+   * `<img>`/`<audio>`/download URLs the console builds for a show's media and
+   * export. Everything else has `fetch` and must use `Authorization`.
+   *
+   * `?token=` used to be honoured on EVERY route, which made the whole API
+   * driveable from a URL — and a URL is the one place this token is most
+   * likely to have been seen by somebody else.
+   */
+  const QUERY_TOKEN_OK = [
+    /^\/audio-bridge$/,
+    /^\/api\/stream$/,
+    /^\/api\/shows\/[^/]+\/export$/,
+    /^\/api\/shows\/[^/]+\/media\//,
+  ];
+
+  /** A show-scoped session (the bridge's) may only reach that show's ingest.
+   *  Not the console, not another show, not a second bridge token. */
+  const inBridgeScope = (path: string, showId: string, query: { showId?: string }): boolean => {
+    if (path === "/audio-bridge") return true;
+    if (path === "/api/stream") return query.showId === showId;
+    const prefix = `/api/shows/${encodeURIComponent(showId)}/`;
+    const plain = `/api/shows/${showId}/`;
+    const rest = path.startsWith(prefix) ? path.slice(prefix.length)
+      : path.startsWith(plain) ? path.slice(plain.length)
+        : null;
+    return rest != null && (rest.startsWith("audio/") || rest.startsWith("visual/"));
+  };
+
+  const scopes = new WeakMap<object, string | null>();
+
   app.addHook("onRequest", async (req, reply) => {
     const header = req.headers.authorization;
-    const q = (req.query ?? {}) as { token?: string };
-    // EventSource cannot set headers; the stream and the bridge send the token as a query parameter.
-    const token = header?.startsWith("Bearer ") ? header.slice(7) : typeof q.token === "string" ? q.token : null;
-    const actor = await accounts.resolve(token);
-    actors.set(req as object, actor);
+    const q = (req.query ?? {}) as { token?: string; showId?: string };
     const path = req.url.split("?")[0]!;
+    // EventSource cannot set headers; the stream, the bridge page and the
+    // media/export URLs send the token as a query parameter. Only those.
+    const fromQuery = typeof q.token === "string" && QUERY_TOKEN_OK.some((re) => re.test(path)) ? q.token : null;
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : fromQuery;
+    const session = await accounts.resolveSession(token);
+    const actor = session?.account ?? null;
+    actors.set(req as object, actor);
+    scopes.set(req as object, session?.scopeShowId ?? null);
     if (!actor && !OPEN.some((re) => re.test(path))) {
       return reply.code(401).send({ error: "sign in to use SideStage", actor: null });
+    }
+    if (session?.scopeShowId && !inBridgeScope(path, session.scopeShowId, q)) {
+      return reply.code(403).send({
+        error: `this token is the audio bridge's — it can feed show ${session.scopeShowId} and do nothing else`,
+        code: "out-of-scope",
+      });
     }
   });
 
@@ -2930,7 +2976,41 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // audio". Browsers will not hand a page tab audio without that gesture, which
   // is why capture cannot be started from the backend — by us or by anyone.
   app.get("/audio-bridge", async (_req, reply) => {
-    return reply.type("text/html; charset=utf-8").send(AUDIO_BRIDGE_HTML);
+    // A fresh nonce per response, so the page's own inline script and style
+    // run and nothing else does. The CDN script is pinned by SRI in the HTML;
+    // the CSP is what stops a second script being introduced at all.
+    const nonce = randomBytes(16).toString("base64");
+    return reply
+      .type("text/html; charset=utf-8")
+      .header("content-security-policy", bridgeCsp(nonce))
+      .header("referrer-policy", "no-referrer")
+      .header("x-content-type-options", "nosniff")
+      .header("cache-control", "no-store")
+      .send(audioBridgeHtml(nonce));
+  });
+
+  /**
+   * A token for the bridge tab, instead of the console's.
+   *
+   * The bridge is a page the operator NAVIGATES to, so its token is in the URL
+   * — address bar, history, and whatever they paste when they send the link to
+   * their other machine. That used to be the console session: thirty days,
+   * whole account. This one is an hour long and can feed one show's audio and
+   * video and do nothing else (`inBridgeScope`). The show is ownership-checked
+   * by the preHandler before we get here.
+   */
+  app.post<{ Params: { showId: string } }>("/api/shows/:showId/bridge-token", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "open the audio bridge");
+    if (!actor) return reply;
+    const s = await accounts.openBridgeSession(actor, req.params.showId, 60);
+    return {
+      token: s.token,
+      expiresAt: s.expiresAt,
+      showId: req.params.showId,
+      /** Ready to open. The console builds this itself today with the session
+       *  token; this is the URL it should build instead. */
+      url: `/audio-bridge?showId=${encodeURIComponent(req.params.showId)}&token=${encodeURIComponent(s.token)}`,
+    };
   });
 
   /** Mint a LISTEN-ONLY Whissle session: STT + emotion, no LLM, no TTS. The
