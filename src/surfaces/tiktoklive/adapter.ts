@@ -30,9 +30,14 @@ const HANDLE = /^[A-Za-z0-9._]{2,24}$/;
 
 /** Read at `open()`, never cached. The operator turns this on in front of the
  *  process and expects the next attach to obey — a value captured at import
- *  would need a restart to mean anything. */
-export function tiktokLiveEnabled(): boolean {
-  return /^(1|true|yes|on)$/i.test((process.env.TIKTOK_LIVE_ENABLED || "").trim());
+ *  would need a restart to mean anything.
+ *
+ *  The environment is a parameter so the surface table can ask the same
+ *  question of the same spelling without a second copy of this predicate
+ *  (src/surfaces/readiness.ts); it defaults to the process, which is what
+ *  every caller before it passed implicitly. */
+export function tiktokLiveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes|on)$/i.test((env.TIKTOK_LIVE_ENABLED || "").trim());
 }
 
 /**

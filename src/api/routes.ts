@@ -13,6 +13,11 @@ import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid, rememb
 import { SurfaceRooms } from "../surfaces/rooms.js";
 import { all as surfaceAdapters, resolve as resolveSurface } from "../surfaces/registry.js";
 import { SURFACE_CAPABILITIES, SurfaceUnavailable, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
+import { surfaceReadiness } from "../surfaces/readiness.js";
+import { behindBand, nowBand } from "./home.js";
+import {
+  draftFromFollowUp, draftQueue, draftsFromSession, type DraftStatus,
+} from "./drafts.js";
 import {
   FollowUpInbox, buildFollowUps, openDrafter, type FollowUpStatus,
 } from "../surfaces/dm/drafts.js";
@@ -1591,15 +1596,148 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
-  /** The whole home surface in one read: live now, what is prepared, your shows. */
+  /**
+   * The whole home surface in one read.
+   *
+   * Two shapes live here, and that is deliberate. The original five keys —
+   * `live`, `discovery`, `prepared`, `preparing`, `watching` — are eBay Live
+   * discovery seen from the outside, and they are byte-for-byte what they
+   * always were, because a browser tab left open on the old bundle keeps
+   * polling this route and must keep working through a deploy.
+   *
+   * The four new ones describe the PRODUCT: what needs a human now, what is
+   * being prepared, what finished, and what each surface still needs. `now.live`
+   * is every session on air on ANY surface, read off the registry rather than
+   * the eBay grid — the grid cannot see a subreddit, and six surfaces out of
+   * seven were invisible to this endpoint until it stopped asking eBay who is
+   * live and started asking ourselves.
+   */
   app.get<{ Querystring: { refresh?: string } }>("/api/home", async (req) => {
-    const [discovery, prepared, watched] = await Promise.all([
-      req.query.refresh === "1"
-        ? discoverLiveShows({ limit: 24 })
-        : Promise.resolve(cachedDiscovery()),
-      preparer.list(actorOf(req as object)?.id ?? null),
-      shows.list(actorOf(req as object)?.id),
-    ]);
+    const actor = actorOf(req as object);
+    const accountId = actor?.id ?? null;
+    const [discovery, prepared, watched, ebayConn, twitchConn, roomRows, inbox, reportRows] =
+      await Promise.all([
+        req.query.refresh === "1"
+          ? discoverLiveShows({ limit: 24 })
+          : Promise.resolve(cachedDiscovery()),
+        preparer.list(accountId),
+        shows.list(accountId ?? undefined),
+        accountId ? ebayAuth.connection(accountId).catch(() => null) : Promise.resolve(null),
+        accountId ? twitchAuth.connection(accountId).catch(() => null) : Promise.resolve(null),
+        // One aggregate per fact, never one per surface or one per show: this
+        // route is polled by an open tab.
+        accountId
+          ? pgPool()
+              .query<{ surface: string; n: number }>(
+                "SELECT surface, count(*)::int AS n FROM surface_rooms WHERE account_id = $1 GROUP BY surface",
+                [accountId],
+              )
+              .then((r) => r.rows)
+              .catch(() => [])
+          : Promise.resolve([] as { surface: string; n: number }[]),
+        accountId
+          ? pgPool()
+              .query<{ total: number; ready: number }>(
+                `SELECT count(*)::int AS total,
+                        (count(*) FILTER (WHERE status = 'draft'))::int AS ready
+                   FROM followups WHERE account_id = $1`,
+                [accountId],
+              )
+              .then((r) => r.rows[0] ?? { total: 0, ready: 0 })
+              .catch(() => ({ total: 0, ready: 0 }))
+          : Promise.resolve({ total: 0, ready: 0 }),
+        // Everything that FINISHED, report or no report.
+        //
+        // This was an inner join to `show_reports`, which meant a session whose
+        // report failed to generate was not in "behind you" at all — and that
+        // is exactly the session an operator wants to look at, because
+        // something went wrong in it. It is a row with a badge on it now, the
+        // way `/api/reports` has always shown them.
+        //
+        // The end time is the awkward part and the query is where it is
+        // honest: nothing writes the moment a session stopped, so a report-less
+        // row falls back to the last message it recorded (one lateral read over
+        // six rows) and then to when it started. `hasReport` says which.
+        pgPool()
+          .query<{
+            show_id: string; title: string; surface: string | null; source: string;
+            generated_at: Date | null; report: ShowReport | null;
+            started_at: string; last_seen_at: string | null;
+          }>(
+            `SELECT s.id AS show_id, s.title, s.surface, s.source, s.started_at,
+                    r.generated_at, r.report, m.last_seen_at
+               FROM shows s
+               LEFT JOIN show_reports r ON r.show_id = s.id
+               LEFT JOIN LATERAL (
+                 SELECT max(c.at) AS last_seen_at FROM chat_messages c WHERE c.show_id = s.id
+               ) m ON TRUE
+              WHERE (s.owner_account_id IS NULL OR s.owner_account_id = $1)
+                -- Finished, or finished enough to have left a report behind.
+                AND (s.status = 'ended' OR r.show_id IS NOT NULL)
+              ORDER BY COALESCE(r.generated_at, m.last_seen_at::timestamptz, s.started_at::timestamptz) DESC
+              LIMIT 6`,
+            [accountId],
+          )
+          .then((r) => r.rows)
+          .catch(() => []),
+      ]);
+
+    // ── now / behind ─────────────────────────────────────────────────────────
+    //
+    // `watched` already carries the queue depth and the blocked count for every
+    // runtime (ShowRegistry.list), so the NOW band costs no query of its own.
+    const now = nowBand(watched, inbox.ready);
+    const behind = behindBand(
+      reportRows.map((x) => ({
+        showId: x.show_id, title: x.title, surface: x.surface, source: x.source,
+        generatedAt: x.generated_at, report: x.report,
+        startedAt: x.started_at, lastSeenAt: x.last_seen_at,
+      })),
+      inbox,
+    );
+
+    // ── surfaces ─────────────────────────────────────────────────────────────
+    //
+    // The catalogs this account OWNS — its imports and its preparations, not
+    // the two demo fixtures. The same rule `visibleCatalogs` applies, minus the
+    // seeds, and computed off the `prepared` list already in hand rather than
+    // asking for it twice.
+    const mineCatalogs = new Set(prepared.map((p) => p.catalogId).filter(Boolean) as string[]);
+    const own = listCatalogs().filter(
+      (c) => mineCatalogs.has(c.id) || (actor ? c.id === `ebay-${actor.handle}` : false),
+    );
+    const liveBySurface: Partial<Record<SurfaceId, number>> = {};
+    for (const s of now.live) liveBySurface[s.surface] = (liveBySurface[s.surface] ?? 0) + 1;
+    const roomsBySurface: Partial<Record<SurfaceId, number>> = {};
+    for (const r of roomRows) roomsBySurface[r.surface as SurfaceId] = r.n;
+
+    const surfaces = surfaceReadiness({
+      // The REGISTRY, not the capability table: `youtubelive` has capabilities
+      // and no adapter in this build, and a row an operator cannot attach to is
+      // an invitation the attach route then refuses. `/api/surfaces` still
+      // lists it, which is where a client asks what this build KNOWS about.
+      surfaces: surfaceAdapters().map((a) => ({ id: a.id, label: a.label, attachable: isAttachable(a.id) })),
+      // Read now, not at import: an operator who sets a key and restarts
+      // expects the next poll of this route to say so.
+      env: process.env,
+      ebayConnected: Boolean(ebayConn?.valid),
+      // Present, fresh, and not being served the anonymous grid — the three
+      // things Discover and Prepare actually need, which is what the old
+      // checklist meant by "signed in".
+      ebaySignedIn: Boolean(
+        discovery.session?.present &&
+          !discovery.session.stale &&
+          !["blocked", "signed-out"].includes(discovery.reason),
+      ),
+      twitchConnected: Boolean(twitchConn?.valid),
+      ownCatalogs: own.length,
+      ownCatalogItems: own.reduce((a, c) => a + c.itemCount, 0),
+      prepared: prepared.length,
+      liveBySurface,
+      roomsBySurface,
+      followups: inbox.total,
+    });
+
     return {
       live: discovery.shows,
       // `checkedAt` is when the grid was last actually read — the number the
@@ -1609,6 +1747,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       prepared,
       preparing: [...preparing],
       watching: watched,
+      now,
+      next: {
+        prepared,
+        // The surfaces with a grid we can READ. eBay Live is the only one: the
+        // others have discovery pages behind a login or an app review, and
+        // listing them here would imply the console is broken rather than that
+        // the platform never opened the door.
+        discoverable: ["ebaylive"] as SurfaceId[],
+      },
+      behind,
+      surfaces,
     };
   });
 
@@ -1710,11 +1859,52 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     };
   });
 
+  /**
+   * Is anything actually watching this room?
+   *
+   * A row in `surface_rooms` is a choice, not a process. Nothing in this build
+   * turns one into a running watch — there is no supervisor that reads the
+   * list, `shows.attach` is only ever called from the paste box, and the boot
+   * resume is `source = 'ebaylive'` only — so a rooms page that showed the list
+   * and said nothing else let an operator believe their subreddits were being
+   * read. This is the honest half of that gap: the room says whether a session
+   * is open on it right now. Starting one is a feature that does not exist yet
+   * and is written up in docs/SURFACES.md.
+   *
+   * Matching goes through the adapters' own `parseTarget`, so `r/mechmarket`
+   * and the `r/mechmarket` a session carries are compared as the same id
+   * without a second normalisation to get wrong. A room string no adapter
+   * claims is compared as it was typed.
+   */
+  const watchedRooms = async (accountId: string, surface: SurfaceId, list: { room: string }[]) => {
+    if (!list.length) return new Set<string>();
+    const live = (await shows.list(accountId)).filter(
+      (s) => s.status === "live" && s.source === surface && s.externalId,
+    );
+    if (!live.length) return new Set<string>();
+    const open = new Set(live.map((s) => s.externalId!));
+    const on = new Set<string>();
+    for (const r of list) {
+      const parsed = resolveSurface(r.room);
+      const key = parsed?.adapter.id === surface ? parsed.target.externalId : r.room;
+      if (open.has(key)) on.add(r.room);
+    }
+    return on;
+  };
+
   app.get<{ Params: { surface: string } }>("/api/surfaces/:surface/rooms", async (req, reply) => {
     const surface = knownSurface(req.params.surface, reply);
     if (!surface) return reply;
     const a = actorOf(req as object);
-    return { surface, rooms: a ? await rooms.list(a.id, surface) : [] };
+    const list = a ? await rooms.list(a.id, surface) : [];
+    const on = a ? await watchedRooms(a.id, surface, list) : new Set<string>();
+    return {
+      surface,
+      // `watching` is a fact about this process, the way `now.live` is: a room
+      // is being watched when a session is open on it, not when a row says the
+      // operator would like one to be.
+      rooms: list.map((r) => ({ ...r, watching: on.has(r.room) })),
+    };
   });
 
   app.post<{ Params: { surface: string }; Body: { room?: string; posting?: boolean; disclosure?: string | null } }>(
@@ -1846,6 +2036,145 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const row = await followups.dismiss(actor.id, req.params.id);
     if (!row) return reply.code(404).send({ error: `no follow-up ${req.params.id}` });
     return { followup: row };
+  });
+
+  // ── the drafts queue ──────────────────────────────────────────────────────
+  //
+  // Every reply waiting on the operator, across every surface that cannot
+  // deliver, in one shape. Additive: `/api/followups` is untouched and remains
+  // the inbox's own endpoint — this is the queue the Drafts page and the NOW
+  // band are both talking about.
+  //
+  // Two sources, and they are read the way `/api/home` reads them so the count
+  // and the list cannot disagree: the registry's own list of sessions on air,
+  // filtered to async surfaces, with the SAME tenancy filter (an account's own
+  // sessions plus the pre-ownership rows that belong to nobody); and the
+  // follow-up inbox, which is strictly one account's.
+  //
+  // Nothing here sends anything. See src/api/drafts.ts.
+  const DRAFT_STATUSES = new Set<DraftStatus>(["open", "sent", "dismissed", "blocked"]);
+
+  /** The live async sessions this account can see, with what each is holding. */
+  const asyncSessions = async (accountId: string) => {
+    const watched = await shows.list(accountId);
+    return watched
+      .filter((s) => s.status === "live" && capabilitiesOf(s.source).tempo === "async")
+      .map((summary) => ({
+        summary,
+        // `list()` just told us these are being watched; a runtime that went
+        // away between the two lines is an empty queue, not a 500.
+        proposals: shows.has(summary.showId) ? shows.get(summary.showId).pipeline.list() : [],
+      }));
+  };
+
+  app.get<{ Querystring: { surface?: string; status?: string } }>("/api/drafts", async (req, reply) => {
+    const actor = actorOf(req as object);
+    if (!actor) return reply.code(401).send({ error: "sign in to read your drafts" });
+
+    const rawStatus = (req.query?.status ?? "").trim().toLowerCase();
+    if (rawStatus && !DRAFT_STATUSES.has(rawStatus as DraftStatus)) {
+      return reply.code(400).send({ error: `status must be one of ${[...DRAFT_STATUSES].join(", ")}` });
+    }
+    const rawSurface = (req.query?.surface ?? "").trim().toLowerCase();
+    if (rawSurface && !Object.prototype.hasOwnProperty.call(SURFACE_CAPABILITIES, rawSurface)) {
+      return reply.code(404).send({ error: `no surface called "${req.query.surface}"` });
+    }
+
+    const [sessions, inbox] = await Promise.all([
+      asyncSessions(actor.id),
+      followups.queue(actor.id),
+    ]);
+    const queue = draftQueue({ sessions, followups: inbox });
+
+    // `waiting` is the WHOLE account's waiting queue, whatever the filters say:
+    // it is the number home prints, and a per-surface tab must not change it
+    // underneath the heading. The filters shape `drafts` only.
+    const drafts = queue.drafts.filter(
+      (d) =>
+        (!rawSurface || d.surface === rawSurface) &&
+        (!rawStatus || d.status === rawStatus),
+    );
+    return {
+      surface: rawSurface || null,
+      status: rawStatus || null,
+      waiting: queue.waiting,
+      drafts,
+    };
+  });
+
+  /**
+   * One draft out of the queue, by the id the queue gave it.
+   *
+   * The queue merges two id namespaces, so this resolves the same way: a
+   * follow-up row first (scoped to the account in the statement), then the
+   * proposals of the account's own live async sessions. A draft that is
+   * neither is a 404 — including somebody else's, which is not confirmed to
+   * exist.
+   */
+  const findDraft = async (accountId: string, id: string) => {
+    const row = await followups.get(accountId, id);
+    if (row) {
+      const title = (
+        await pgPool().query<{ title: string }>("SELECT title FROM shows WHERE id = $1", [row.showId])
+      ).rows[0]?.title ?? null;
+      return { kind: "followup" as const, row, title };
+    }
+    for (const s of await asyncSessions(accountId)) {
+      if (s.proposals.some((p) => p.id === id)) return { kind: "proposal" as const, session: s.summary };
+    }
+    return null;
+  };
+
+  /**
+   * The operator pasted it in themselves.
+   *
+   * Recorded, never inferred — we cannot see the subreddit, so the person who
+   * sent it is the only honest source. This records a claim; it delivers
+   * nothing. `Pipeline.send` writes the audit entry and moves the proposal's
+   * status, and there is no code path from it to Reddit at all: the action list
+   * has no `post_reply` and preflight refuses actions a surface does not
+   * declare (docs/SURFACES.md).
+   */
+  app.post<{ Params: { id: string } }>("/api/drafts/:id/sent", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "mark a draft sent");
+    if (!actor) return reply;
+    const found = await findDraft(actor.id, req.params.id);
+    if (!found) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+    if (found.kind === "followup") {
+      const row = await followups.markSent(actor.id, req.params.id);
+      if (!row) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+      if (row.status === "dismissed") {
+        return reply.code(409).send({ error: "that draft was dismissed", draft: draftFromFollowUp(row, found.title) });
+      }
+      return { draft: draftFromFollowUp(row, found.title) };
+    }
+    try {
+      const p = await shows.get(found.session.showId).pipeline.send(req.params.id, undefined, who(req as object));
+      return { draft: draftsFromSession(found.session, [p])[0] ?? null };
+    } catch (e) {
+      // A guard held it: there is nothing to have sent. 409 with the reason,
+      // the same answer the console gets.
+      if (e instanceof SendRefused) return reply.code(409).send({ error: (e as Error).message, refused: true });
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/drafts/:id/dismiss", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "dismiss a draft");
+    if (!actor) return reply;
+    const found = await findDraft(actor.id, req.params.id);
+    if (!found) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+    if (found.kind === "followup") {
+      const row = await followups.dismiss(actor.id, req.params.id);
+      if (!row) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+      return { draft: draftFromFollowUp(row, found.title) };
+    }
+    try {
+      const p = shows.get(found.session.showId).pipeline.dismiss(req.params.id);
+      return { draft: draftsFromSession(found.session, [p])[0] ?? null };
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
   });
 
   /**

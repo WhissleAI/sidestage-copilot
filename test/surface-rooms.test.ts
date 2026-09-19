@@ -79,6 +79,24 @@ describe("the rooms an operator watches", () => {
     assert.match((r.json() as { error: string }).error, /draft-only/);
   });
 
+  test("a configured room says whether anything is actually watching it", async () => {
+    // The gap this makes visible: nothing in this build turns a row in
+    // `surface_rooms` into a running watch. There is no supervisor reading the
+    // list, `shows.attach` is only ever called from the paste box, and the boot
+    // resume is eBay Live only. A rooms page that showed the list and said
+    // nothing else let an operator believe their subreddits were being read.
+    await app.inject({
+      method: "POST", url: "/api/surfaces/reddit/rooms", headers: A.headers,
+      payload: { room: "r/mechmarket" },
+    });
+    const body = (await app.inject({
+      method: "GET", url: "/api/surfaces/reddit/rooms", headers: A.headers,
+    })).json() as { rooms: { room: string; watching: boolean }[] };
+    const row = body.rooms.find((r) => r.room === "r/mechmarket");
+    assert.ok(row, "the room is not on the list");
+    assert.equal(row.watching, false, "a choice is not a process");
+  });
+
   test("a room list is one account's", async () => {
     await app.inject({
       method: "POST", url: "/api/surfaces/reddit/rooms", headers: B.headers, payload: { room: "r/buildapcsales" },

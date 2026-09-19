@@ -304,6 +304,86 @@ brief correctly and then calls the board waterproof would pass it. Each
 a quoted prohibition, which is the corpus the chain treats as a rule rather than
 an answer. The label names the sponsor, so "says who" still answers correctly.
 
+## A configured room is not a running watch (open gap)
+
+`surface_rooms` (migration 019) records which subreddits, channels and
+conversations an operator has chosen. **Nothing reads that list to start
+anything.** The only caller of `ShowRegistry.attach` is `POST /api/shows/attach`
+— the paste box — and the boot resume in `src/api/context.ts` is
+`WHERE status = 'live' AND source = 'ebaylive'`. So the rooms page, the home
+band's `rooms` count and Reddit's "Choose the subreddits to watch" readiness
+step all describe a choice that no process has acted on.
+
+`GET /api/surfaces/:surface/rooms` now returns `watching` per room, which is a
+fact about this process — a session is open on that room, or it is not — so the
+gap is at least visible. Closing it is not a small piece of wiring, and the
+list below is why it was not attempted alongside the drafts queue:
+
+1. **Nothing says what a watch is grounded in.** `surface_rooms` has no
+   `catalog_id`. A session attached with no catalog retrieves nothing and
+   abstains on every question, so the watch would produce an empty queue and
+   look broken. Which corpus answers r/mechmarket is a product decision with a
+   schema change behind it.
+2. **A watch is not a session, and everything here is session-shaped.** Attach
+   mints a per-stream agent, detach writes a `show_report`, and the agent GC
+   retires agents for sessions that finished. A standing watch never finishes:
+   it would hold an agent forever against a per-workspace cap, and the "After"
+   an async surface is supposed to leave is a weekly digest, not a report per
+   subreddit.
+3. **Capacity.** `MAX_WATCHED_SHOWS` (6) is shared with live sessions. Six
+   subreddits would fill the registry and leave an operator unable to attach the
+   show they are actually hosting.
+4. **Lifecycle has no owner.** Adding a room does not start a watch, removing
+   one does not stop it, credentials arriving later does not retry, and a
+   restart forgets every non-eBay session — the resume query does not select
+   them and does not mark them ended either, so the row keeps saying `live`
+   while nothing watches.
+5. **Rate budget is shared and global.** The Reddit script app is one set of
+   environment credentials for the whole deployment, not one per account. Every
+   account's rooms would poll through the same credential and the same
+   `x-ratelimit-*` pacing, so "watch all configured rooms" is one crawl budget
+   divided by every operator.
+
+A half-built watcher is worse than a documented gap: it would report rooms as
+watched, draft nothing because it is grounded in nothing, and spend the shared
+rate budget doing it.
+
+## The drafts queue is one queue
+
+An async surface has no console, because it has no session to sit in front of.
+What it has is a queue — and until `GET /api/drafts` there were two, in two
+shapes, in two places: the follow-up inbox is a table, and a Reddit draft is a
+`ReplyProposal` inside a live runtime, in memory. The Drafts page read
+`/api/followups`, which is one of them, so a Reddit draft was reachable only
+through the console of a session that page never links to.
+
+`GET /api/drafts` (`src/api/drafts.ts`) is both, in one discriminated shape:
+`surface` says which, `origin` says where it came from in the operator's own
+words — `{ kind: "room", label: "r/mechmarket" }` for a watch, `{ kind:
+"session", label: "Friday Night Grails — Ep. 42" }` for a follow-up, by TITLE
+and not by show id — and the fields a follow-up cannot have (evidence, guards,
+confidence, rules) are absent rather than zero.
+
+**The count and the list are one fact.** `now.drafts` on `/api/home` and
+`waiting` on `/api/drafts` are both built by `queueCounts` (`src/api/home.ts`)
+from the same two sources under the same tenancy filter — sessions on air whose
+surface is `async`, plus the account's inbox — so the two payloads are
+deep-equal, ordering included. Waiting means `isWaiting`, the one predicate
+`ShowRegistry.list` also counts `awaiting` with. A blocked draft is carried in
+the list with `status: "blocked"` and is not waiting: there is nothing to send.
+
+`POST /api/drafts/:id/sent` and `/dismiss` accept either id namespace and route
+to the inbox or to the session's pipeline. They record a human's claim and
+deliver nothing — there is no post path on any draft-only surface, and adding
+one to Reddit would have to get past the `delivery` constant, the missing
+`post_reply` in the action list, and preflight.
+
+**A room's rules have two effects, not three.** `applied` and `blocked`. A
+third — "the rule an earlier draft tripped and this one clears" — cannot occur:
+`runChain` never returns `revise` (guardrails/chain.ts), so the pipeline's
+single repair pass is unreachable, so there is never an earlier draft. The
+server does not report a field it can never set.
+
 ## Posting is off until a human turns it on
 
 `surface_rooms` (migration 019) records a person deciding we may speak in a
