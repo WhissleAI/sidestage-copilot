@@ -141,7 +141,10 @@ export class Pipeline {
     // own override, because "answer this one anyway" is a request to spend and
     // the cap is the seller's standing answer to that request.
     const capped = isOverBudget(this.d.repo.showId);
-    const natural = admit(incoming.text, intent, observing ? false : this.rate.tryAdmit(), speechAct);
+    // The limiter goes in as a THUNK, not as a value: `admit` draws the token
+    // at the last gate rather than the caller drawing it at the first, so a
+    // greeting or a "W" no longer costs a proposal the seller could have had.
+    const natural = admit(incoming.text, intent, () => !observing && this.rate.tryAdmit(), speechAct);
     const decision = capped
       ? { admitted: false, reason: BUDGET_REASON }
       : opts.force
@@ -499,21 +502,38 @@ export class Pipeline {
   /**
    * Send — the last moment the guards can act, so they do.
    *
-   * A blocked proposal cannot be sent, whatever the client asks; the console
-   * hides the button, but a keystroke or a curl is not the console. An EDITED
-   * draft is a new draft: it is re-guarded against the facts the original was
-   * grounded in and the listings as they stand now, and a block refuses the
-   * send with the reason. What was actually checked is what the audit records.
+   * Two rules, and the second is what makes the first liveable.
+   *
+   *  1. A blocked draft is never sent AS IT STANDS, whatever the client asks.
+   *     The console hides the button, but a keystroke or a curl is not the
+   *     console, so the refusal lives here.
+   *
+   *  2. An EDITED draft is a NEW draft, and is judged on its own text rather
+   *     than on the verdict the text it replaced earned. It is re-guarded
+   *     against the facts the original was grounded in and the listings as they
+   *     stand now; if the edit clears, it sends, and if it does not, the refusal
+   *     names the guard. This is the path the held card's own copy promises —
+   *     "edit it and send, the edit is checked again" — and for as long as rule
+   *     1 fired before the re-guard, that sentence was false: a held reply could
+   *     only ever be dismissed, however thoroughly the operator fixed it.
+   *
+   * The edit is checked as HUMAN-authored text (`authoredBy: "human"`), so the
+   * guards that protect the buyer all run and the one that audits the model's
+   * citation discipline does not — the operator was never handed a fact list to
+   * cite from. See `runChain`'s `authoredBy` and MODEL_ONLY_GUARDS.
+   *
+   * What was actually checked is what the audit records.
    */
   async send(id: string, text?: string, actor = "seller"): Promise<ReplyProposal> {
     const p = this.proposals.get(id);
     if (!p) throw new Error(`proposal ${id} not found`);
-    if (p.status === "blocked" || p.verdict === "block") {
-      const why = p.guards.filter((g) => g.verdict === "block").map((g) => `${g.guard}: ${g.reason ?? "blocked"}`).join("; ");
-      throw new SendRefused(`this reply was blocked and cannot be sent — ${why || "a guard blocked it"}`);
-    }
     const sentText = (text ?? p.draft).trim();
     const edited = text !== undefined && sentText !== p.draft.trim();
+    const wasBlocked = p.status === "blocked" || p.verdict === "block";
+    if (wasBlocked && !edited) {
+      const why = p.guards.filter((g) => g.verdict === "block").map((g) => `${g.guard}: ${g.reason ?? "blocked"}`).join("; ");
+      throw new SendRefused(`this reply was blocked and cannot be sent unedited — ${why || "a guard blocked it"}`);
+    }
     let guards = p.guards;
     let verdict = p.verdict;
     if (edited) {
@@ -523,6 +543,11 @@ export class Pipeline {
       ]);
       const chain = runChain(
         {
+          // The operator's own sentence, carrying no claims because they made
+          // none: they are asserting this on their own authority, not citing
+          // our evidence set. `claim_grounding` is skipped for exactly that
+          // reason rather than being fed an empty claim list and asked to
+          // pretend — which is what used to reject every substantive edit.
           draft: { answer: sentText, claims: [], parsedOk: true, raw: sentText },
           question: p.message.text,
           facts: g?.facts ?? [],
@@ -533,10 +558,11 @@ export class Pipeline {
           surface: capabilitiesOf(show.source),
           community: (g?.facts ?? []).filter((f) => f.corpus === "community"),
         },
-        { evidenceQuality: g?.evidenceQuality ?? 0 },
+        { evidenceQuality: g?.evidenceQuality ?? 0, authoredBy: "human" },
       );
       if (chain.verdict === "block") {
-        const why = chain.failures.map((f) => `${f.guard}: ${f.reason}`).join("; ");
+        const why = chain.failures.filter((f) => chain.guards.some((x) => x.guard === f.guard && x.verdict === "block"))
+          .map((f) => `${f.guard}: ${f.reason}`).join("; ");
         throw new SendRefused(`your edit was blocked — ${why}`);
       }
       guards = chain.guards;
@@ -547,6 +573,10 @@ export class Pipeline {
     this.counters.sent++;
     this.d.audit.append("reply_sent", actor, `sent to ${p.message.author}`, {
       proposalId: id, text: sentText, edited,
+      // A held reply that an edit cleared is the one case where what went out
+      // is not what the guards first saw. The audit says so explicitly rather
+      // than leaving a reader to infer it from a verdict that changed.
+      ...(wasBlocked ? { clearedBlockByEdit: true } : {}),
       verdictAtSend: verdict, guardsAtSend: guards.map((g) => `${g.guard}:${g.verdict}`),
     });
     this.d.events.onProposal(next);

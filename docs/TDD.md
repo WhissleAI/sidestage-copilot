@@ -275,13 +275,20 @@ that is fluent, on-topic, cites a real fact, and is wrong. Nothing in the text g
 only the version does. `npm run demo:stale-price` forces exactly that race.
 
 **Guards at send.** Send is the last moment the guards can act, so they do
-(`Pipeline.send()`). A proposal whose verdict is `block` cannot be sent whatever the client
+(`Pipeline.send()`). A blocked proposal cannot be sent **as it stands**, whatever the client
 asks — the console hides the button, but a keystroke or a curl is not the console — and the
-refusal is `SendRefused`, answered as HTTP 409 with the reason. An **edited** draft is a new
-draft: it is re-run through the whole chain against the facts the original was grounded in and
-the listings as they stand now; a block refuses the send, a revise is recorded. The audit entry
-carries `verdictAtSend` and `guardsAtSend`, so what was actually checked is what the record
-says was checked.
+refusal is `SendRefused`, answered as HTTP 409 with the reason.
+
+An **edited** draft is a new draft, and is judged on its own text rather than on the verdict
+the text it replaced earned. It is re-run through the chain against the facts the original was
+grounded in and the listings as they stand now: if the edit clears, it sends — including an
+edit that clears a block, which is what the held card's own copy promises — and if it does not,
+the refusal names the guard. The re-guard runs with `authoredBy: "human"`, so every check that
+protects the buyer or the room applies (price, availability, policy, PII, tone, community,
+sponsor) and `claim_grounding` does not: it audits whether the MODEL cited a fact id it was
+given, and the operator was never handed a fact list to cite from. See `MODEL_ONLY_GUARDS`. The
+audit entry carries `verdictAtSend`, `guardsAtSend` and — when an edit cleared a block —
+`clearedBlockByEdit`, so what was actually checked is what the record says was checked.
 
 - **Rejected: an LLM judge.** A guard that needs a model to decide is a second opinion, not a
   guardrail: it adds a network hop inside the budget, and it fails in correlated ways with the

@@ -75,11 +75,13 @@ export interface DraftOrigin {
  * One rule of the room, and what it did to this draft.
  *
  * Two effects, not three. `would_block` — "the rule an earlier draft tripped
- * and this one clears" — cannot happen in this system and is not reported:
- * `runChain` never returns `revise` (guardrails/chain.ts says so in a comment
- * and in code), so the pipeline's single repair pass is unreachable, so there
- * is never an earlier draft for a rule to have tripped. A field the UI reads
- * and the server can never set is a promise the UI is making on our behalf.
+ * and this one clears" — is not reported, because nothing in the system knows
+ * it. A proposal carries ONE guard row: the one the draft that reached the
+ * seller earned. The repair pass rewrites the draft and re-runs the chain, and
+ * the pre-repair result is not kept anywhere — so a rule that held the first
+ * attempt leaves no trace to report. `rulesOf` reads the final row and can only
+ * ever say `applied` or `blocked`. A field the UI reads and the server can
+ * never set is a promise the UI is making on our behalf.
  */
 export interface AppliedRule {
   factId: string;

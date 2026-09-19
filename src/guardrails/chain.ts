@@ -6,8 +6,8 @@
 // measure each guard's precision independently instead of only the first to fire.
 
 import type { GuardName, GuardResult, Verdict } from "../domain/types.js";
-import { GUARDS } from "./guards.js";
-import type { GuardInput } from "./types.js";
+import { GUARDS, MODEL_ONLY_GUARDS } from "./guards.js";
+import { na, type GuardInput } from "./types.js";
 
 export interface ChainResult {
   guards: GuardResult[];
@@ -17,8 +17,30 @@ export interface ChainResult {
   confidence: number;
 }
 
-export function runChain(i: GuardInput, opts: { evidenceQuality?: number; abstained?: boolean } = {}): ChainResult {
+export interface ChainOptions {
+  evidenceQuality?: number;
+  abstained?: boolean;
+  /**
+   * WHO wrote the words being checked.
+   *
+   * `model` (the default) is a draft this system composed, and every guard
+   * applies — including the ones that check the machine's own citation
+   * discipline. `human` is text the operator typed: they are asserting it
+   * themselves, not citing our evidence set, so a guard whose entire subject is
+   * "did the model cite a fact id it was actually given" has nothing to say
+   * about it and reports `n/a` rather than a failure. See MODEL_ONLY_GUARDS.
+   *
+   * Everything that protects the BUYER or the ROOM — price, availability,
+   * policy, PII, tone, community rules, sponsor obligations — runs either way.
+   * An operator can be wrong about the price too.
+   */
+  authoredBy?: "model" | "human";
+}
+
+export function runChain(i: GuardInput, opts: ChainOptions = {}): ChainResult {
+  const human = opts.authoredBy === "human";
   const guards: GuardResult[] = GUARDS.map((g) => {
+    if (human && MODEL_ONLY_GUARDS.has(g.name)) return na(g.name);
     try {
       return g.run(i);
     } catch (e) {
@@ -30,12 +52,19 @@ export function runChain(i: GuardInput, opts: { evidenceQuality?: number; abstai
 
   const blocked = guards.filter((g) => g.verdict === "block");
   const revise = guards.filter((g) => g.verdict === "revise");
-  // A guard that asks for a revision no longer earns the draft a repair pass:
-  // the chain reports `block`, so the pipeline's `revise` branch (the single
-  // composer.repair call, pipeline.ts) is never taken and the card reaches the
-  // seller as held. Each guard's own result still says `revise`, so the pills
-  // and the audit entry still name which check asked for what.
-  const verdict: Verdict = blocked.length || revise.length ? "block" : "allow";
+  // Three verdicts, three different consequences, and they are not
+  // interchangeable. `block` is a reply that must not reach the buyer without a
+  // human rewriting it. `revise` is a draft that is WRONG IN ITS WORDING, not in
+  // its substance — an emoji, a 401st character, a claim that cites nothing —
+  // and it earns exactly one composer repair pass (pipeline.ts), after which it
+  // reaches the seller as `needs_review`: sendable, editable, regeneratable.
+  //
+  // Collapsing `revise` into `block` gives the three softest checks in the file
+  // the same force as the PII guard, disables the repair pass, and leaves a
+  // correct reply with an emoji in it unusable. Each guard's own result still
+  // reports its own verdict either way, so the pills and the audit entry name
+  // which check asked for what.
+  const verdict: Verdict = blocked.length ? "block" : revise.length ? "revise" : "allow";
 
   const failures = [...blocked, ...revise].map((g) => ({ guard: g.guard, reason: g.reason || "failed" }));
 

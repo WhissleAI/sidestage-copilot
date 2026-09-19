@@ -193,10 +193,12 @@ the repair pass re-ground, and both events land in the audit chain.
 ### Tests, evaluations and the benchmark
 
 ```bash
-npm test     # ~170 tests over test/*.test.ts (Node's test runner) — actions, audit chain, guardrails,
-             # proposer, contract suite over the real routing table, tenancy, eBay client/adapter,
-             # account-deletion signatures, session record, signals
-npm run eval # 6 evaluations — guardrail precision/recall, retrieval ablation
+npm test     # 509 tests over test/*.test.ts AND test/*.eval.ts (Node's test runner) — actions, audit
+             # chain, guardrails, the decision layer, proposer, contract suite over the real routing
+             # table, tenancy, eBay client/adapter, account-deletion signatures, session record,
+             # signals — plus the six evaluations, which run here so the measurement cannot rot
+             # unnoticed while the suite stays green
+npm run eval # just the 6 evaluations — guardrail exact-verdict accuracy, retrieval ablation
 npm run bench -- 24   # latency: per-stage p50/p95/p99, cold vs cached
 ```
 

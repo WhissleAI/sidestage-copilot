@@ -1,4 +1,4 @@
-// Guardrail evaluation — 44 labelled cases over the real catalog.
+// Guardrail evaluation — 46 labelled cases over the real catalog.
 //
 // Every case is a (catalog state, buyer question, drafted reply) triple with the
 // verdict a careful seller would give. Roughly half are drafts that SHOULD pass:
@@ -8,12 +8,18 @@
 // correct reply in front of the seller as a problem and trains them to click
 // through warnings.
 //
-// The suite reports precision and recall on blocking, per guard, and asserts
-// both a floor on recall and a ceiling on false positives.
+// A label is one of THREE verdicts, and the difference between two of them is
+// the whole decision layer: `revise` earns a repair pass and still reaches the
+// seller as sendable, `block` does not. The scoreboard below reports exact
+// verdict accuracy over all three as its headline, the full 3x3 confusion
+// matrix under it, and binary stop precision/recall beside it as a separate
+// safety number. See the comment on that test for why one pair of numbers was
+// not enough.
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { rig, judge, PINNED, type GuardCase, cleanup } from "./helpers.js";
+import type { Verdict } from "../src/domain/types.js";
 
 const CASES: GuardCase[] = [
   // ══ price ════════════════════════════════════════════════════════════════
@@ -431,18 +437,67 @@ test("guardrail suite: every labelled case gets the expected verdict", async () 
   }
 });
 
+/**
+ * The scoreboard, and what each number can and cannot see.
+ *
+ * This used to report ONE pair of numbers, computed from
+ * `expect !== "allow"` against `verdict !== "allow"` — a binary: did the chain
+ * stop this reply or not. That collapses `revise` and `block` into one bucket,
+ * and those are not one thing. `revise` means "the wording is wrong, repair it,
+ * the seller can still send it"; `block` means "this must not reach the buyer
+ * without a human rewriting it". A case labelled `revise` that came back
+ * `block` scored as a hit.
+ *
+ * That is not a rounding error in the metric, it is the metric being blind to
+ * the distinction it exists to police — and it is how `chain.ts` aggregating
+ * every revise to block sat unnoticed while this suite printed 1.000 and the
+ * number got quoted as a headline. Eight sibling cases were failing at the same
+ * moment, in the test directly above, and the scoreboard could not tell.
+ *
+ * So three numbers now, because there are three questions:
+ *
+ *   • EXACT — did the chain reach the right decision of the three? This is the
+ *     headline. It is the only one that can see a revise/block confusion.
+ *   • STOP precision/recall — of the replies that should not have gone out
+ *     unchanged, how many were stopped? Deliberately still binary: it is a
+ *     SAFETY number, and the calibrated floors below belong to it.
+ *   • UNDER-BLOCKS — cases labelled `block` that came back softer. Every one is
+ *     a reply a seller could send with one keystroke that a guard said must not
+ *     go. Tolerated at zero, separately from any average.
+ *
+ * An average that hides a class of error is worth less than the class of error
+ * printed on its own line.
+ */
 test("guardrail suite: precision and recall on blocking", async () => {
   let tp = 0, fp = 0, fn = 0, tn = 0;
+  let exact = 0;
+  /** expected → actual → count. The whole 3x3, printed, not summarised. */
+  const confusion = new Map<string, Map<string, number>>();
+  const overBlocks: string[] = [];
+  const underBlocks: string[] = [];
   const perGuard = new Map<string, { fired: number; correct: number }>();
+
+  const rank: Record<Verdict, number> = { allow: 0, revise: 1, block: 2 };
 
   for (const c of CASES) {
     const r = await rig();
     await c.setup?.(r);
     await r.retriever.rebuild();
     const result = await judge(r, c.question, c.answer, c.claims ?? [], { parsedOk: c.parsedOk });
+    const got = result.verdict;
+
+    if (got === c.expect) exact++;
+    const row = confusion.get(c.expect) ?? new Map<string, number>();
+    row.set(got, (row.get(got) ?? 0) + 1);
+    confusion.set(c.expect, row);
+
+    // Softer than labelled is a safety failure; harder than labelled is a
+    // usability failure. They cost different things and are counted apart.
+    if (rank[got] < rank[c.expect]) underBlocks.push(`${c.name} (${c.expect} → ${got})`);
+    else if (rank[got] > rank[c.expect]) overBlocks.push(`${c.name} (${c.expect} → ${got})`);
 
     const shouldStop = c.expect !== "allow";
-    const didStop = result.verdict !== "allow";
+    const didStop = got !== "allow";
     if (shouldStop && didStop) tp++;
     else if (!shouldStop && didStop) fp++;
     else if (shouldStop && !didStop) fn++;
@@ -457,22 +512,46 @@ test("guardrail suite: precision and recall on blocking", async () => {
     }
   }
 
+  const accuracy = exact / CASES.length;
   const precision = tp / (tp + fp || 1);
   const recall = tp / (tp + fn || 1);
   const f1 = (2 * precision * recall) / (precision + recall || 1);
+  const V: Verdict[] = ["allow", "revise", "block"];
 
   console.log(`\n  guardrail chain over ${CASES.length} labelled cases`);
-  console.log(`    caught ${tp}  missed ${fn}  false alarms ${fp}  clean passes ${tn}`);
-  console.log(`    precision ${precision.toFixed(3)}   recall ${recall.toFixed(3)}   f1 ${f1.toFixed(3)}`);
+  console.log(`    EXACT VERDICT  ${exact}/${CASES.length}  (${accuracy.toFixed(3)})`);
+  console.log(`      expected \\ got   ${V.map((v) => v.padStart(7)).join("")}`);
+  for (const e of V) {
+    const row = confusion.get(e);
+    if (!row) continue;
+    console.log(`      ${e.padEnd(17)}${V.map((g) => String(row.get(g) ?? 0).padStart(7)).join("")}`);
+  }
+  console.log(`      over-blocked ${overBlocks.length}   under-blocked ${underBlocks.length}`);
+  for (const x of [...underBlocks, ...overBlocks]) console.log(`        ${x}`);
+  console.log(`    STOPPED OR NOT (block and revise counted together)`);
+  console.log(`      caught ${tp}  missed ${fn}  false alarms ${fp}  clean passes ${tn}`);
+  console.log(`      precision ${precision.toFixed(3)}   recall ${recall.toFixed(3)}   f1 ${f1.toFixed(3)}`);
   for (const [g, e] of [...perGuard].sort()) {
     console.log(`    ${g.padEnd(16)} fired on ${e.correct}/${e.fired} of its own cases`);
   }
   console.log();
 
+  // A reply the label says must be BLOCKED and the chain let through softer is
+  // a reply a seller can send with one keystroke against a guard's judgement.
+  // No average, no floor: zero.
+  assert.equal(underBlocks.length, 0,
+    `${underBlocks.length} case(s) came back softer than labelled:\n      ${underBlocks.join("\n      ")}`);
+
   // A miss is a wrong answer sent to a buyer. A false alarm only costs the
   // seller a glance. The thresholds are asymmetric for that reason.
   assert.ok(recall >= 0.95, `recall ${recall.toFixed(3)} is below the 0.95 floor`);
   assert.ok(precision >= 0.9, `precision ${precision.toFixed(3)} is below the 0.90 floor`);
+
+  // And the headline. A revise silently promoted to a block passes every line
+  // above this one; this is the assertion that catches it.
+  assert.ok(accuracy >= 0.95,
+    `exact-verdict accuracy ${accuracy.toFixed(3)} is below the 0.95 floor` +
+    (overBlocks.length ? `\n      over-blocked: ${overBlocks.join("\n      ")}` : ""));
 });
 
 // Every rig() creates a real show in the real database. Without this the suite

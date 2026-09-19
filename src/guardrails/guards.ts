@@ -6,7 +6,7 @@
 // the reason attached) or `block` (the reply never reaches the buyer without the
 // seller editing it).
 
-import type { GuardResult } from "../domain/types.js";
+import type { GuardName, GuardResult } from "../domain/types.js";
 import { extractMoneyCents, formatMoney } from "../domain/money.js";
 import { cosine, fold, ngramVector, terms } from "../retrieval/text.js";
 import { allow, fail, na, sentences, type Guard, type GuardInput } from "./types.js";
@@ -18,6 +18,24 @@ const DECLINING = /\b(can'?t|cannot|can not|unable|not able|won'?t|will not|no l
 
 const ASSERTS_AVAILABLE = /\b(still (?:available|here|up|in stock|have)|in stock|available|it'?s yours|grab it|claim it|yes[,!. ]|we (?:do )?have|i (?:do )?have|got (?:it|one|some)|last one|last pair)\b/i;
 const ASSERTS_SOLD_OUT = /\b(sold out|sold|gone|no longer available|none left|all out)\b/i;
+
+/**
+ * Fact sources a human WROTE DOWN, versioned or reviewed before the show.
+ *
+ * A money amount in one of these is a number somebody committed to in advance:
+ * a listing field, a catalog import, a policy clause, an answer the seller gave
+ * before and approved for re-use. `host` (live speech) and `market` (comparable
+ * ASKING prices for other people's listings) are deliberately absent — neither
+ * is a price we are in a position to honour. `persona` is style, never
+ * grounding, and is absent for that reason.
+ */
+const WRITTEN_SOURCES: ReadonlySet<string> = new Set(["listing", "catalog", "policy", "qa"]);
+
+/** The reply reports what the host said rather than asserting it as our price.
+ *  "The host just mentioned these go for $200" commits us to nothing;
+ *  "That one is $200" commits us to $200. */
+const ATTRIBUTED_TO_HOST =
+  /\b(?:host|he|she|they)\b[^.!?]{0,80}?\b(?:said|says|saying|mentioned|mentions|noted|called|quoted|was talking|just went over)\b|\b(?:said|says|mentioned|noted|according to)\b[^.!?]{0,40}?\bhost\b/i;
 
 // ── 1. price ──────────────────────────────────────────────────────────────────
 //
@@ -40,14 +58,28 @@ export const priceGuard: Guard = {
     const echoed = new Set(extractMoneyCents(i.question));
     const priceFacts = i.facts.filter((f) => f.numericCents !== undefined);
 
-    // Every money amount that any retrieved fact STATES, not just the ones a
+    // Every money amount that a WRITTEN-DOWN fact states, not just the ones a
     // fact carries as a typed price. Shipping costs, flat fees and thresholds
     // live in the prose of a listing or policy fact ("ships USPS Ground
     // Advantage at a flat $9.95"), and without this the guard read a shipping
     // charge as an item-price commitment and blocked it for being below the
     // floor. Found against a real eBay Live show, not in the eval set.
+    //
+    // Written down is the load-bearing word. The exemption originally read
+    // EVERY fact, and a host utterance is a fact — so "these usually go for
+    // $200 all day" over the mic licensed the copilot to tell a buyer an $80
+    // lot was $200, with a green price pill on it. A number the host said out
+    // loud is unversioned, unattributed and frequently about resale value
+    // rather than about this lot; it is exactly the stale price this guard
+    // exists to catch, arriving through the door marked "already checked".
+    // Speech is handled below, on its own terms.
     const statedInFacts = new Set<number>();
-    for (const f of i.facts) for (const c of extractMoneyCents(f.text)) statedInFacts.add(c);
+    const statedByHost = new Set<number>();
+    for (const f of i.facts) {
+      const into = WRITTEN_SOURCES.has(f.source) ? statedInFacts : f.source === "host" ? statedByHost : null;
+      if (!into) continue;
+      for (const c of extractMoneyCents(f.text)) into.add(c);
+    }
     const listing = firstResolvedListing(i);
     const cap = policy().maxDiscountPct;
 
@@ -76,10 +108,32 @@ export const priceGuard: Guard = {
       //     offer in order to refuse it commits to nothing.
       if (echoed.has(amount) && declining) continue;
 
-      // (c) The amount is stated verbatim by a grounding fact that is not a
-      //     price fact — a shipping charge, a free-shipping threshold, a bundle
-      //     percentage. Repeating a fact is not making an offer.
+      // (c) The amount is stated verbatim by a WRITTEN grounding fact that is
+      //     not a price fact — a shipping charge, a free-shipping threshold, a
+      //     bundle percentage. Repeating a written fact is not making an offer.
       if (statedInFacts.has(amount)) continue;
+
+      // (c2) The only source for this number is something the host said. Two
+      //      ways that is legitimate, and no third:
+      //        • it agrees with the lot as it stands right now, so it is not
+      //          stale whatever its provenance; or
+      //        • the reply ATTRIBUTES it — "the host just said these go for
+      //          $200" reports the room, where "that one is $200" quotes a
+      //          price we do not have.
+      //      Anything else is the host's resale banter being sold to a buyer as
+      //      this lot's price.
+      if (statedByHost.has(amount)) {
+        if (listing && amount === listing.priceCents) continue;
+        if (ATTRIBUTED_TO_HOST.test(clause)) continue;
+        return fail(
+          "price", "block",
+          `Reply states ${formatMoney(amount)} as a price; the only source for it is something the host said, not the listing.`,
+          {
+            expected: listing ? `${formatMoney(listing.priceCents)} (v${listing.version})` : "a cited price fact",
+            found: formatMoney(amount),
+          },
+        );
+      }
 
       // (d) Otherwise this number is a COMMITMENT: either accepting the buyer's
       //     offer, or proposing a discount of our own. A proposed discount is
@@ -206,6 +260,18 @@ export const policyGuard: Guard = {
       }
       return fail("policy", "block", `Prohibited claim — ${rule.why}.`, { found: m[0] });
     }
+
+    // Below this line the guard asks "is the governing CLAUSE in evidence?",
+    // which presumes a policy corpus exists to retrieve a clause from. Twitch,
+    // YouTube Live and every other surface whose corpora are
+    // schedule/sponsor/product/qa/community have none — so the answer was
+    // always "no clause", and every reply on those surfaces that touched
+    // shipping, returns, refunds or authenticity was held forever, including
+    // perfectly grounded ones citing a schedule fact. The never-say list above
+    // is OUR rule and still applies everywhere; the clause check is about the
+    // operator's own policy corpus and cannot apply where there is not one.
+    // Same gate, same reason, as the price and availability guards.
+    if (!hasCorpus(i.surface, "policy")) return allow("policy");
 
     // A claim about a policy topic needs the governing clause in evidence.
     for (const [topic, re] of TOPIC_ASSERTIONS) {
@@ -532,3 +598,23 @@ export const GUARDS: Guard[] = [
   priceGuard, availabilityGuard, policyGuard, claimGroundingGuard, toneGuard, piiGuard,
   communityRuleGuard, sponsorGuard,
 ];
+
+/**
+ * Guards whose subject is the MODEL's citation discipline, not the content of
+ * the reply.
+ *
+ * `claim_grounding` asks one question: did the composer cite a factId it was
+ * actually handed, and does the cited fact support the sentence? That question
+ * is meaningful about a machine-written draft and meaningless about a sentence
+ * the operator typed themselves — they were never given a fact list, never
+ * asked for a citation, and are asserting the sentence on their own authority.
+ * Running it on an operator's edit rejected the seller's own words for not
+ * citing an id nobody asked them to supply, which made editing a draft
+ * impossible for any edit longer than "yes".
+ *
+ * Nothing that protects the BUYER is in here. Price, availability, policy, PII,
+ * tone, community rules and sponsor obligations all still run on a human edit —
+ * a seller can quote a stale price or leak a phone number as easily as a model
+ * can. See `runChain`'s `authoredBy` option.
+ */
+export const MODEL_ONLY_GUARDS: ReadonlySet<GuardName> = new Set<GuardName>(["claim_grounding"]);
