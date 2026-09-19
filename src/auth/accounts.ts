@@ -142,6 +142,63 @@ export class Accounts {
   async endSession(token: string): Promise<void> {
     await this.d.query("DELETE FROM auth_sessions WHERE token = $1", [token]);
   }
+
+  /**
+   * End every session this account has, except (optionally) the one asking.
+   *
+   * "Sign out everywhere" is the only answer to a token that has left the
+   * building — a bridge URL pasted into a chat, a laptop left on a train — and
+   * until now there was none: `logout` deleted exactly one token and a session
+   * lives thirty days with no idle timeout.
+   */
+  async endAllSessions(accountId: string, exceptToken?: string | null): Promise<number> {
+    const r = exceptToken
+      ? await this.d.query("DELETE FROM auth_sessions WHERE account_id = $1 AND token <> $2", [accountId, exceptToken])
+      : await this.d.query("DELETE FROM auth_sessions WHERE account_id = $1", [accountId]);
+    return r.rowCount ?? 0;
+  }
+
+  /**
+   * Change a password, and cut every other session loose.
+   *
+   * The current password is required: a stolen TOKEN must not be enough to
+   * take the account, or "sign out everywhere" would be a gift to whoever got
+   * there first. Sessions other than the caller's go at the same moment,
+   * because changing a password one believes to be compromised and leaving the
+   * thief signed in is the shape of the bug people actually hit.
+   */
+  async changePassword(
+    accountId: string, currentPassword: string, newPassword: string, keepToken?: string | null,
+  ): Promise<{ sessionsEnded: number }> {
+    if (newPassword.length < 8) throw new AuthError("use at least 8 characters for the password");
+    const r = await this.d.query<{ password_hash: string | null }>(
+      "SELECT password_hash FROM accounts WHERE id = $1", [accountId],
+    );
+    const stored = r.rows[0]?.password_hash;
+    // Same message either way, same as login: which half was wrong is not
+    // information to hand out.
+    if (!stored || !(await verifyPassword(currentPassword, stored))) {
+      throw new AuthError("that is not the current password", 401);
+    }
+    await this.d.query("UPDATE accounts SET password_hash = $2 WHERE id = $1", [
+      accountId, await hashPassword(newPassword),
+    ]);
+    return { sessionsEnded: await this.endAllSessions(accountId, keepToken) };
+  }
+
+  /**
+   * Delete sessions that have already expired.
+   *
+   * `resolve` has always enforced expiry in the QUERY, so an expired row was
+   * never usable — but nothing ever removed one, so the table only grew, and a
+   * seller asking "what is signed in" would have been answered with years of
+   * dead rows. Cheap, indexed by the primary key scan we already pay for, and
+   * safe to run on a timer.
+   */
+  async pruneExpiredSessions(): Promise<number> {
+    const r = await this.d.query("DELETE FROM auth_sessions WHERE expires_at <= now()");
+    return r.rowCount ?? 0;
+  }
 }
 
 interface AccountRow { id: string; kind: string; handle: string; display_name: string; email?: string | null }

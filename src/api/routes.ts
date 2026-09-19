@@ -318,14 +318,73 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
+  /** The bearer this request arrived with, if it arrived with one. */
+  const bearerOf = (req: { headers: { authorization?: string } }): string | null => {
+    const h = req.headers.authorization;
+    return h?.startsWith("Bearer ") ? h.slice(7) : null;
+  };
+
   app.post("/api/auth/logout", async (req) => {
-    const header = req.headers.authorization;
-    const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
+    const token = bearerOf(req);
     if (token) await accounts.endSession(token);
     return { ok: true };
   });
 
+  /**
+   * Sign out everywhere.
+   *
+   * A session lives thirty days with no idle timeout, and `logout` deletes
+   * exactly one token — so a seller who pasted a bridge URL into a chat, or
+   * lost a laptop, had no recourse at all: the stolen token stayed valid for a
+   * month and no page could end it. This is that page's route.
+   */
+  app.post("/api/auth/logout-all", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "end your other sessions");
+    if (!actor) return reply;
+    const ended = await accounts.endAllSessions(actor.id);
+    return { ok: true, sessionsEnded: ended };
+  });
+
+  /**
+   * Change the password, and cut every OTHER session loose in the same breath.
+   *
+   * There was no way to change a password at all. Changing one you believe is
+   * compromised while the thief stays signed in for the rest of the month is
+   * not a change; the two halves belong in one request.
+   */
+  app.post<{ Body: { currentPassword?: string; newPassword?: string } }>(
+    "/api/auth/password",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "change your password");
+      if (!actor) return reply;
+      try {
+        const out = await accounts.changePassword(
+          actor.id,
+          req.body?.currentPassword ?? "",
+          req.body?.newPassword ?? "",
+          // This session survives: the seller is holding it, and signing them
+          // out of the browser they just used would be a puzzle, not security.
+          bearerOf(req),
+        );
+        return { ok: true, ...out };
+      } catch (e) {
+        return reply.code(e instanceof AuthError ? e.status : 500).send({ error: (e as Error).message });
+      }
+    },
+  );
+
   app.get("/api/auth/me", async (req) => ({ account: actorOf(req as object) }));
+
+  // Expired sessions have never been usable — `resolve` enforces expiry in the
+  // query — but nothing ever deleted one, so the table only grew. Once at
+  // boot, then daily, and never in the way of a request.
+  const pruneSessions = () =>
+    void accounts
+      .pruneExpiredSessions()
+      .then((n) => n && console.log(`  auth: pruned ${n} expired session${n === 1 ? "" : "s"}`))
+      .catch((e) => console.warn(`  auth: session prune failed — ${(e as Error).message}`));
+  setTimeout(pruneSessions, 10_000).unref?.();
+  setInterval(pruneSessions, 24 * 60 * 60_000).unref?.();
 
   // ── analytics ─────────────────────────────────────────────────────────────
   //
