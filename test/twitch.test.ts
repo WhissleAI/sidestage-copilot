@@ -138,14 +138,21 @@ describe("parsing a twitch target", () => {
       "twitch.tv/kicksbyrae",
       "http://m.twitch.tv/kicksbyrae?tt_content=home",
       "https://www.twitch.tv/KicksByRae/videos",
-      "@kicksbyrae",
-      "kicksbyrae",
-      "  KicksByRae  ",
+      "twitch:kicksbyrae",
+      "twitch:@kicksbyrae",
+      "  twitch:KicksByRae  ",
     ]) {
       assert.equal(parse(input)?.externalId, "kicksbyrae", input);
     }
-    assert.equal(parse("kicksbyrae")?.handle, "@kicksbyrae");
-    assert.equal(parse("kicksbyrae")?.meta?.url, "https://twitch.tv/kicksbyrae");
+    assert.equal(parse("twitch:kicksbyrae")?.handle, "@kicksbyrae");
+    assert.equal(parse("twitch:kicksbyrae")?.meta?.url, "https://twitch.tv/kicksbyrae");
+
+    // A bare name or @handle is NOT a Twitch target. The same handle exists on
+    // Whatnot and TikTok, whose adapters refuse it for the same reason, and
+    // `resolve()` is first-match over registration order — so accepting it
+    // would make registration order decide whose room gets attached.
+    assert.equal(parse("kicksbyrae"), null);
+    assert.equal(parse("@kicksbyrae"), null);
   });
 
   test("a twitch link that is not a channel is refused rather than guessed at", () => {
@@ -165,15 +172,20 @@ describe("parsing a twitch target", () => {
     }
   });
 
-  test("the registry still gives the narrower adapters their links first", () => {
-    // Twitch is the only adapter that accepts a bare word, so registration
-    // order is load-bearing: "demo" is a valid Twitch login AND how an operator
-    // asks for the scripted show.
+  test("no adapter claims a bare word, so registration order decides nothing", () => {
+    // This test used to assert the opposite — that Twitch caught a bare word
+    // and registration order kept "demo" with the scripted show. It does not
+    // any more: the same handle exists on Twitch, Whatnot and TikTok, and
+    // `resolve()` is first-match, so a bare word would have let the order in
+    // this file decide whose room a seller attached to. Every surface now
+    // requires the string to say where it is, and the only bare words left are
+    // the two that name no external room at all.
     assert.equal(resolve("47tK1SX0VsiHEXN1")?.adapter.id, "ebaylive");
     assert.equal(resolve("https://www.ebay.com/ebaylive/events/47tK1SX0VsiHEXN1/player.html")?.adapter.id, "ebaylive");
     assert.equal(resolve("simulated")?.adapter.id, "simulated");
     assert.equal(resolve("demo")?.adapter.id, "simulated");
-    assert.equal(resolve("kicksbyrae")?.adapter.id, "twitch");
+    assert.equal(resolve("kicksbyrae"), null);
+    assert.equal(resolve("twitch:kicksbyrae")?.adapter.id, "twitch");
     assert.equal(resolve("twitch.tv/kicksbyrae")?.adapter.id, "twitch");
   });
 

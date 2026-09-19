@@ -64,7 +64,20 @@ export const twitchAdapter: SurfaceAdapter = {
       if (!LOGIN.test(login) || RESERVED.has(login)) return null;
       return { externalId: login, handle: `@${login}`, meta: { url: `https://twitch.tv/${login}` } };
     }
+    // A BARE name or @handle is refused, and that is a cross-surface rule
+    // rather than a Twitch one: the same handle exists on Twitch, Whatnot and
+    // TikTok, `resolve()` is first-match over registration order, and the two
+    // scraped adapters already refuse it for exactly this reason. Accepting it
+    // here would let registration order decide whose room a seller attaches
+    // to. `twitch:<name>` says where it is, and so does a link.
     if (raw.includes("/") || /\s/.test(raw)) return null;
+    const prefixed = /^twitch:(@?[a-z0-9_]{3,25})$/i.exec(raw);
+    if (prefixed) {
+      const login = prefixed[1]!.replace(/^@/, "").toLowerCase();
+      if (!LOGIN.test(login) || RESERVED.has(login)) return null;
+      return { externalId: login, handle: `@${login}`, meta: { url: `https://twitch.tv/${login}` } };
+    }
+    return null;
 
     const bare = raw.replace(/^@/, "").toLowerCase();
     if (!LOGIN.test(bare) || RESERVED.has(bare)) return null;
