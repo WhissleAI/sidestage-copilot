@@ -443,6 +443,17 @@ The asymmetry is the whole argument: the undo window can delete a comment, it
 cannot unsee it, and one wrong post costs an account that has been in a
 community for years.
 
+**What the switch does not do yet, said out loud.** The lookup is now wired —
+`ActionExecutor` asks `SurfaceRooms.posting` before it proposes a `post_reply`,
+where before it passed nothing and preflight's refusal was right by accident.
+But nothing in this build PROPOSES a `post_reply`: `ActionProposer` never emits
+one, and the console's Send button goes to `Pipeline.send`, which records rather
+than delivers. So turning posting on arms a lock nothing has yet tried the door
+of. `eBay Live is now draft-only, so the switch cannot be turned on there at
+all; on Twitch it is armed and waiting for the proposer that does not exist.
+The Rooms page must say that rather than implying the copilot is about to
+speak.
+
 ## Discovery is a question asked of every surface
 
 `GET /api/discover` returns one `DiscoverSourceResult` per surface — `surface`, a one-sentence
