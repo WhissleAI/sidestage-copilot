@@ -14,6 +14,8 @@
  *   2. an operator's EDIT is judged as a human assertion: every guard that
  *      protects the buyer runs on it, and the one that audits the model's
  *      citation discipline does not.
+ *   3a. a guard that reasons about a corpus does not fire on a surface that has
+ *      none (policy, exactly as price and availability already did).
  *   3. a held card's own instruction — "edit it and send, the edit is checked
  *      again" — is true. An edit that clears the block sends; one that does not
  *      is refused by name.
@@ -400,5 +402,55 @@ describe("a blocked card says 'edit it and send' — and now that is true", () =
     assert.equal((sentEntry!.detail as Record<string, unknown>).clearedBlockByEdit, true);
     assert.equal((sentEntry!.detail as Record<string, unknown>).edited, true);
     await h.stop();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 5. guards that know which surface they are on
+// ════════════════════════════════════════════════════════════════════════════
+
+describe("the policy guard on a surface with no policy corpus", () => {
+  const fact = (factId: string, text: string): Fact => ({
+    factId, corpus: "schedule", source: "catalog", label: "the schedule", text,
+    field: "description", tokens: terms(text), vector: ngramVector(text),
+  });
+
+  const input = (surface: string, answer: string): GuardInput => {
+    const facts = [fact("schedule:merch", "Merch drops go out the week after the stream.")];
+    return {
+      draft: { answer, claims: [], parsedOk: true, raw: answer },
+      question: "when does the merch ship",
+      facts,
+      factById: new Map(facts.map((f) => [f.factId, f])),
+      currentListings: new Map(),
+      slots: { listingIds: [], viaAnaphora: false } as unknown as GuardInput["slots"],
+      policies: [],
+      surface: capabilitiesOf(surface),
+      community: [],
+    };
+  };
+
+  test("a shipping answer on Twitch is not held for a clause that cannot exist", () => {
+    // DURING-07. Twitch's corpora are schedule/sponsor/product/qa/community —
+    // there is no policy corpus to retrieve a shipping clause from, so every
+    // reply touching shipping, returns or authenticity was held forever. The
+    // price and availability guards have had this gate since surfaces landed.
+    const i = input("twitch", "Merch shipping goes out the week after the stream, straight from the printer.");
+    assert.equal(policyGuard.run(i).verdict, "allow");
+    assert.notEqual(runChain(i).verdict, "block");
+  });
+
+  test("the same answer on eBay Live, which HAS a policy corpus, is still checked", () => {
+    const i = input("ebaylive", "Merch shipping goes out the week after the stream, straight from the printer.");
+    const g = policyGuard.run(i);
+    assert.equal(g.verdict, "revise");
+    assert.match(g.reason!, /shipping/);
+  });
+
+  test("the never-say list is OUR rule and applies on every surface", () => {
+    // The gate goes in below the prohibited-claim scan on purpose: a claim we
+    // told the copilot never to make is not a claim about a corpus.
+    const i = input("twitch", "These are guaranteed authentic, 100% legit, no question.");
+    assert.equal(policyGuard.run(i).verdict, "block");
   });
 });

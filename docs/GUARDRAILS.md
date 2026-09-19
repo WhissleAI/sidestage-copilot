@@ -164,7 +164,10 @@ strict; widened to every grounded lot for an inventory search, where "the 1989 h
   delivery dates, off-platform payment, health claims, absolute authenticity
   without a certificate → **block**
 - A claim about a policy topic (shipping / returns / authenticity) with **no clause
-  of that topic in evidence** → **revise**
+  of that topic in evidence** → **revise**. Gated on the surface having a policy
+  corpus at all, exactly as `price` and `stock` gate on a listing corpus: Twitch
+  and YouTube Live have no policy corpus, so there is no clause to retrieve and
+  the check would hold every merch-shipping answer forever.
 
 ### 4 · `grounding` (claim grounding)
 

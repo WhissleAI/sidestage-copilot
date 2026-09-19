@@ -207,6 +207,18 @@ export const policyGuard: Guard = {
       return fail("policy", "block", `Prohibited claim — ${rule.why}.`, { found: m[0] });
     }
 
+    // Below this line the guard asks "is the governing CLAUSE in evidence?",
+    // which presumes a policy corpus exists to retrieve a clause from. Twitch,
+    // YouTube Live and every other surface whose corpora are
+    // schedule/sponsor/product/qa/community have none — so the answer was
+    // always "no clause", and every reply on those surfaces that touched
+    // shipping, returns, refunds or authenticity was held forever, including
+    // perfectly grounded ones citing a schedule fact. The never-say list above
+    // is OUR rule and still applies everywhere; the clause check is about the
+    // operator's own policy corpus and cannot apply where there is not one.
+    // Same gate, same reason, as the price and availability guards.
+    if (!hasCorpus(i.surface, "policy")) return allow("policy");
+
     // A claim about a policy topic needs the governing clause in evidence.
     for (const [topic, re] of TOPIC_ASSERTIONS) {
       if (!re.test(a)) continue;
