@@ -78,6 +78,11 @@ import type { AppContext } from "./context.js";
  */
 type Caller = { method: string };
 
+/** Does this request only look? The ownerless-show rule and `rt`'s fallback
+ *  both turn on it, so it is defined once. */
+const isRead = (method: string): boolean =>
+  method === "GET" || method === "HEAD" || method === "OPTIONS";
+
 /** A keyframe is ~40-120 KB of base64 at the size we send. This is the ceiling
  *  before the request is refused rather than paid for. */
 const MAX_FRAME_CHARS = 400_000;
@@ -139,7 +144,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    */
   const rt = (req: Caller, showId?: string | null): ShowRuntime => {
     if (showId) return shows.get(showId);
-    const mine = shows.activeFor(actorOf(req)?.id);
+    // A write is never handed a show that belongs to nobody. With no showId
+    // the ownership preHandler has nothing to check, so this is the only place
+    // that can refuse it.
+    const mine = shows.activeFor(actorOf(req)?.id, { includeOwnerless: isRead(req.method) });
     // Deliberately the same sentence the registry uses for "nothing is being
     // watched": from the caller's side those are the same fact. What it must
     // never do is reach for a show that is not theirs.
@@ -236,6 +244,24 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const owner = await ownerOf(showId);
     if (owner === undefined) return; // no such show: the handler says so its own way
     if (owner !== null && owner !== a.id) return reply.code(404).send({ error: `no such show ${showId}` });
+    // An OWNERLESS row is nobody's, and nobody's is not everybody's.
+    //
+    // Rows older than ownership stay READABLE — that is the documented
+    // wrinkle, and taking the read away would lose a seller their own history
+    // for a column that did not exist when the row was written. It was never
+    // meant to make them writable, and it did: the write guard below only asks
+    // "is this a seller", so on any ownerless row a stranger could detach it,
+    // DELETE it, change its autonomy level, approve, reject or roll back its
+    // actions, send its replies and rename its lots. (Arming real eBay writes
+    // was the one thing already closed — runtime.ts refuses an ownerless show
+    // outright — so this stopped short of moving real money, and nothing else
+    // stopped.)
+    if (owner === null && !isRead(req.method)) {
+      return reply.code(403).send({
+        error: `show ${showId} predates accounts and belongs to nobody — it can be read, not changed. Re-attach it to claim it.`,
+        code: "ownerless-show",
+      });
+    }
   });
 
   // Every mutation needs a signed-in seller. There is no guest kind any more,

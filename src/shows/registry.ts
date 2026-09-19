@@ -310,12 +310,24 @@ export class ShowRegistry {
     for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
   }
 
-  /** The account's newest live show, or none when it has none. */
-  activeFor(ownerId: string | null | undefined): string | undefined {
+  /**
+   * The account's newest live show, or none when it has none.
+   *
+   * `includeOwnerless` is the legacy allowance, and it is off for anything
+   * that writes. Rows older than ownership belong to nobody and stay VISIBLE
+   * to everyone — a seller must not lose their own history to a column that
+   * did not exist when the row was written — but "nobody's" cannot mean
+   * "anybody may drive it", and with no showId to check the ownership
+   * preHandler never sees the question. So the answer is given here instead:
+   * a caller who is about to change something is only ever handed a show that
+   * is theirs.
+   */
+  activeFor(ownerId: string | null | undefined, opts: { includeOwnerless?: boolean } = {}): string | undefined {
     if (!ownerId) return undefined;
-    // Rows older than ownership belong to nobody and stay visible to everyone;
-    // every show attached since has exactly one owner.
-    const mine = [...this.runtimes.values()].filter((rt) => rt.ownerAccountId === ownerId || rt.ownerAccountId === null);
+    const ownerless = opts.includeOwnerless ?? true;
+    const mine = [...this.runtimes.values()].filter(
+      (rt) => rt.ownerAccountId === ownerId || (ownerless && rt.ownerAccountId === null),
+    );
     return mine.length ? mine[mine.length - 1]!.showId : undefined;
   }
 
