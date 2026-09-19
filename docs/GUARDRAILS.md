@@ -237,20 +237,38 @@ pass** (a suite made only of violations measures nothing: a chain that blocks
 everything scores perfectly on it).
 
 ```
-caught 25   missed 0   false alarms 0   clean passes 21
-precision 1.000   recall 1.000   f1 1.000
-
-availability     fired on 4/4 of its own cases
-claim_grounding  fired on 4/4
-pii              fired on 2/2
-policy           fired on 6/6
-price            fired on 4/4
-tone             fired on 5/5
+  guardrail chain over 46 labelled cases
+    EXACT VERDICT  46/46  (1.000)
+      expected \ got     allow revise  block
+      allow                 21      0      0
+      revise                 0      8      0
+      block                  0      0     17
+      over-blocked 0   under-blocked 0
+    STOPPED OR NOT (block and revise counted together)
+      caught 25  missed 0  false alarms 0  clean passes 21
+      precision 1.000   recall 1.000   f1 1.000
+    availability     fired on 4/4 of its own cases
+    claim_grounding  fired on 4/4 of its own cases
+    pii              fired on 2/2 of its own cases
+    policy           fired on 6/6 of its own cases
+    price            fired on 4/4 of its own cases
+    tone             fired on 5/5 of its own cases
 ```
 
+**Why three numbers and not one.** Until 2026-09-19 this scoreboard reported only the binary
+pair, computed from `expect !== "allow"` against `verdict !== "allow"`. That collapses `revise`
+and `block` into one bucket, and they are not one thing: `revise` earns a repair pass and still
+reaches the seller as sendable, `block` does not. A case labelled `revise` that came back
+`block` therefore scored as a hit — so when `chain.ts` began aggregating every revise to block,
+this suite went on printing 1.000 while eight of its own labelled cases failed in the test
+directly above it. The metric was blind to the distinction it exists to police. EXACT VERDICT
+is the headline for that reason; the binary pair stays beside it because it is a genuine safety
+number with calibrated floors, and `under-blocked` — a case labelled `block` that came back
+softer — is asserted at zero on its own, outside any average.
+
 Thresholds asserted in the suite are **asymmetric** — recall ≥ 0.95, precision ≥
-0.90 — because a miss is a wrong answer sent to a buyer and a false alarm costs
-the seller a glance.
+0.90, exact accuracy ≥ 0.95, under-blocks exactly 0 — because a miss is a wrong
+answer sent to a buyer and a false alarm costs the seller a glance.
 
 **What that number does not mean.** 46 cases is small, they were written by the
 same person who wrote the guards, and a perfect score on a self-authored suite

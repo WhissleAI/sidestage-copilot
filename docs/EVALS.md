@@ -1,6 +1,7 @@
 # Evaluations
 
-Three harnesses. Two run with **no credentials** (`npm run eval`, `npm test`); the latency
+Three harnesses. Two run with **no credentials** (`npm run eval`, `npm test` — which now runs
+the evaluations too, so a metric that stops measuring cannot hide behind a green suite); the latency
 benchmark exercises the real reply path (`npm run bench`).
 
 Everything below is reproducible — the commands are the ones that produced the numbers, against
@@ -23,8 +24,15 @@ staleness checks are exercised against a genuinely moved target rather than a fi
 
 ```
   guardrail chain over 46 labelled cases
-    caught 25  missed 0  false alarms 0  clean passes 21
-    precision 1.000   recall 1.000   f1 1.000
+    EXACT VERDICT  46/46  (1.000)
+      expected \ got     allow revise  block
+      allow                 21      0      0
+      revise                 0      8      0
+      block                  0      0     17
+      over-blocked 0   under-blocked 0
+    STOPPED OR NOT (block and revise counted together)
+      caught 25  missed 0  false alarms 0  clean passes 21
+      precision 1.000   recall 1.000   f1 1.000
     availability     fired on 4/4 of its own cases
     claim_grounding  fired on 4/4 of its own cases
     pii              fired on 2/2 of its own cases
@@ -33,8 +41,20 @@ staleness checks are exercised against a genuinely moved target rather than a fi
     tone             fired on 5/5 of its own cases
 ```
 
-Thresholds asserted in the suite are **asymmetric**: recall ≥ 0.95, precision ≥ 0.90. A miss is
-a wrong answer sent to a buyer; a false alarm costs the seller a glance.
+**Why three numbers and not one.** Until 2026-09-19 this scoreboard reported only the binary
+pair, computed from `expect !== "allow"` against `verdict !== "allow"`. That collapses `revise`
+and `block` into one bucket, and they are not one thing: `revise` earns a repair pass and still
+reaches the seller as sendable, `block` does not. A case labelled `revise` that came back
+`block` therefore scored as a hit — so when `chain.ts` began aggregating every revise to block,
+this suite went on printing 1.000 while eight of its own labelled cases failed in the test
+directly above it. The metric was blind to the distinction it exists to police. EXACT VERDICT
+is the headline for that reason; the binary pair stays beside it because it is a genuine safety
+number with calibrated floors, and `under-blocked` — a case labelled `block` that came back
+softer — is asserted at zero on its own, outside any average.
+
+Thresholds asserted in the suite are **asymmetric**: recall ≥ 0.95, precision ≥ 0.90, exact
+accuracy ≥ 0.95, under-blocks exactly 0. A miss is a wrong answer sent to a buyer; a false
+alarm costs the seller a glance.
 
 ### What this number does and does not mean
 
@@ -199,8 +219,11 @@ The bench exits non-zero if that reply is ever served from cache.
 
 ## 5. Unit tests
 
-`npm test` — about 170 tests across `test/*.test.ts` on Node's test runner, no LLM
-credentials required (a local Postgres is; `pretest` creates `sidestage_test`).
+`npm test` — 509 tests across `test/*.test.ts` **and** `test/*.eval.ts` on Node's test runner, no
+LLM credentials required (a local Postgres is; `pretest` creates `sidestage_test`). The
+evaluations are in the default suite deliberately: they ran under a separate script with no CI
+behind it, so the guardrail eval sat at 8 failures for as long as nobody typed `npm run eval`
+while `npm test` reported green.
 
 | Area | What is proven |
 |---|---|

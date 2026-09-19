@@ -11,7 +11,7 @@
     "seed": "tsx src/db/seed.ts",
     "seed:agent": "tsx src/llm/seedAgent.ts",
     "pretest": "node scripts/ensure-test-db.mjs",
-    "test": "NODE_ENV=test CATALOGS_DIR=.tmp/test-catalogs node --import tsx --test test/*.test.ts",
+    "test": "NODE_ENV=test CATALOGS_DIR=.tmp/test-catalogs node --import tsx --test test/*.test.ts test/*.eval.ts",
     "preeval": "node scripts/ensure-test-db.mjs",
     "eval": "NODE_ENV=test CATALOGS_DIR=.tmp/test-catalogs node --import tsx --test test/*.eval.ts",
     "bench": "tsx bench/latency.bench.ts",
