@@ -265,6 +265,7 @@ export function toEvidence(f: Fact, score: number): Evidence {
   const e: Evidence = {
     factId: f.factId,
     source: f.source,
+    corpus: f.corpus,
     label: f.label,
     text: f.text,
     score: Number(score.toFixed(3)),

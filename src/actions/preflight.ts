@@ -19,8 +19,15 @@ import type { ActionKind, PreflightCheck } from "../domain/types.js";
 import type { ListingWithDescription, Repo } from "../domain/repo.js";
 import { formatMoney } from "../domain/money.js";
 import { policy } from "../guardrails/policy.js";
+import { capabilitiesOf, type SurfaceCapabilities } from "../surfaces/types.js";
 
 export interface PreflightContext {
+  /** What this surface can do at all. An action it does not declare is refused
+   *  before anything else is even measured — see `preflight`. */
+  surface: SurfaceCapabilities;
+  /** The room a reply would be posted into, and whether a human has turned
+   *  posting on for it. Absent means off, which is the only safe default. */
+  posting?: { room: string; enabled: boolean };
   /** True for a stream we are monitoring but do not own. */
   readOnlyShow?: boolean;
   /** How many actions have already been committed in this show. */
@@ -41,6 +48,13 @@ export interface PreflightResult {
 const ok = (name: string, detail: string): PreflightCheck => ({ name, ok: true, detail });
 const no = (name: string, detail: string): PreflightCheck => ({ name, ok: false, detail });
 
+/** The five actions that write to a listing. Everything else — a clip, a poll,
+ *  a reply, a hand-off to a human — targets something that is not in the
+ *  catalog, so requiring one would refuse it for the wrong reason. */
+const LISTING_KINDS = new Set<ActionKind>([
+  "push_listing", "swap_pinned", "markdown_price", "adjust_stock", "end_listing",
+]);
+
 export function preflight(
   kind: ActionKind,
   listing: ListingWithDescription | null,
@@ -49,13 +63,49 @@ export function preflight(
 ): PreflightResult {
   const checks: PreflightCheck[] = [];
 
-  if (!listing) {
+  // ── the surface, before anything else ─────────────────────────────────────
+  //
+  // First because every check below it is an argument about DEGREE — is this
+  // markdown too deep, is this restock plausible — and those arguments are
+  // nonsense when the action does not exist here at all. A proposer that asks
+  // eBay Live to run a poll has a bug, and the honest answer is "this surface
+  // cannot", not a floor-price check on a poll.
+  if (!ctx.surface.actions.includes(kind)) {
+    return { ok: false, checks: [no("this surface supports the action", `this surface cannot ${kind}`)], before: {} };
+  }
+
+  // Posting a reply into somebody else's room is the one action in this system
+  // that is irreversible in the way that matters: the undo window can delete
+  // the comment, it cannot unsee it. Two locks, and both must be open.
+  if (kind === "post_reply") {
+    if (ctx.surface.delivery !== "api") {
+      return {
+        ok: false,
+        before: {},
+        checks: [no("the surface delivers replies", "this surface is draft-only — the reply is yours to send")],
+      };
+    }
+    // Default false, everywhere, always. A room the operator has not switched
+    // on is a room we draft for and never speak in.
+    if (!ctx.posting?.enabled) {
+      const room = ctx.posting?.room || "this room";
+      return {
+        ok: false,
+        before: {},
+        checks: [no("posting is on for this room", `posting is off for ${room} — the draft is yours to send`)],
+      };
+    }
+  }
+
+  if (!listing && LISTING_KINDS.has(kind)) {
     return { ok: false, checks: [no("listing exists", "the listing this action targets was not found")], before: {} };
   }
 
   // The prior-state snapshot. Captured once, carried for the action's lifetime,
-  // and the sole source of truth for compensation.
-  const before = {
+  // and the sole source of truth for compensation. An action with no listing
+  // behind it has nothing to compensate BACK to, and says so with an empty one
+  // rather than a snapshot of a listing it never touched.
+  const before = !listing ? {} : {
     priceCents: listing.priceCents,
     qty: listing.qty,
     state: listing.state,
@@ -84,7 +134,9 @@ export function preflight(
   );
 
   // ── per-kind ──────────────────────────────────────────────────────────────
-  switch (kind) {
+  // Only the listing kinds have anything to say here. The creator and async
+  // kinds carry their limits on the surface that owns them (Wave B).
+  if (listing) switch (kind) {
     case "markdown_price": {
       const next = Number(params.newPriceCents);
       const p = policy();
@@ -201,10 +253,13 @@ export function idempotencyKey(kind: ActionKind, listingId: string, version: num
 
 export async function showBudgetContext(
   repo: Repo,
-  d: { committedThisShow: number; committedLastMinute: number },
+  d: { committedThisShow: number; committedLastMinute: number; posting?: { room: string; enabled: boolean } },
 ): Promise<PreflightContext> {
+  const show = await repo.show();
   return {
-    readOnlyShow: (await repo.show()).readOnly,
+    surface: capabilitiesOf(show.source),
+    posting: d.posting,
+    readOnlyShow: show.readOnly,
     committedThisShow: d.committedThisShow,
     actionBudget: policy().automation.actionBudget,
     committedLastMinute: d.committedLastMinute,

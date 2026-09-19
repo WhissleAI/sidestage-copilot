@@ -363,8 +363,8 @@ export class Repo {
   }): Promise<ShowState> {
     await this.q(`
       INSERT INTO shows (id, owner_account_id, title, seller_handle, started_at, viewers, pinned_listing_id,
-        lot_queue, autonomy_level, undo_window_s, source, external_id, read_only, status, catalog_id)
-      VALUES ($1, $2, $3, $4, $5, 0, NULL, '[]'::jsonb, $6, $7, $8, $9, $10, 'live', $11)
+        lot_queue, autonomy_level, undo_window_s, source, surface, external_id, read_only, status, catalog_id)
+      VALUES ($1, $2, $3, $4, $5, 0, NULL, '[]'::jsonb, $6, $7, $8, $8, $9, $10, 'live', $11)
       ON CONFLICT (id) DO UPDATE SET
         -- Re-attaching a show that ended is a new session on the same row:
         -- it goes back on air with a fresh clock. It used to keep 'ended', so
@@ -377,7 +377,10 @@ export class Repo {
         title = CASE WHEN EXCLUDED.title LIKE 'eBay Live %' THEN shows.title ELSE EXCLUDED.title END,
         catalog_id = COALESCE(EXCLUDED.catalog_id, shows.catalog_id),
         seller_handle = EXCLUDED.seller_handle,
-        source = EXCLUDED.source, external_id = EXCLUDED.external_id,
+        -- Both columns, the same value. "source" is the name every existing
+        -- row and query uses; "surface" is the name the axis now has
+        -- (migration 018). Writing one and not the other is how they drift.
+        source = EXCLUDED.source, surface = EXCLUDED.surface, external_id = EXCLUDED.external_id,
         read_only = EXCLUDED.read_only`,
       [s.id, s.ownerAccountId ?? null, s.title, s.sellerHandle, new Date().toISOString(),
        s.autonomyLevel, s.undoWindowS, s.source, s.externalId ?? null, s.readOnly ?? false,
@@ -390,7 +393,7 @@ export class Repo {
     const r = await this.q<{
       id: string; title: string; seller_handle: string; started_at: string; viewers: number;
       pinned_listing_id: string | null; lot_queue: string[]; autonomy_level: string; undo_window_s: number;
-      source: string; external_id: string | null; read_only: boolean; status: string;
+      source: string; surface: string | null; external_id: string | null; read_only: boolean; status: string;
     }>("SELECT * FROM shows WHERE id = $1", [this.showId]);
     const row = r.rows[0];
     if (!row) throw new Error(`no show ${this.showId} — run \`npm run seed\` first`);
@@ -400,7 +403,10 @@ export class Repo {
       // jsonb comes back already parsed.
       lotQueue: (row.lot_queue ?? []) as string[],
       autonomyLevel: row.autonomy_level as AutonomyLevel, undoWindowS: row.undo_window_s,
-      source: row.source as ShowState["source"], externalId: row.external_id,
+      // COALESCE in code rather than SQL: a row written before migration 018
+      // has no `surface`, and the whole point of a default-shaped migration is
+      // that reading an old row is not a special case anywhere else.
+      source: (row.surface || row.source) as ShowState["source"], externalId: row.external_id,
       readOnly: row.read_only, status: row.status as ShowState["status"],
     };
   }

@@ -83,6 +83,9 @@ export function hostFacts(question: string, segs: HostSegment[], now = Date.now(
       f: {
         factId: id,
         source: "host",
+        // What the host said out loud about what is on the table. Grounding of
+        // the listing kind, measured a different way — never a room rule.
+        corpus: "listing",
         label: `the host said, ${ageS}s ago`,
         text: s.text,
         field,

@@ -1,4 +1,4 @@
-// The six guards. Every one is DETERMINISTIC: no model is asked whether a reply
+// The guards. Every one is DETERMINISTIC: no model is asked whether a reply
 // is safe. A guard either points at a fact that contradicts the draft, or it
 // allows. That is the difference between a guardrail and a second opinion.
 //
@@ -8,9 +8,10 @@
 
 import type { GuardResult } from "../domain/types.js";
 import { extractMoneyCents, formatMoney } from "../domain/money.js";
-import { cosine, ngramVector, terms } from "../retrieval/text.js";
+import { cosine, fold, ngramVector, terms } from "../retrieval/text.js";
 import { allow, fail, na, sentences, type Guard, type GuardInput } from "./types.js";
 import { neverSayMatchers, policy } from "./policy.js";
+import { hasCorpus } from "../surfaces/types.js";
 
 /** A clause that declines or quotes the buyer back rather than committing. */
 const DECLINING = /\b(can'?t|cannot|can not|unable|not able|won'?t|will not|no lower|lowest i can|too low|below (?:my|the)|under (?:my|the)|instead)\b/i;
@@ -27,6 +28,12 @@ const ASSERTS_SOLD_OUT = /\b(sold out|sold|gone|no longer available|none left|al
 export const priceGuard: Guard = {
   name: "price",
   run(i: GuardInput): GuardResult {
+    // No catalog behind this surface, so there is no listing price for a
+    // number to be stale against. Every check below compares the draft to a
+    // listing version; without listings they would compare it to nothing and
+    // block every reply that mentions money — a Twitch answer saying the board
+    // costs sixty dollars is quoting the sponsor, not quoting us.
+    if (!hasCorpus(i.surface, "listing")) return na("price");
     const amounts = extractMoneyCents(i.draft.answer);
     if (!amounts.length) return na("price");
 
@@ -125,6 +132,9 @@ export const priceGuard: Guard = {
 export const availabilityGuard: Guard = {
   name: "availability",
   run(i: GuardInput): GuardResult {
+    // Same reason as the price guard: "still available" is a claim about a lot,
+    // and a surface with no listing corpus has no lots for it to be wrong about.
+    if (!hasCorpus(i.surface, "listing")) return na("availability");
     const listings = groundedListings(i);
     if (!listings.length) return na("availability");
     const a = i.draft.answer;
@@ -375,6 +385,150 @@ function groundedListings(i: GuardInput) {
   return resolve(i.facts.map((f) => f.listingId).filter((x): x is string => Boolean(x)));
 }
 
+
+// ── 7. community rules ────────────────────────────────────────────────────────
+//
+// The rules of the ROOM, which are not our rules.
+//
+// Everything above this line checks a draft against things WE know: our
+// catalog, our policy corpus, our never-say list. A subreddit, a Discord and a
+// Twitch channel each impose their own, they differ per room, and the penalty
+// for breaking one is not a bad reply — it is the account being banned and the
+// operator losing the room. r/mechmarket rule 3 is "no vendor self-promotion
+// outside the weekly thread", and a perfectly grounded, perfectly polite reply
+// that links a store is exactly what gets removed.
+//
+// A community fact is therefore a CONSTRAINT, never an answer: it is the one
+// corpus the composer must never cite as grounding, and the one a guard reads
+// as a prohibition.
+//
+// The matching is deliberately literal. A rule can be enforced two ways, and
+// both are things a human wrote down rather than things a model inferred:
+//
+//   * a QUOTED phrase in the rule text is matched verbatim in the draft — the
+//     escape hatch for a rule that only a substring can express ("no 'DM me'");
+//   * otherwise the clause after a prohibition marker ("no …", "do not …")
+//     supplies its head terms, and all of them must appear in one sentence of
+//     the draft.
+//
+// Erring toward blocking is correct HERE and nowhere else in this file. A false
+// alarm costs the operator a draft they send by hand; a miss costs them the
+// room. That asymmetry does not hold for the price guard, which is why this
+// reasoning is written here rather than assumed everywhere.
+
+/** Words that end a prohibition's subject and start its circumstances. A rule's
+ *  teeth are in "no vendor self-promotion", not in "outside the weekly thread". */
+const CLAUSE_END = new Set([
+  "outside", "inside", "unless", "except", "without", "before", "after", "during",
+  "while", "when", "if", "in", "on", "at", "to", "for", "from", "of", "than", "but",
+]);
+
+const PROHIBITION =
+  /\b(?:no|never|do not|don'?t|avoid|not allowed|prohibited|banned|forbidden|must not|may not|cannot|can'?t)\b([^.;!?\n]*)/gi;
+
+/** What a rule forbids, as things that can be looked for in a draft. */
+export function forbiddenBy(ruleText: string): { literal: string[]; phrases: string[][] } {
+  const literal = [...ruleText.matchAll(/["“']([^"”']{2,60})["”']/g)].map((m) => m[1]!.trim().toLowerCase());
+  const phrases: string[][] = [];
+  for (const m of ruleText.matchAll(PROHIBITION)) {
+    const head: string[] = [];
+    for (const raw of (m[1] || "").toLowerCase().match(/[a-z0-9]+/g) || []) {
+      if (CLAUSE_END.has(raw)) break;
+      const t = fold(raw);
+      if (t.length > 1 && !head.includes(t)) head.push(t);
+      if (head.length === 4) break;
+    }
+    if (head.length) phrases.push(head);
+  }
+  return { literal, phrases };
+}
+
+export const communityRuleGuard: Guard = {
+  name: "community_rule",
+  run(i: GuardInput): GuardResult {
+    // eBay Live has no per-room rule corpus to retrieve, so this is n/a there
+    // and the reference surface behaves exactly as it did.
+    if (!i.surface?.communityRules) return na("community_rule");
+    const rules = (i.community ?? []).filter((f) => f.corpus === "community");
+    if (!rules.length) return na("community_rule");
+
+    const answer = i.draft.answer;
+    const lower = answer.toLowerCase();
+    const bySentence = sentences(answer).map((s) => new Set(terms(s)));
+
+    for (const rule of rules) {
+      const { literal, phrases } = forbiddenBy(rule.text);
+      const hitLiteral = literal.find((p) => lower.includes(p));
+      const hitPhrase = hitLiteral
+        ? null
+        : phrases.find((head) => bySentence.some((st) => head.every((t) => st.has(t))));
+      if (!hitLiteral && !hitPhrase) continue;
+      const found = hitLiteral ?? hitPhrase!.join(" ");
+      // The reason names the rule and cites the fact, because the operator's
+      // next question is always "says who" and the console has to be able to
+      // answer it without a second lookup.
+      return fail(
+        "community_rule", "block",
+        `${rule.label}: ${rule.text.trim()} (${rule.factId}) — the draft is about "${found}".`,
+        { expected: rule.factId, found },
+      );
+    }
+
+    return allow("community_rule");
+  },
+};
+
+// ── 8. sponsor claims ─────────────────────────────────────────────────────────
+//
+// A sponsored segment is the one place where saying something true but
+// unapproved is still a problem. The obligations run both ways — there are
+// claims the segment MUST make and claims it must NOT — and they are written
+// down by someone who is not in the room, in a document the copilot either
+// cites or has no business paraphrasing.
+//
+// So: when a sponsor corpus is in scope and the draft talks about the sponsored
+// thing, the claim has to cite a sponsor fact. Not "a fact" — the grounding
+// guard already checks that, and it would happily accept a product fact or the
+// host's own speech, which is exactly the improvisation a sponsor contract is
+// written to prevent.
+
+export const sponsorGuard: Guard = {
+  name: "sponsor",
+  run(i: GuardInput): GuardResult {
+    const sponsorFacts = i.facts.filter((f) => f.corpus === "sponsor");
+    if (!sponsorFacts.length) return na("sponsor");
+
+    // What the sponsorship is ABOUT: the distinctive words of each sponsor
+    // fact's label, which is where the product's name lives ("Sponsor ·
+    // Keychron Q1"). Generic corpus words are not subjects.
+    const subjects = new Map<string, string>();
+    for (const f of sponsorFacts) {
+      for (const t of terms(f.label)) {
+        if (t === "sponsor" || t === "sponsored" || t.length < 3) continue;
+        if (!subjects.has(t)) subjects.set(t, f.label);
+      }
+    }
+    if (!subjects.size) return na("sponsor");
+
+    const mentioned = new Set(terms(i.draft.answer));
+    const subject = [...subjects.keys()].find((t) => mentioned.has(t));
+    if (!subject) return allow("sponsor");
+
+    const cited = i.draft.claims.some((c) => i.factById.get(c.factId)?.corpus === "sponsor");
+    if (cited) return allow("sponsor");
+
+    return fail(
+      "sponsor", "block",
+      `Reply talks about the sponsored ${subjects.get(subject)} without citing an approved sponsor fact.`,
+      {
+        expected: sponsorFacts.map((f) => f.factId).join(" or "),
+        found: i.draft.claims.length ? i.draft.claims.map((c) => c.factId).join(", ") : "no citation",
+      },
+    );
+  },
+};
+
 export const GUARDS: Guard[] = [
   priceGuard, availabilityGuard, policyGuard, claimGroundingGuard, toneGuard, piiGuard,
+  communityRuleGuard, sponsorGuard,
 ];

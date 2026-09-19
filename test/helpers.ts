@@ -83,6 +83,7 @@ export const PINNED = "lst_aj1_chi_10";
 import type { Claim, Verdict, GuardName } from "../src/domain/types.js";
 import type { GuardInput } from "../src/guardrails/types.js";
 import { runChain, type ChainResult } from "../src/guardrails/chain.js";
+import { capabilitiesOf } from "../src/surfaces/types.js";
 
 /** Build the exact input the guard chain sees in production: real retrieval for
  *  the question, real CURRENT listing state, and a supplied draft. Nothing is
@@ -110,6 +111,10 @@ export async function guardInput(
     currentListings: new Map(listings.map((l) => [l.id, l])),
     slots: res.slots,
     policies,
+    // The rig builds eBay Live's input, because eBay Live is what every
+    // existing case was written against. A case for another surface says so.
+    surface: capabilitiesOf(show.source),
+    community: res.facts.filter((f) => f.corpus === "community"),
   };
 }
 

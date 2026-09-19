@@ -65,4 +65,5 @@ const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x
 
 export const emptyGuardBlocks = (): Record<GuardName, number> => ({
   price: 0, availability: 0, policy: 0, claim_grounding: 0, tone: 0, pii: 0,
+  community_rule: 0, sponsor: 0,
 });

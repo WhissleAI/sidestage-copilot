@@ -20,7 +20,8 @@ import type { SellerGuardrailPolicy } from "../guardrails/policy.js";
 import { ShowRuntime } from "./runtime.js";
 import { describeFrames } from "./frameDescriber.js";
 import type { ShowReport } from "./sessionRecord.js";
-import { parseEventId } from "../ingest/ebaylive/discovery.js";
+import { resolve as resolveSurface } from "../surfaces/registry.js";
+import type { SurfaceId } from "../surfaces/types.js";
 
 export const DEMO_SHOW_ID = "show_ep42";
 
@@ -33,7 +34,7 @@ export interface ShowSummary {
   catalogId: string | null;
   title: string;
   sellerHandle: string;
-  source: "simulated" | "ebaylive";
+  source: SurfaceId;
   externalId: string | null;
   readOnly: boolean;
   /** Where this show's approved writes actually land. Never inferred by a
@@ -106,30 +107,42 @@ export class ShowRegistry {
   }
 
   /**
-   * Attach to a real eBay Live show. Accepts an event id or any show URL.
-   * The show is READ-ONLY: we hold no seller credentials for someone else's
-   * stream, so every write action is refused at preflight (docs/TDD.md §8).
+   * Attach to a conversation. Accepts anything a registered surface recognises:
+   * an eBay Live event id or show URL today, a channel or a thread once their
+   * adapters land (docs/SURFACES.md).
+   *
+   * A show we do not own is READ-ONLY: we hold no seller credentials for
+   * someone else's stream, so every write action is refused at preflight
+   * (docs/TDD.md §8).
    */
   /** Attaches in flight, so two callers for one show share one runtime
    *  instead of the second getting a half-built one out of the map. */
   private attaching = new Map<string, Promise<ShowRuntime>>();
 
-  async attachEbayLive(
+  async attach(
     input: string,
     meta: { title?: string; host?: string; ownerAccountId?: string | null; readOnly?: boolean } = {},
   ): Promise<ShowRuntime> {
-    const eventId = parseEventId(input);
-    if (!eventId) throw new Error(`could not read an eBay Live event id out of "${input}"`);
+    const resolved = resolveSurface(input);
+    // Worded for eBay Live on purpose, and not widened yet: it is the only
+    // surface an operator can paste a link for in this build, so a message
+    // offering alternatives would be offering things that do not exist.
+    if (!resolved) throw new Error(`could not read an eBay Live event id out of "${input}"`);
+    const { adapter, target } = resolved;
+    const externalId = target.externalId;
 
     // One event can be attached more than once over its life; each attach is
     // its own session with its own report. A live runtime for the event is
     // returned as-is; a finished session that already has a report is left
     // alone and the new one takes the next id. Re-attaching used to reuse the
     // row, reset its clock and overwrite the report.
-    const live = [...this.runtimes.values()].find((r) => r.externalId === eventId);
+    const live = [...this.runtimes.values()].find((r) => r.externalId === externalId);
     if (live) return live;
-    const base = `ebay_${eventId}`;
-    const showId = await this.nextSessionId(base, eventId);
+    // `ebay_` is history, not a convention: every eBay Live show id in
+    // production carries it, and `nextSessionId` matches sessions by it. A
+    // second surface gets its own prefix rather than renaming those rows.
+    const base = adapter.id === "ebaylive" ? `ebay_${externalId}` : `${adapter.id}_${externalId}`;
+    const showId = await this.nextSessionId(base, externalId);
     const inFlight = this.attaching.get(showId);
     if (inFlight) return inFlight;
 
@@ -140,10 +153,10 @@ export class ShowRegistry {
     const run = (async () => {
       const rt = new ShowRuntime({
         showId,
-        title: meta.title || `eBay Live ${eventId}`,
-        sellerHandle: meta.host || "eBay Live seller",
-        source: "ebaylive",
-        externalId: eventId,
+        title: meta.title || target.title || `${adapter.label} ${externalId}`,
+        sellerHandle: meta.host || target.handle || "eBay Live seller",
+        source: adapter.id,
+        externalId,
         // Read-only unless the caller proved the show is theirs (routes match
         // the connected eBay username to the show's seller handle).
         readOnly: meta.readOnly ?? true,
@@ -174,6 +187,20 @@ export class ShowRegistry {
     })().finally(() => this.attaching.delete(showId));
     this.attaching.set(showId, run);
     return run;
+  }
+
+  /**
+   * The name every caller of this has used since before surfaces existed.
+   *
+   * Kept as an alias rather than renamed at the call sites: the signature is
+   * the contract the attach route, the resume path and the console all hold,
+   * and a rename buys nothing an alias does not.
+   */
+  async attachEbayLive(
+    input: string,
+    meta: { title?: string; host?: string; ownerAccountId?: string | null; readOnly?: boolean } = {},
+  ): Promise<ShowRuntime> {
+    return this.attach(input, meta);
   }
 
   async detach(showId: string): Promise<ShowReport | null> {
