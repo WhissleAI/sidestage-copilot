@@ -37,7 +37,7 @@ import type { Persona } from "../persona/store.js";
 import type { Fact } from "../retrieval/facts.js";
 import { spendWindow } from "../llm/billing.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
-import type { SurfaceConnection, SurfaceId } from "../surfaces/types.js";
+import type { SurfaceConnection, SurfaceId, SurfaceTarget } from "../surfaces/types.js";
 import { get as surfaceAdapter } from "../surfaces/registry.js";
 import { SimulatedShowSource, ScriptedHostAudio, type ChatSource } from "../ingest/sources.js";
 
@@ -51,6 +51,17 @@ export interface ShowRuntimeOpts {
   sellerHandle: string;
   source: SurfaceId;
   externalId?: string | null;
+  /**
+   * What this session is watching, as its adapter parsed it.
+   *
+   * `externalId` is one field of it and was, for a long time, the only one that
+   * survived attach — which is why a Reddit thread link used to open as a watch
+   * on a subreddit named `t3_1abc2d`. The whole target is carried now, handed
+   * back to `adapter.open` unchanged, and persisted on the show row so a
+   * restart reopens what the operator actually pasted rather than a string that
+   * happens to be in it (migration 024).
+   */
+  target?: SurfaceTarget | null;
   readOnly?: boolean;
   /** The account that attached this show. Every read and write of the show
    *  is scoped to it; a show with no owner is visible to nobody. */
@@ -332,15 +343,33 @@ export class ShowRuntime {
 
     await this.refreshIndex();
 
+    // What this session is watching, written down.
+    //
+    // A target the caller parsed is the truth and replaces whatever is there;
+    // a runtime built without one (a resume, a replay) reads back the one the
+    // attach stored. Without this, everything an async surface knows that
+    // `external_id` cannot carry — which thread, whose profile, which room's
+    // rules — survives only until the process restarts.
+    if (this.o.target && !this.o.replay) {
+      await this.db
+        .query("UPDATE shows SET surface_target = $2::jsonb WHERE id = $1", [
+          this.showId,
+          JSON.stringify(this.o.target),
+        ])
+        .catch((e) => console.warn(`  ${this.showId}: target not stored — ${(e as Error).message}`));
+    }
+
     // A show that was writing to eBay before a restart must not quietly come
     // back writing to a mock — that is the same action reported as done with a
     // different thing actually happening.
-    const stored = (
-      await this.db.query<{ write_target: string }>(
-        "SELECT write_target FROM shows WHERE id = $1",
+    const row = (
+      await this.db.query<{ write_target: string; surface_target: SurfaceTarget | null }>(
+        "SELECT write_target, surface_target FROM shows WHERE id = $1",
         [this.showId],
       )
-    ).rows[0]?.write_target;
+    ).rows[0];
+    if (!this.o.target && row?.surface_target?.externalId) this.storedTarget = row.surface_target;
+    const stored = row?.write_target;
     if (stored === "ebay") {
       await this.setWriteTarget("ebay").catch((e) => {
         console.warn(`  ${this.showId}: staying on the mock marketplace — ${(e as Error).message}`);
@@ -453,6 +482,24 @@ export class ShowRuntime {
     return this.o.externalId ?? null;
   }
 
+  /** The target as it was stored on the show row, read in `init()`. Only ever
+   *  used when this runtime was built without one — a resume, or a replay. */
+  private storedTarget: SurfaceTarget | null = null;
+
+  /**
+   * What this session is watching, whole.
+   *
+   * In order: the target the caller parsed, then the one persisted on the show
+   * row, then the bare `{ externalId }` that is all a pre-024 row can say. The
+   * last of those is exactly what every surface used to be handed, and it is
+   * still the right answer for eBay Live, where the event id IS the target.
+   */
+  get target(): SurfaceTarget | null {
+    if (this.o.target) return this.o.target;
+    if (this.storedTarget) return this.storedTarget;
+    return this.o.externalId ? { externalId: this.o.externalId } : null;
+  }
+
   get agentId(): string {
     return this.llm.agentId;
   }
@@ -503,8 +550,9 @@ export class ShowRuntime {
     this.started = true;
     this.showContext.start();
 
-    if (this.o.source !== "simulated" && this.o.externalId) {
-      await this.openSurface(this.o.source, this.o.externalId);
+    const target = this.target;
+    if (this.o.source !== "simulated" && target) {
+      await this.openSurface(this.o.source, target);
     } else if (config.simulate) {
       this.simSource = new SimulatedShowSource();
       this.simSource.onMessage((m) => this.pipeline.ingest(m));
@@ -522,13 +570,21 @@ export class ShowRuntime {
    * under the name every surface answers to (src/surfaces/types.ts). The
    * adapter does the renaming; the watcher itself is untouched, which is what
    * keeps the reference surface behaving exactly as it did.
+   *
+   * The WHOLE target goes back to the adapter. This used to rebuild one from
+   * the external id — `{ externalId: eventId }` — which was lossless while a
+   * target was only ever an eBay Live event id and silently destructive the
+   * moment it was not: `watchFor` fell through to its subreddit branch, and a
+   * thread link became a watch on `r/t3_1abc2d`, a room that 404s on the first
+   * poll and ends the session.
    */
-  private async openSurface(surface: SurfaceId, eventId: string): Promise<void> {
+  private async openSurface(surface: SurfaceId, target: SurfaceTarget): Promise<void> {
     const emit = (event: string, data: unknown) => this.o.events.emit(this.showId, event, data);
     const adapter = surfaceAdapter(surface);
     if (!adapter) throw new Error(`no adapter is registered for surface "${surface}"`);
+    const eventId = target.externalId;
 
-    this.watcher = await adapter.open({ externalId: eventId }, {
+    this.watcher = await adapter.open(target, {
       onStatus: (s) => emit("source", { source: surface, eventId, ...s }),
 
       onTitle: (title) => {

@@ -165,6 +165,12 @@ export class ShowRegistry {
         sellerHandle: meta.host || target.handle || "eBay Live seller",
         source: adapter.id,
         externalId,
+        // The WHOLE target, not the one string of it that an eBay Live event
+        // happens to be. Everything an async surface knows — which thread,
+        // whose profile, which room's rules are in force — is in `meta`, and
+        // this layer used to drop it on the floor between `parseTarget` and
+        // `adapter.open`.
+        target,
         // Read-only unless the caller proved the show is theirs (routes match
         // the connected eBay username to the show's seller handle).
         readOnly: meta.readOnly ?? true,
