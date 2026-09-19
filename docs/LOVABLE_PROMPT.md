@@ -4,6 +4,21 @@ Paste everything below the line into Lovable as a single prompt. It is written s
 generated app runs standalone on mock data, and then switches to the real backend by
 changing two env vars — no refactor.
 
+> **This is a build brief, not a description of the shipped console.** It records what was
+> asked for; the console diverged where building it taught us something. Read it as history.
+> Checked against the running app on 2026-09-19, the divergences that matter are:
+>
+> - **Research is `⌘J`, not `⌘K`.** `⌘K` became the shell's command bar — navigation, actions
+>   and finding a show — and research moved off it. Both this document's keymap table and its
+>   Research section still say `⌘K`.
+> - **Eight guards ship, not six** (`GUARDS`, `src/guardrails/guards.ts`); `community_rule` and
+>   `sponsor` are surface-conditional and render `n/a` where the surface has nothing to check.
+> - A "sent" reply is **not delivered to any platform**. `repaired`, `sent` and the rest of the
+>   payload shapes below are still accurate; the verb is not.
+>
+> The backend contract this brief specifies is described for real in
+> [`SURFACES.md`](SURFACES.md), [`GUARDRAILS.md`](GUARDRAILS.md) and the README.
+
 ---
 
 # SideStage — Live Selling Copilot (Operator Console)

@@ -77,7 +77,7 @@ have told them.
 |---|---|---|
 | Twitch | `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`, `TWITCH_BOT_REFRESH_TOKEN` | adapter and tests ship; `open()` 409s naming the variable |
 | Reddit | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `REDDIT_USER_AGENT` | same |
-| YouTube Live | `YOUTUBE_API_KEY` (+ an OAuth client for posting) | same |
+| YouTube Live | `YOUTUBE_API_KEY` (+ an OAuth client for posting) | **no adapter in this build.** There is no `src/surfaces/youtubelive/` and `registry.ts` registers seven adapters without it, so there is nothing for these variables to configure. The row is here because `SURFACE_CAPABILITIES` carries a capability entry for it — see the note at the end of this document |
 | Whatnot | none — real Chrome via `openContext`, reusing `EBAY_DISCOVERY_PROXY` | works, subject to Cloudflare; a challenge is reported by name |
 | TikTok Live | `TIKTOK_LIVE_ENABLED` — a person deciding to run it, not a credential | registered and resolvable; `open()` refuses, naming the switch |
 
@@ -328,8 +328,10 @@ list below is why it was not attempted alongside the drafts queue:
    mints a per-stream agent, detach writes a `show_report`, and the agent GC
    retires agents for sessions that finished. A standing watch never finishes:
    it would hold an agent forever against a per-workspace cap, and the "After"
-   an async surface is supposed to leave is a weekly digest, not a report per
-   subreddit.
+   an async surface wants is a periodic digest rather than a report per
+   subreddit. **No digest exists.** Nothing builds one, nothing is scheduled to,
+   and `afterPhrase` deliberately says "a record of what you sent" instead
+   (`src/surfaces/readiness.ts`). It is a wanted shape, not a feature.
 3. **Capacity.** `MAX_WATCHED_SHOWS` (6) is shared with live sessions. Six
    subreddits would fill the registry and leave an operator unable to attach the
    show they are actually hosting.
@@ -378,13 +380,13 @@ deliver nothing — there is no post path on any draft-only surface, and adding
 one to Reddit would have to get past the `delivery` constant, the missing
 `post_reply` in the action list, and preflight.
 
-**A room's rules have two effects, not three.** `applied` and `blocked`. A
-third — "the rule an earlier draft tripped and this one clears" — is not
-reported, because nothing in the system knows it. A proposal carries one guard
-row: the one the draft that reached the seller earned. The repair pass rewrites
-the draft and re-runs the chain without keeping the pre-repair result, so a rule
-that held the first attempt leaves nothing behind to report. The server does not
-report a field it can never set.
+**A room's rules have two effects today, not three.** `applied` and `blocked`.
+The third — "the rule an earlier draft tripped and this one clears" — needs a
+repaired draft to exist. `communityRuleGuard` only ever returns `allow`, `block`
+or `n/a`: it never asks for a revision, so no draft is ever repaired *because of*
+a room rule, and the server does not report a field it cannot set. (A repaired
+draft can exist for other reasons — a guard returning `revise` earns one bounded
+repair pass — but never from this guard.)
 
 ## Posting is off until a human turns it on
 

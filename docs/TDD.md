@@ -2,7 +2,11 @@
 
 Every section states what was chosen, what was rejected, and the constraint that forced it.
 Where the implementation diverges from this document it says so inline, marked **Divergence**.
-Last diffed against the code on 2026-09-15.
+Last diffed against the code on 2026-09-19 for the guard chain (§4), the action kinds (§6)
+and delivery (§8). Everything else was last diffed 2026-09-15 and may lag. This document
+predates the surface abstraction that shipped on 2026-09-18 and does not describe it at all:
+[`SURFACES.md`](SURFACES.md) is the reference for adapters, capabilities and per-surface
+behaviour.
 
 ```
  chat source ─┐                       ┌── retrieve ──┐
@@ -249,9 +253,9 @@ What Layer A **cannot** do: know that the pinned lot's price changed four second
 
 ### Layer B — in this app (detective, state-aware, deterministic)
 
-Six guards in `src/guardrails/guards.ts`, run against **current** catalog state. All of them
-run, always — even after one has blocked — so the operator sees the complete picture and the
-eval can measure each guard's precision independently.
+Eight guards in `src/guardrails/guards.ts` (the `GUARDS` array), run against **current**
+catalog state. All of them run, always — even after one has blocked — so the operator sees the
+complete picture and the eval can measure each guard's precision independently.
 
 | Guard | What it decides |
 |---|---|
@@ -261,6 +265,11 @@ eval can measure each guard's precision independently.
 | `claim_grounding` | Every cited `factId` was actually in evidence (a fabricated citation **blocks**), and each claim is lexically connected to the fact it cites (weak support **revises**). |
 | `tone` | Length, markdown, emoji, hype, profanity — from the seller's voice guide. |
 | `pii` | No email, phone, card-like number or street address into public chat. |
+| `community_rule` | *Surface-conditional.* A room's own rules. `n/a` unless the surface declares `communityRules` and a `community` fact was retrieved — which is nowhere today, so it returns `n/a` on every live surface. |
+| `sponsor` | *Surface-conditional.* `n/a` unless a `sponsor` fact is in the grounding set; where one is, a draft about the sponsored thing must cite a sponsor fact, not merely a fact. |
+
+The last two are why a proposal card carries six pills on eBay Live and can carry eight
+elsewhere: `n/a` is the guard saying it had nothing to check, not that it did not run.
 
 **The asymmetry between the layers is the interesting part.** Rules marked `unlessCertified`
 ("100% authentic") are deliberately **not** pushed to the agent: the gateway's guard is a pure
@@ -361,8 +370,14 @@ because a blocked verdict is a decision about one moment's state.
 A listing edit is a write to a system we do not own, so `MarketplaceAdapter`
 (`src/actions/marketplace/port.ts`) is an explicit two-phase protocol, not `updateListing()`.
 
-Five action kinds: `markdown_price`, `adjust_stock`, `end_listing`, `swap_pinned`,
-`push_listing`. `src/actions/executor.ts`, ordered so every failure has a defined outcome:
+`ActionKind` (`src/domain/types.ts`) declares **thirteen** kinds across three families: five
+live-commerce writes (`push_listing`, `swap_pinned`, `markdown_price`, `adjust_stock`,
+`end_listing`), five creator-surface actions (`create_clip`, `mark_highlight`, `run_poll`,
+`shoutout`, `pin_message`) and three async ones (`post_reply`, `send_dm`, `flag_for_human`).
+
+This section is about the first five — the ones that write to a marketplace and therefore need
+the two-phase protocol. `src/actions/executor.ts`, ordered so every failure has a defined
+outcome:
 
 1. **Idempotency** — a key of `(kind, listingId, version, params)`, unique per show. A second
    Approve returns the first result; a double-tap cannot mark down twice. `propose()` returns
@@ -505,9 +520,16 @@ milliseconds**, leaving the entire LLM budget for the reply that quotes it.
 
 ## 8. Two boundaries that are deliberate, not unfinished
 
-**Nothing posts back to a public chat.** eBay Live exposes no chat-post API, the watcher is a
-read of the player DOM with no send path, and `TwitchChatSource` has none by construction. A
-"sent" reply is recorded and audited; the seller pastes it into the show's chat. Auto-posting
+**Nothing posts back to a public chat — on any surface.** `Pipeline.send()` sets
+`status: "sent"`, appends a `reply_sent` audit entry and returns; there is no platform call on
+any path, and no surface has one. eBay Live exposes no chat-post API, the watcher is a read of
+the player DOM with no send path, and `TwitchChatSource` has none by construction. "Sent" means
+the operator approved it and the system recorded that, and nothing more; the seller pastes it
+into the chat themselves.
+
+Note that `SurfaceCapabilities.delivery` (`src/surfaces/types.ts`) reads `api` on eBay Live,
+Twitch and YouTube Live, which the field's own comment glosses as "we can send". No send path
+backs any of the three, so that flag currently describes an intention rather than the code. Auto-posting
 into a chat you do not own is outbound content published to strangers on the seller's behalf,
 it trips platform spam detection, and it is against the platforms' terms. On a channel the
 seller owns and authenticates, it would be a legitimate copilot — and that path would

@@ -5,6 +5,11 @@ against real eBay Live shows rather than by re-reading the code. Every finding
 carries the evidence that produced it; where a number appears, it was measured on
 a running instance, not estimated.
 
+**A snapshot, taken 2026-09-15, and not maintained since.** Findings carry their
+own dates and fix stamps; the state of the system has moved on — the surface
+layer shipped on 2026-09-18 and is absent from this document entirely. Read it
+for the argument, not for the current state.
+
 Four lenses, deliberately adversarial:
 
 | Lens | Asks |
@@ -24,7 +29,7 @@ Severity: **P0** ships broken · **P1** ships embarrassing · **P2** ships imper
 |---|---|---|
 | Ingests a live chat stream | **Yes** | Real eBay Live chat, deduped by eBay's per-comment UUID |
 | Grounds replies in catalog, listing, policy data | **Yes** | Structured-first retrieval, hybrid R@1 0.842 / MRR 0.898 |
-| Enforces price, availability, policy, tone guardrails before send | **Yes** | Six deterministic guards, 1.00 precision and recall over 46 labelled cases |
+| Enforces price, availability, policy, tone guardrails before send | **Yes** | Eight deterministic guards — the six drawn on every card plus `community_rule` and `sponsor`, which are surface-conditional. 1.00 precision and recall over 46 labelled cases, re-measured 2026-09-19; the two conditional guards have no labelled cases |
 | Listing/inventory actions: push, swap, markdown, stock | **Partial** | All five kinds implemented with 2PC + rollback, undo window and compensation; a real eBay Sell Inventory adapter sits behind the same port and is armed per show — but a stream attached from a link stays read-only, so **no action has committed through it on a real show** — see F-07 |
 | On-demand product research | **Yes** (since the F-08 fix) | Single-digit ms over cached comps; called on the reply path for `comparison` and market-price questions and reachable from ⌘J. Measured 2026-09-15 on the hosted stack: 0.22–0.28 s |
 | Sub-2s reply latency | **Partial** | p50 982–1220 ms; p95 1950–3735 ms, 4–13% breaches on the bench. Streaming now shortens time-to-first-token, not time-to-send. 2026-09-15 hosted: proposals 0.5–1.5 s, a dry run cold at 4.3 s |

@@ -9,7 +9,9 @@
 // Resolution is first-match over registration order, and eBay Live is
 // registered first on purpose: it is the reference surface and the one with the
 // tightest pattern (a 16-character id, or its own URL path), so nothing else
-// can steal a link that belongs to it.
+// can steal a link that belongs to it. Seven adapters are registered, in this
+// order: ebaylive · simulated · dm · reddit · whatnot · tiktoklive · twitch.
+// `youtubelive` has a capabilities row and no adapter, so it is absent here.
 
 import type { SurfaceAdapter, SurfaceId, SurfaceTarget } from "./types.js";
 import { ebayLiveAdapter } from "./ebaylive/adapter.js";
@@ -72,24 +74,30 @@ register(simulatedAdapter);
 // better answer than "we do not recognise that".
 register(dmAdapter);
 
-// Reddit last of them all: its patterns are the widest (a bare `r/x` handle,
-// every Reddit URL form), so it is the one most able to claim a link that
-// belongs to somebody else. Nothing it accepts overlaps with an eBay event id,
-// the scripted show or an inbox prefix, and registering it behind them keeps
-// that true even if its patterns loosen later.
+// Reddit behind the exact-pattern adapters: its patterns are the widest (a bare
+// `r/x` handle, every Reddit URL form), so it is the one most able to claim a
+// link that belongs to somebody else. Nothing it accepts overlaps with an eBay
+// event id, the scripted show or an inbox prefix, and registering it behind
+// them keeps that true even if its patterns loosen later. It is not last —
+// three adapters follow it, none of whose patterns it can reach.
 register(redditAdapter);
 register(whatnotAdapter);
 register(tiktokLiveAdapter);
-// The built-ins, registered at import. All three are pure-local modules — the
-// eBay adapter defers its Playwright work to the watcher it wraps, and Twitch's
-// opens no socket until `open()` — so importing the registry costs nothing a
-// caller did not already pay.
+// Twitch is genuinely LAST, and for the same reason one rung sharper: it is the
+// only adapter that accepts a bare word. `parseTarget("demo")` is a valid Twitch
+// login and it is also how an operator asks for the scripted show, so every
+// narrower claim has to be registered ahead of it. Like the rest it is a
+// pure-local module — it opens no socket until `open()`.
 //
-// Order is the resolution order, and Twitch is LAST because it is the only
-// adapter that accepts a bare word. `parseTarget("demo")` is a valid Twitch
-// login and it is also how an operator asks for the scripted show; putting
-// Twitch after the two adapters with exact patterns is what keeps the narrower
-// claim winning.
+// KNOWN DEFECT, not a design: the two `register` calls below re-register
+// adapters already registered at the top of this block. `Map.set` on an existing
+// key overwrites the value and leaves the insertion position alone, so the
+// resolution order really is
+//   ebaylive · simulated · dm · reddit · whatnot · tiktoklive · twitch
+// and the duplicates change nothing. They are a merge artefact and the comment
+// that arrived with them described a three-adapter registry that no longer
+// exists. Left alone here because this file is documentation-only work; the
+// calls should go.
 register(ebayLiveAdapter);
 register(simulatedAdapter);
 register(twitchAdapter);

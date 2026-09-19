@@ -20,7 +20,7 @@ Two repositories:
 
 - Node 20+
 - **Postgres 14+** running locally. `createdb sidestage` once; the server
-  migrates on boot (`src/db/pg_migrations/`, 15 migrations, tracked in
+  migrates on boot (`src/db/pg_migrations/`, 23 migrations, tracked in
   `schema_migrations`). Override with `DATABASE_URL`. The test suite uses its own
   database (`TEST_DATABASE_URL`, default `sidestage_test`), created by `scripts/ensure-test-db.mjs`.
 
@@ -32,7 +32,7 @@ GMV and operator-load metrics.
 
 ## Guardrails
 
-**[`docs/GUARDRAILS.md`](docs/GUARDRAILS.md)** — what each of the six guards
+**[`docs/GUARDRAILS.md`](docs/GUARDRAILS.md)** — what each of the eight guards
 checks, what it deliberately lets through, the two-layer split with the Whissle
 agent, and the measured precision/recall. Read this to understand the pills on
 every proposal card.
@@ -153,7 +153,8 @@ grounded, guarded proposals.
 **Drive the core workflow:**
 
 1. Watch a proposal card appear. Read the **provenance chips** — each is a `factId` that was
-   actually retrieved — and the six **guardrail pills**.
+   actually retrieved — and the **guardrail pills**: six on eBay Live, plus
+   `community_rule` and `sponsor` on the surfaces that have something for them to check.
 2. Press `Enter` to send it, or `E` to edit it first. An edited draft is re-guarded at send
    against the facts it was grounded in and the listings as they stand now; a block refuses the
    send with the reason (HTTP 409).
@@ -217,7 +218,7 @@ This repository. Start here:
 |---|---|
 | `src/pipeline/pipeline.ts` | **the core loop** — admit → classify → cache → retrieve → compose (streamed) → guard → ladder; `send()` re-guards edits and refuses blocks |
 | `src/retrieval/` | structured-first grounding: `facts.ts` (addressable facts), `slots.ts` (slot resolution), `bm25.ts`, `retriever.ts` (RRF fusion) |
-| `src/guardrails/` | `policy.ts` (one configurable policy), `guards.ts` (the six deterministic guards), `chain.ts` |
+| `src/guardrails/` | `policy.ts` (one configurable policy), `guards.ts` (the eight deterministic guards), `chain.ts` |
 | `src/actions/` | `preflight.ts`, `executor.ts` (two-phase commit, undo window, rollback, compensation), `audit.ts` (hash chain), `proposer.ts`, `marketplace/` (`port.ts`, `mock.ts`, `ebay.ts`) |
 | `src/llm/` | `whissle.ts` (the agent client, JSON and streaming doors), `streamAgent.ts` (one agent per stream), `agentGc.ts` (retires finished shows' agents), `agentSpec.ts` + `seedAgent.ts` |
 | `src/autonomy/` | `ladder.ts` (the five-rung copilot-to-automation ladder), `promotion.ts` (criteria from the seller's own reports) |
@@ -228,6 +229,7 @@ This repository. Start here:
 | `src/ingest/ebay/` | the eBay Developer APIs — `client.ts` (Browse, Taxonomy, Marketplace Insights), `oauth.ts` (seller consent), `seal.ts` (tokens at rest), `deletion.ts` (account-deletion notices), `import.ts` |
 | `src/shows/` | `runtime.ts` (one isolated pipeline per show, write target), `registry.ts`, `sessionRecord.ts` (what a show leaves behind), `signals.ts`, `catalogImport.ts`, `prepareEvent.ts`, `conclusion.ts`, `prdMetrics.ts`, `analytics.ts` |
 | `src/sellers/following.ts` | followed sellers, and the poller that keeps the live grid warm |
+| `src/surfaces/` | the surface layer — `types.ts` (per-surface capabilities), `registry.ts` (what a pasted link is), `readiness.ts` (the Before/During/After phrases), `scrapeWatcher.ts` (one loop for every scraped room), `rooms.ts` (posting, off until a human turns it on), and one directory per adapter: `ebaylive/`, `whatnot/`, `tiktoklive/`, `twitch/`, `reddit/`, `dm/`, `simulated/`. `docs/SURFACES.md` is the reference |
 | `src/llm/kbSync.ts` | pushes a show's catalog into the Whissle agent's knowledge base |
 | `src/latency/` | span instrumentation and the version-keyed reply cache |
 
@@ -251,10 +253,11 @@ the submission. The path that exercises the core loop, in order:
    the badge says when the grid was last read). **Prepare agent** on one — the busiest is best —
    which builds the show's catalog and its own agent (about a minute), then **Monitor**, and the
    console opens on it. Preparing is mandatory: an attach without it answers 409. A show you do not own is monitored **read-only**: every buyer question
-   is classified, grounded, drafted and guarded, and a reply is sent to the record and the
-   audit chain rather than to eBay, which exposes no chat-post API either way.
+   is classified, grounded, drafted and guarded, and an approved reply goes to the record and
+   the audit chain — not to eBay, and not to any other surface: nothing in this system posts
+   to a platform (see limitation 8).
 2. In the **console**: J/K move the queue, Enter sends, E edits (an edited draft is re-guarded
-   at send), X dismisses; the pills on each card are the six guards; the inspector (I) shows
+   at send), X dismisses; the pills on each card are the guards that had something to check; the inspector (I) shows
    the facts a claim cites. ⌘J asks the research card a question about the lot on screen.
 3. **End session** builds the report: answered rate, time to answer, blocked replies with the
    guard that blocked them, the audit chain, and the timeline of what was on screen.
@@ -264,8 +267,10 @@ the submission. The path that exercises the core loop, in order:
 Locally, `DEMO_SHOW=1 npm run dev` runs the scripted show (deterministic, no eBay), and
 `npm run demo:stale-price` forces the mid-show markdown that `PriceGuard` must catch. The
 live reply path needs a Whissle workspace key (`WHISSLE_API_KEY`, `wsk_…`); `npm test` and
-`npm run eval` do not — they cover retrieval, all six guardrails, two-phase commit, rollback,
-idempotency, the audit chain, tenancy and the eBay adapter from fixtures.
+`npm run eval` do not — they cover retrieval, six of the eight guardrails (`community_rule` and
+`sponsor` have no labelled cases), two-phase commit, rollback, idempotency, the audit chain,
+tenancy and the eBay adapter from fixtures. Note that **`npm run eval` exits non-zero today**:
+see `docs/EVALS.md` §1.
 
 ## Accounts and tenancy
 
@@ -419,9 +424,13 @@ Stated plainly, because these are the things a reviewer would otherwise find.
 7. **A monitored show's lineup must be imported or prepared.** eBay Live renders only the lot on
    the block; the full list needs sign-in. Without a catalog the copilot honestly abstains on
    everything except the current lot.
-8. **Chat replies are drafted, never delivered.** eBay Live exposes no chat-post API and the
-   scrape has no send path by construction, so a "sent" reply is recorded and audited and the
-   seller pastes it into the show's chat themselves. See `docs/TDD.md` §8 for why that is a
+8. **Chat replies are drafted, never delivered — on any surface.** `Pipeline.send()` marks the
+   proposal `sent`, appends a `reply_sent` audit entry and returns; there is no platform call on
+   any path. eBay Live exposes no chat-post API and the scrape has no send path by construction;
+   the other surfaces simply have nothing wired. "Sent" means the operator approved it and the
+   system recorded that; the seller posts it themselves. `SurfaceCapabilities.delivery` reads
+   `api` on eBay Live, Twitch and YouTube Live, which is an intention with no code behind it.
+   See `docs/TDD.md` §8 for why that is a
    deliberate boundary rather than an unfinished feature.
 9. **Comparables prefer SOLD prices and fall back to asking — and production has only asking.**
    Marketplace Insights (completed sales, 90 days) is limited-release; the production keyset is
@@ -473,20 +482,20 @@ Stated plainly, because these are the things a reviewer would otherwise find.
     utterance, not "excited 41% of the time", and the head degrades on low-arousal states; both
     stay printed on the surface. Pace is estimated from word count over utterance timing when the
     gateway sends no `words_per_minute`, which it did not on 2026-09-15.
-19. **What the host says is evidence.** An utterance from the last two minutes that shares a
+17. **What the host says is evidence.** An utterance from the last two minutes that shares a
     content word or a number with the question becomes a citable `host:` fact beside the catalog's
     (`src/retrieval/hostFacts.ts`; "10men" and "ten men" are normalised to meet). It carries no
     listing price and no version, so the price guard keeps its own rules; the reply says "the host
     just said". Until 2026-09-15 "10men slides?" was deferred while the transcript held the answer.
-20. **Cost is per seller, on a shared key.** The backend holds one Whissle key, so the wallet is
+18. **Cost is per seller, on a shared key.** The backend holds one Whissle key, so the wallet is
     shared and its balance is not shown. A seller's Cost page sums their own shows: the wallet's
     movement while a show ran alone counts as that show's spend; a show that overlapped another is
     priced by its metered calls at the average cost per call learned from the shows that ran alone
     (`GET /api/cost`, `show_costs.account_id`). Every figure names its basis.
-17. **One Whissle agent per stream, and the workspace caps agents at fifty.** A show's agent is
+19. **One Whissle agent per stream, and the workspace caps agents at fifty.** A show's agent is
     retired a day after its report (`src/llm/agentGc.ts`, every six hours), a preparation nobody
     attached is dropped after two days, and hitting the cap triggers one retirement pass and one
     retry before the operator is told. Re-preparing a show retires the old agent. Fifty
     concurrent unfinished shows would still hit it.
-18. **CORS is wide open.** Correct for a console on another origin talking to a bearer-token
+20. **CORS is wide open.** Correct for a console on another origin talking to a bearer-token
     API; wrong the day cookies are involved.

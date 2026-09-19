@@ -160,18 +160,26 @@ export const redditAdapter: SurfaceAdapter = {
     requireCreds();
     const client = redditClient();
 
-    // The room's rules, fetched at attach rather than at draft time. They are
-    // the constraints every draft in this room is checked against, they change
-    // a few times a year, and a draft path that had to fetch them would either
-    // block on a network call or compose without them — and composing without
-    // them is the failure this surface exists to avoid.
+    // The room's rules, fetched at attach rather than at draft time. Fetching
+    // them here rather than on the draft path is right: they change a few times
+    // a year, and a draft path that had to fetch them would either block on a
+    // network call or compose without them.
+    //
+    // KNOWN DEFECT — the facts go nowhere. The only thing done with the result
+    // below is to count it into a status string. They are never handed to the
+    // retriever, so `r.facts` holds no `community` corpus, so `communityRuleGuard`
+    // takes its `!rules.length` branch and returns `n/a` on every draft. The
+    // guard is built and not yet fed; "the constraints every draft in this room
+    // is checked against" is what this will be, not what it is. Do not read the
+    // `n rules in force` detail line as a statement that anything is enforced.
     const subreddit = t.meta?.subreddit;
     if (subreddit) {
       rules().forSubreddit(subreddit).then(
         (facts) => ev.onStatus?.({ connected: true, detail: `r/${subreddit}: ${facts.length} rules in force` }),
         // A room whose rules we could not read is still a room worth watching.
         // The guard reports n/a, which is honestly "we had nothing to check
-        // against" rather than "we checked and found nothing wrong".
+        // against" rather than "we checked and found nothing wrong". Today it
+        // reports n/a on the success path too, for the reason above.
         (e: Error) => ev.onStatus?.({ connected: true, detail: `r/${subreddit}: rules unavailable — ${e.message}` }),
       );
     }

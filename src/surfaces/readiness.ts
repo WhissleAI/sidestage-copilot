@@ -110,6 +110,20 @@ const blanked = (env: NodeJS.ProcessEnv, name: string): string =>
  * Read off the declared capabilities rather than hard-coded per surface: a
  * surface that loses `delivery: "api"` must stop claiming it can send, in the
  * same edit, without anybody remembering this file.
+ *
+ * KNOWN DEFECT — this reads the capability TABLE, not the wiring, so it
+ * promises what a surface declares rather than what is plugged in. Two
+ * consequences today:
+ *   · No surface delivers anything. `Pipeline.send()` records and audits; there
+ *     is no platform call on any path. Every branch below that assumes
+ *     `delivery: "api"` means "we can send" is describing an intention.
+ *   · Twitch reads "answers and acts" because its capability row declares
+ *     `create_clip`, `run_poll` and the rest. `src/surfaces/twitch/actions.ts`
+ *     is imported by its test and by nothing in `src/`, so no executor reaches
+ *     it. The next surface will make the same claim the day its row lands and
+ *     before its executor does.
+ * Left as-is: correcting the phrase means deciding what it should read from,
+ * which is a behaviour change.
  */
 export function duringPhrase(caps: SurfaceCapabilities): string {
   if (caps.delivery === "draft-only") {
