@@ -2,6 +2,11 @@
 // consumes in `src/lib/types.ts` — the frontend copy is generated from this one.
 // Money is always integer CENTS; timestamps are always ISO-8601 strings.
 
+// Type-only, both ways: `surfaces/types.ts` names the ActionKind declared here.
+// The cycle is erased at compile time and there is no runtime import either
+// way, because neither file emits a value the other needs.
+import type { SurfaceId } from "../surfaces/types.js";
+
 export type AutonomyLevel =
   | "L0_OBSERVE" | "L1_SUGGEST" | "L2_ONE_TAP" | "L3_AUTO_REPLY" | "L4_AUTO_ACT";
 
@@ -21,7 +26,12 @@ export type ChatIntent =
  */
 export type SpeechAct = "query" | "command" | "inform" | "greeting" | "wish" | "other";
 
-export type GuardName = "price" | "availability" | "policy" | "claim_grounding" | "tone" | "pii";
+export type GuardName =
+  | "price" | "availability" | "policy" | "claim_grounding" | "tone" | "pii"
+  // Surface-specific checks. Both return n/a on a surface that does not use
+  // them, which is how every guard already behaves with nothing to check — so
+  // a live-commerce reply's guard list reads exactly as it did before.
+  | "community_rule" | "sponsor";
 export type Verdict = "allow" | "revise" | "block";
 
 export interface ShowState {
@@ -34,9 +44,10 @@ export interface ShowState {
   lotQueue: string[];
   autonomyLevel: AutonomyLevel;
   undoWindowS: number;
-  /** Where buyer chat comes from. */
-  source: "simulated" | "ebaylive";
-  /** The eBay Live event id, when source is "ebaylive". */
+  /** Which surface this conversation is on. Named `source` since the first
+   *  migration, when the only answers were the scripted show and eBay Live. */
+  source: SurfaceId;
+  /** The id within the surface: an eBay Live event, a Twitch channel, a thread. */
   externalId: string | null;
   /** A show we do not own: every write action is refused at preflight. */
   readOnly: boolean;
@@ -145,7 +156,12 @@ export interface ReplyProposal {
 }
 
 export type ActionKind =
-  | "push_listing" | "swap_pinned" | "markdown_price" | "adjust_stock" | "end_listing";
+  // live commerce (today)
+  | "push_listing" | "swap_pinned" | "markdown_price" | "adjust_stock" | "end_listing"
+  // creator surfaces
+  | "create_clip" | "mark_highlight" | "run_poll" | "shoutout" | "pin_message"
+  // async surfaces
+  | "post_reply" | "send_dm" | "flag_for_human";
 
 export interface PreflightCheck { name: string; ok: boolean; detail: string }
 

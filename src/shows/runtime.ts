@@ -35,7 +35,8 @@ import { meter } from "../llm/meter.js";
 import { policy, policyScope, type SellerGuardrailPolicy } from "../guardrails/policy.js";
 import { spendWindow } from "../llm/billing.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
-import { EbayLiveWatcher } from "../ingest/ebaylive/watcher.js";
+import type { SurfaceConnection, SurfaceId } from "../surfaces/types.js";
+import { get as surfaceAdapter } from "../surfaces/registry.js";
 import { SimulatedShowSource, ScriptedHostAudio, type ChatSource } from "../ingest/sources.js";
 
 export interface RuntimeEvents {
@@ -46,7 +47,7 @@ export interface ShowRuntimeOpts {
   showId: string;
   title: string;
   sellerHandle: string;
-  source: "simulated" | "ebaylive";
+  source: SurfaceId;
   externalId?: string | null;
   readOnly?: boolean;
   /** The account that attached this show. Every read and write of the show
@@ -108,7 +109,8 @@ export class ShowRuntime {
   /** The catalog currently loaded into this show. */
   catalogId: string | null = null;
 
-  private watcher: EbayLiveWatcher | null = null;
+  /** The open connection to whichever surface this show is on. */
+  private watcher: SurfaceConnection | null = null;
   private simSource: ChatSource | null = null;
   private hostAudio: ScriptedHostAudio | null = null;
   private started = false;
@@ -460,8 +462,8 @@ export class ShowRuntime {
     this.started = true;
     this.showContext.start();
 
-    if (this.o.source === "ebaylive" && this.o.externalId) {
-      await this.startEbayWatcher(this.o.externalId);
+    if (this.o.source !== "simulated" && this.o.externalId) {
+      await this.openSurface(this.o.source, this.o.externalId);
     } else if (config.simulate) {
       this.simSource = new SimulatedShowSource();
       this.simSource.onMessage((m) => this.pipeline.ingest(m));
@@ -472,12 +474,21 @@ export class ShowRuntime {
     }
   }
 
-  private async startEbayWatcher(eventId: string): Promise<void> {
+  /**
+   * Open the show's surface and wire its events into this runtime.
+   *
+   * Every callback below is the one the eBay Live watcher has always called,
+   * under the name every surface answers to (src/surfaces/types.ts). The
+   * adapter does the renaming; the watcher itself is untouched, which is what
+   * keeps the reference surface behaving exactly as it did.
+   */
+  private async openSurface(surface: SurfaceId, eventId: string): Promise<void> {
     const emit = (event: string, data: unknown) => this.o.events.emit(this.showId, event, data);
+    const adapter = surfaceAdapter(surface);
+    if (!adapter) throw new Error(`no adapter is registered for surface "${surface}"`);
 
-    this.watcher = new EbayLiveWatcher({
-      eventId,
-      onStatus: (s) => emit("source", { source: "ebaylive", eventId, ...s }),
+    this.watcher = await adapter.open({ externalId: eventId }, {
+      onStatus: (s) => emit("source", { source: surface, eventId, ...s }),
 
       onTitle: (title) => {
         // Attaching by id alone gives the show a placeholder name; the page knows
@@ -485,7 +496,7 @@ export class ShowRuntime {
         void this.repo.updateShow({ title }).then((next) => emit("show", next));
       },
 
-      onComment: (c) => {
+      onMessage: (c) => {
         // Straight into the same pipeline the simulated source feeds. eBay's own
         // per-comment UUID becomes the message id, so a re-attach cannot replay
         // a comment that was already answered.
@@ -494,11 +505,11 @@ export class ShowRuntime {
       },
 
       onEnded: (why) => {
-        emit("source", { source: "ebaylive", eventId, connected: false, detail: `ended — ${why}` });
+        emit("source", { source: surface, eventId, connected: false, detail: `ended — ${why}` });
         this.o.onEnded?.(this.showId, why);
       },
 
-      onLot: (lot) => {
+      onItem: (lot) => {
         if (!lot.title || !this.started) return;
         void (async () => {
         // The live lot becomes a versioned listing. When the price moves, the
@@ -507,9 +518,9 @@ export class ShowRuntime {
         // rather than a scripted markdown.
         const { listing, changed, created } = await this.repo.upsertObservedLot({
           title: lot.title,
-          priceCents: lot.priceCents,
-          soldOut: lot.soldOut,
-          highBidder: lot.highBidder,
+          priceCents: lot.priceCents ?? 0,
+          soldOut: lot.soldOut ?? false,
+          highBidder: (lot.meta?.highBidder as string | null) ?? null,
         });
 
         // eBay names lots "#007 - As seen on eBay LIVE", which tells a buyer's
@@ -518,7 +529,7 @@ export class ShowRuntime {
         // identity actually exists.
         if (created && needsIdentity(lot.title) && !this.named.has(listing.id)) {
           this.named.add(listing.id);
-          void this.nameLot(listing.id, lot);
+          void this.nameLot(listing.id, { title: lot.title, priceCents: lot.priceCents ?? 0 });
         }
         if (changed) {
           await this.refreshIndex();
@@ -549,8 +560,6 @@ export class ShowRuntime {
         void this.repo.updateShow({ viewers: n }).then((next) => emit("show", next));
       },
     });
-
-    await this.watcher.start();
   }
 
   async stop(): Promise<void> {
