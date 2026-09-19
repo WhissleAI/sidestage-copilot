@@ -6,7 +6,7 @@
 // the reason attached) or `block` (the reply never reaches the buyer without the
 // seller editing it).
 
-import type { GuardResult } from "../domain/types.js";
+import type { GuardName, GuardResult } from "../domain/types.js";
 import { extractMoneyCents, formatMoney } from "../domain/money.js";
 import { cosine, fold, ngramVector, terms } from "../retrieval/text.js";
 import { allow, fail, na, sentences, type Guard, type GuardInput } from "./types.js";
@@ -532,3 +532,23 @@ export const GUARDS: Guard[] = [
   priceGuard, availabilityGuard, policyGuard, claimGroundingGuard, toneGuard, piiGuard,
   communityRuleGuard, sponsorGuard,
 ];
+
+/**
+ * Guards whose subject is the MODEL's citation discipline, not the content of
+ * the reply.
+ *
+ * `claim_grounding` asks one question: did the composer cite a factId it was
+ * actually handed, and does the cited fact support the sentence? That question
+ * is meaningful about a machine-written draft and meaningless about a sentence
+ * the operator typed themselves — they were never given a fact list, never
+ * asked for a citation, and are asserting the sentence on their own authority.
+ * Running it on an operator's edit rejected the seller's own words for not
+ * citing an id nobody asked them to supply, which made editing a draft
+ * impossible for any edit longer than "yes".
+ *
+ * Nothing that protects the BUYER is in here. Price, availability, policy, PII,
+ * tone, community rules and sponsor obligations all still run on a human edit —
+ * a seller can quote a stale price or leak a phone number as easily as a model
+ * can. See `runChain`'s `authoredBy` option.
+ */
+export const MODEL_ONLY_GUARDS: ReadonlySet<GuardName> = new Set<GuardName>(["claim_grounding"]);

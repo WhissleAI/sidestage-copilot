@@ -34,12 +34,21 @@ All six run on every reply, even after one has blocked — so the operator sees 
 complete picture, and the eval can measure each guard's precision independently
 rather than only the first to fire.
 
-**And they run again at send.** A blocked proposal cannot be sent whatever the
-client asks — the console hides the button, but a keystroke or a curl is not the
-console — and the refusal comes back as HTTP 409 with the guard and reason. An
-edited draft is a new draft: `Pipeline.send()` re-runs all six against the facts
-the original was grounded in and the listings as they stand now, refuses a
-block, and records `verdictAtSend` and `guardsAtSend` in the audit entry.
+**And they run again at send.** A blocked proposal cannot be sent **as it
+stands**, whatever the client asks — the console hides the button, but a
+keystroke or a curl is not the console — and the refusal comes back as HTTP 409
+with the guard and reason.
+
+An **edited** draft is a new draft, judged on its own text. `Pipeline.send()`
+re-runs the chain against the facts the original was grounded in and the
+listings as they stand now; if the edit clears, it sends — including an edit
+that clears a block, which is what the held card's copy promises — and if it
+does not, the refusal names the guard. The re-guard runs as **human-authored**
+text: every check that protects the buyer or the room applies, and
+`claim_grounding` reports `n/a`. It audits whether the MODEL cited a fact id it
+was given, and the operator was never handed a fact list to cite from
+(`MODEL_ONLY_GUARDS`, `chain.ts`). The audit entry records `verdictAtSend`,
+`guardsAtSend` and, when an edit cleared a block, `clearedBlockByEdit`.
 
 **Whose settings.** Every guard reads `policy()`, and `policy()` reads an
 `AsyncLocalStorage` scope before the process default. Each request runs inside

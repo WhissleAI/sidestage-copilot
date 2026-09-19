@@ -180,10 +180,11 @@ describe("the rules of the room, and the effect that does not exist", () => {
   });
 
   test("there is no would_block, on any draft, ever", () => {
-    // `runChain` never returns `revise` — it says so in a comment and in code
-    // — so the pipeline's single repair pass is unreachable and there is never
-    // an earlier draft for a rule to have tripped. The UI reads three effects;
-    // the server honestly has two, and this is the assertion that says which.
+    // A proposal carries ONE guard row — the one the draft that reached the
+    // seller earned. The repair pass rewrites the draft and re-runs the chain
+    // without keeping the pre-repair result, so a rule that held the first
+    // attempt leaves nothing behind to report as `would_block`. The UI reads
+    // three effects; the server honestly has two, and this says which.
     const rd = session({ source: "reddit", sellerHandle: "r/mechmarket" });
     const drafts = draftsFromSession(rd, [
       proposal({ id: "a", evidence: [rule(1, "No price talk outside the weekly thread.")] }),

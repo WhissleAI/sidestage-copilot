@@ -379,10 +379,12 @@ one to Reddit would have to get past the `delivery` constant, the missing
 `post_reply` in the action list, and preflight.
 
 **A room's rules have two effects, not three.** `applied` and `blocked`. A
-third — "the rule an earlier draft tripped and this one clears" — cannot occur:
-`runChain` never returns `revise` (guardrails/chain.ts), so the pipeline's
-single repair pass is unreachable, so there is never an earlier draft. The
-server does not report a field it can never set.
+third — "the rule an earlier draft tripped and this one clears" — is not
+reported, because nothing in the system knows it. A proposal carries one guard
+row: the one the draft that reached the seller earned. The repair pass rewrites
+the draft and re-runs the chain without keeping the pre-repair result, so a rule
+that held the first attempt leaves nothing behind to report. The server does not
+report a field it can never set.
 
 ## Posting is off until a human turns it on
 
