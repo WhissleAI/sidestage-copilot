@@ -39,7 +39,7 @@
 import { capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
 import { queueCounts, type DraftQueues } from "./home.js";
 import type {
-  Evidence, GuardResult, ProposalStatus, ReplyProposal, Verdict,
+  Evidence, GuardResult, ProposalStatus, ReplyProposal, ThreadView, Verdict,
 } from "../domain/types.js";
 import type { ShowSummary } from "../shows/registry.js";
 import type { FollowUpRow } from "../surfaces/dm/drafts.js";
@@ -109,6 +109,15 @@ export interface SurfaceDraft {
   /** The session this draft belongs to: a live watch, or the show a follow-up
    *  came out of. Present on both so a client never has to guess. */
   sessionId: string;
+  /**
+   * The conversation this answers: the opening post, then the branch down to
+   * the comment, and the rules of the room.
+   *
+   * Absent on a follow-up, which is one buyer's question out of a show that
+   * ended and has no branch above it, and on a post, which opens its own
+   * thread. The card draws what it is given.
+   */
+  thread?: ThreadView;
   question: { author: string; text: string; at: string; url: string | null };
   draft: string;
   createdAt: string;
@@ -227,6 +236,7 @@ export function draftsFromSession(s: ShowSummary, proposals: ReplyProposal[]): S
       },
       draft: p.sentText ?? p.draft,
       createdAt: p.createdAt,
+      ...(p.thread ? { thread: p.thread } : {}),
       status,
       sentAt: null,
       evidence: p.evidence,

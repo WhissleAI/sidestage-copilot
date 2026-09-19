@@ -21,6 +21,8 @@ import type { Fact } from "../../retrieval/facts.js";
 import { RedditClient, requireCreds } from "./api.js";
 import { RedditPoller, type RedditWatch } from "./poll.js";
 import { CommunityRules } from "./rules.js";
+import { fetchThread, threadContextFor } from "./thread.js";
+import type { ThreadContext } from "../../ingest/threadContext.js";
 
 /**
  * Not a field on a config object, not a column, not an environment variable: a
@@ -188,7 +190,53 @@ export const redditAdapter: SurfaceAdapter = {
   constraintsFor(t: SurfaceTarget, room?: string | null): Fact[] {
     return constraintsFrom(rules(), t, room);
   },
+
+  /**
+   * The branch above a comment, rebuilt from the thread it lives in.
+   *
+   * One GET, bounded by `fetchThread`. `parseCommentTree` and
+   * `threadContextFor` do the rest, and they are the same functions the suite
+   * exercises against a recorded tree — this is the caller they never had,
+   * which is why a Reddit draft used to answer one comment in isolation while
+   * the Drafts page rendered a thread section it could never be sent.
+   */
+  threadFor(
+    t: SurfaceTarget,
+    m: { id: string; threadId?: string; parentId?: string; room?: string },
+    ruleFacts: Fact[],
+  ): Promise<ThreadContext | null> {
+    return threadFrom(redditClient(), t, m, ruleFacts);
+  },
 };
+
+/**
+ * The branch above a comment, rebuilt from the thread it lives in.
+ *
+ * One GET, bounded by `fetchThread`; `parseCommentTree` and `threadContextFor`
+ * do the rest, and they are the same functions the suite exercises against a
+ * recorded tree. This is the caller they never had — which is why a Reddit
+ * draft answered one comment in isolation while the Drafts page rendered a
+ * thread section that could never be sent to it.
+ *
+ * Takes its client for the same reason `constraintsFrom` takes its store: the
+ * suite drives Reddit with recorded payloads and no key, and the adapter method
+ * passes the process-wide instance.
+ */
+export async function threadFrom(
+  client: RedditClient,
+  t: SurfaceTarget,
+  m: { id: string; threadId?: string; parentId?: string; room?: string },
+  ruleFacts: Fact[],
+): Promise<ThreadContext | null> {
+  const threadId = m.threadId || (t.meta?.kind === "thread" ? t.meta.threadId : undefined);
+  if (!threadId) return null;
+  // A post IS its own thread: there is nothing above it, and fetching the tree
+  // to discover that spends a request to learn nothing.
+  if (m.id === threadId) return null;
+  const subreddit = (m.room || t.meta?.subreddit || "").replace(/^\/?r\//i, "") || undefined;
+  const thread = await fetchThread(client, { subreddit, threadId });
+  return threadContextFor(thread, m.id, ruleFacts);
+}
 
 /**
  * The rules in force where a reply will land.

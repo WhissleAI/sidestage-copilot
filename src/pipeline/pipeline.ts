@@ -39,6 +39,7 @@ import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
 import { admit, classify, classifySpeechAct, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
+import type { ThreadContext } from "../ingest/threadContext.js";
 import { hostFacts } from "../retrieval/hostFacts.js";
 import { toEvidence, type RetrievalResult } from "../retrieval/retriever.js";
 import type { Fact } from "../retrieval/facts.js";
@@ -93,6 +94,17 @@ export interface PipelineDeps {
    * rooms, which is every live-commerce surface.
    */
   constraints?: (m: ChatMessage) => Fact[];
+  /**
+   * The branch above the message being answered, on an asynchronous surface.
+   *
+   * `ShowContextEngine` answers "what is happening right now", which is exactly
+   * right for a live show and empty in a subreddit. This is its counterpart:
+   * the opening post and the path down to the comment. Supplied by the surface
+   * (`SurfaceAdapter.threadFor`), absent where a conversation is not a tree,
+   * and never a reason to lose a reply — a thread that cannot be read is a
+   * draft composed without it, not an error.
+   */
+  thread?: (m: ChatMessage, rules: Fact[]) => Promise<ThreadContext | null>;
   audit: AuditLog;
   events: PipelineEvents;
 }
@@ -106,6 +118,19 @@ export interface PipelineDeps {
  * prohibitions, once they are indexed) is not silently dropped. Deduped by
  * `factId`, because a rule enforced twice reads as two rules.
  */
+/** The thread as a client sees it: the same branch, with the rules rendered
+ *  the way every other cited thing reaches the console and nothing an index
+ *  needs. */
+function threadView(t: ThreadContext): ReplyProposal["thread"] {
+  return {
+    threadId: t.threadId,
+    ancestors: t.ancestors,
+    room: t.room,
+    rules: t.rules.map((f) => toEvidence(f, 0)),
+    summary: t.summary,
+  };
+}
+
 function constraintsOf(fromRoom: Fact[], retrieved: Fact[]): Fact[] {
   const out: Fact[] = [];
   const seen = new Set<string>();
@@ -354,13 +379,27 @@ export class Pipeline {
     //    edited by a moderator makes every answer written under the old one
     //    unreachable rather than merely stale.
     const key = cacheKey({ question: msg.text, facts: [...r.evidence, ...roomRules] });
-    const hit = previous ? null : this.cache.get(key);
+    // A message in a THREAD is never answered from the cache.
+    //
+    // The cache exists for a live firehose, where "how much" is the same
+    // question the twentieth time somebody types it. In a tree it is not: the
+    // same words under two different branches are two different questions, and
+    // reusing an answer composed for one of them would hand a buyer a reply
+    // written about a conversation they are not in. A subreddit is polled once
+    // a minute, so what this costs is nothing.
+    const threaded = Boolean(msg.threadId);
+    const hit = previous || threaded ? null : this.cache.get(key);
     if (hit) {
       proposal = await this.finish(proposal, {
         ...hit, spans: timer.result(config.latencyBudgetMs, true),
       }, msg);
       return;
     }
+
+    // The conversation this answers. Fetched before the composer is called and
+    // never allowed to fail the draft: a branch we could not read costs the
+    // reply its context, which is a worse answer, not no answer.
+    const thread = await this.threadOf(msg, roomRules);
 
     try {
       // 3. compose
@@ -388,6 +427,7 @@ export class Pipeline {
           show,
           pinned: show.pinnedListingId ? await this.d.repo.listing(show.pinnedListingId) : null,
           context: this.d.showContext.current(),
+          thread,
           seller: this.d.seller?.() ?? null,
           persona: p?.persona ?? null,
           styleRef: p ? styleRef(msg.text, p.voice) : null,
@@ -449,12 +489,13 @@ export class Pipeline {
         // The rules that were in force, beside the evidence rather than among
         // it: a constraint is not a citation, and `abstained` counts evidence.
         ...(roomRules.length ? { rules: roomRules.map((f) => toEvidence(f, 0)) } : {}),
+        ...(thread ? { thread: threadView(thread) } : {}),
         guards: chain.guards,
         verdict: chain.verdict,
         confidence: chain.confidence,
         repaired,
       };
-      this.cache.set(key, result);
+      if (!threaded) this.cache.set(key, result);
       this.finish(proposal, { ...result, spans: timer.result(config.latencyBudgetMs, false) }, msg);
       this.evict();
     } catch (e) {
@@ -480,6 +521,18 @@ export class Pipeline {
     }
   }
 
+  /** The branch above this message, or null. Never throws: see `thread` on
+   *  `PipelineDeps`. */
+  private async threadOf(msg: ChatMessage, rules: Fact[]): Promise<ThreadContext | null> {
+    if (!this.d.thread) return null;
+    try {
+      return await this.d.thread(msg, rules);
+    } catch (e) {
+      console.warn(`[pipeline] thread unavailable for ${msg.id}: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
   /** The owner's persona, or null — and never a reason to fail a draft. A
    *  persona lookup that throws would cost a buyer their answer over a voice
    *  setting, so the reply is written in the default voice instead. */
@@ -502,6 +555,7 @@ export class Pipeline {
       confidence: number; repaired: boolean; spans: ReplyProposal["spans"];
       styleRef?: StyleRef;
       rules?: Evidence[];
+      thread?: ReplyProposal["thread"];
     },
     msg: ChatMessage,
   ): Promise<ReplyProposal> {

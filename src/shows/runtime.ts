@@ -239,6 +239,15 @@ export class ShowRuntime {
       // never have reached it, and the guard that enforces them had nothing to
       // enforce on every real watch.
       constraints: (m) => this.roomConstraints(m.room ?? null),
+      // The branch above the comment, from the surface that can rebuild one.
+      // Live-commerce adapters do not implement it and the composer is handed
+      // the show context it has always had instead.
+      thread: async (m, rules) =>
+        (await surfaceAdapter(this.o.source)?.threadFor?.(
+          this.target ?? { externalId: this.o.externalId ?? "" },
+          { id: m.id, threadId: m.threadId, parentId: m.parentId, room: m.room },
+          rules,
+        )) ?? null,
       audit: this.audit,
       events: {
         onChat: (m) => {

@@ -21,6 +21,7 @@
 import type { ActionKind } from "../domain/types.js";
 import type { CorpusKind } from "../retrieval/corpus.js";
 import type { Fact } from "../retrieval/facts.js";
+import type { ThreadContext } from "../ingest/threadContext.js";
 
 export type SurfaceId =
   | "simulated" | "ebaylive" | "whatnot" | "tiktoklive"   // live commerce
@@ -78,6 +79,29 @@ export interface SurfaceAdapter {
    *   rules of the room the reply lands in, not of the watch.
    */
   constraintsFor?(t: SurfaceTarget, room?: string | null): Fact[];
+  /**
+   * The conversation ABOVE this message — the opening post, then the branch
+   * down to it, oldest first.
+   *
+   * The asynchronous counterpart to `ShowContextEngine`. "The last ninety
+   * seconds" is an empty window in a subreddit: a comment sits under a post and
+   * a branch of replies written over three days by different people, and a
+   * draft written without them answers the words instead of the conversation —
+   * which reads, correctly, as a bot.
+   *
+   * Asynchronous because it is a fetch, and on the reply path: a surface that
+   * cannot rebuild a branch cheaply should return null rather than make a buyer
+   * wait. A failure is not fatal — the caller composes without it.
+   *
+   * `rules` are passed in rather than fetched here so that the thread the
+   * composer sees and the constraints the guards enforce are the same set,
+   * from one read.
+   */
+  threadFor?(
+    t: SurfaceTarget,
+    m: { id: string; threadId?: string; parentId?: string; room?: string },
+    rules: Fact[],
+  ): Promise<ThreadContext | null>;
 }
 
 export interface SurfaceTarget {

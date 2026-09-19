@@ -180,6 +180,25 @@ export interface SpanBreakdown {
   overBudget: boolean;
 }
 
+/**
+ * The conversation a draft is answering, as it goes on the wire.
+ *
+ * `ThreadContext` (src/ingest/threadContext.ts) is the internal shape and
+ * carries whole `Fact`s — tokens, vectors and all. This is the same thing
+ * rendered for a client: the rules as `Evidence`, which is how every other
+ * cited thing reaches the console, and nothing an index needs.
+ */
+export interface ThreadView {
+  threadId: string;
+  /** The opening post, then the branch above the message being answered. */
+  ancestors: { author: string; text: string; at: string }[];
+  room: string;
+  /** The rules in force in this room. A constraint on the reply, never an
+   *  answer in it — the console renders them as rules, not as citations. */
+  rules: Evidence[];
+  summary: string | null;
+}
+
 export type ProposalStatus =
   | "drafting" | "ready" | "needs_review" | "blocked" | "sent" | "auto_sent" | "dismissed";
 
@@ -197,6 +216,13 @@ export interface ReplyProposal {
   spans: SpanBreakdown;
   createdAt: string;
   sentText?: string;
+  /**
+   * The branch above the comment this answers, on an asynchronous surface.
+   *
+   * Absent on a live show, where the last ninety seconds are the context and a
+   * comment's only neighbour is the comment before it.
+   */
+  thread?: ThreadView;
   /**
    * The rules of the ROOM this draft was checked against (corpus: "community").
    *

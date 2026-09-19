@@ -36,6 +36,9 @@ process.env.WHISSLE_AGENT_ID = "agent_test";
 process.env.WHISSLE_BASE = "https://gateway.invalid/bot";
 
 const RULES = JSON.parse(readFileSync(new URL("../fixtures/reddit/rules.json", import.meta.url), "utf8"));
+const COMMENT_TREE = JSON.parse(
+  readFileSync(new URL("../fixtures/reddit/comment-tree.json", import.meta.url), "utf8"),
+);
 
 /** What the model says. Set per test; breaks rule 3 by default. */
 let reply = JSON.stringify({
@@ -44,6 +47,9 @@ let reply = JSON.stringify({
 });
 /** Every URL the process asked for, so "no network" is an assertion. */
 const asked: string[] = [];
+/** The last context block the composer sent the gateway — the prompt the
+ *  thread has to actually reach. */
+let lastContext = "";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -54,11 +60,15 @@ const json = (body: unknown, status = 200) =>
     },
   });
 
-globalThis.fetch = (async (input: string | URL | Request) => {
+globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = String(input);
   asked.push(url);
+  if (url.includes("/chat/turn")) {
+    lastContext = String((JSON.parse(String(init?.body ?? "{}")) as { context?: string }).context ?? "");
+  }
   if (url.includes("/api/v1/access_token")) return json({ access_token: "tok", expires_in: 3600 });
   if (url.includes("/about/rules")) return json(RULES);
+  if (url.includes("/comments/")) return json(COMMENT_TREE);
   // The streaming door is absent on this "gateway", which the client handles by
   // taking the JSON door — the same degradation an older gateway gets.
   if (url.includes("/chat/turn/stream")) return new Response("no such route", { status: 404 });
@@ -67,7 +77,7 @@ globalThis.fetch = (async (input: string | URL | Request) => {
 }) as typeof fetch;
 
 const { ShowRuntime } = await import("../src/shows/runtime.js");
-const { redditAdapter, constraintsFrom } = await import("../src/surfaces/reddit/adapter.js");
+const { redditAdapter, constraintsFrom, threadFrom } = await import("../src/surfaces/reddit/adapter.js");
 const { CommunityRules } = await import("../src/surfaces/reddit/rules.js");
 const { RedditClient } = await import("../src/surfaces/reddit/api.js");
 const { register } = await import("../src/surfaces/registry.js");
@@ -76,13 +86,15 @@ const { db, migrate, closeDb } = await import("../src/db/pg.js");
 
 type Runtime = InstanceType<typeof ShowRuntime>;
 
+/** A Reddit client with a key, answered by the stub above. The process-wide
+ *  one has no credentials under test, on purpose. */
+const client = new RedditClient({
+  clientId: "cid", clientSecret: "secret", username: "sidestage_bot", password: "pw",
+  userAgent: "macos:ai.whissle.sidestage:v1.0 (by /u/kicksbyrae)",
+});
+
 /** The real rules store, over Reddit's own recorded `/about/rules` body. */
-const store = new CommunityRules(
-  new RedditClient({
-    clientId: "cid", clientSecret: "secret", username: "sidestage_bot", password: "pw",
-    userAgent: "macos:ai.whissle.sidestage:v1.0 (by /u/kicksbyrae)",
-  }),
-);
+const store = new CommunityRules(client);
 
 /**
  * Reddit, with its `open()` replaced and nothing else.
@@ -96,6 +108,7 @@ register({
   ...redditAdapter,
   open: async () => ({ stop: async () => {} }),
   constraintsFor: (t, room) => constraintsFrom(store, t, room),
+  threadFor: (t, m, ruleFacts) => threadFrom(client, t, m, ruleFacts),
 });
 
 const showId = `reddit_rules_${process.pid.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -195,5 +208,74 @@ describe("the rules of the room reach the guard chain", () => {
     // subreddit and this answer cites nothing. A different guard, doing its own
     // job: what matters here is that the room's rules did not hold it.
     assert.equal(p.guards.some((g) => g.guard === "community_rule" && g.verdict === "block"), false);
+  });
+});
+
+/**
+ * The branch above the comment, on the way to the model.
+ *
+ * `threadContextFor` and `fetchThread` were complete, tested and had no
+ * production caller: `ShowRuntime.onMessage` dropped the ids a branch is built
+ * from, so `Pipeline.draft` had nothing to build one with and `threadBlock` in
+ * the compose prompt was unreachable. The Drafts page rendered a thread section
+ * it could never be sent, under a heading that said "It reads the thread".
+ */
+describe("a draft answers the conversation, not the comment", () => {
+  test("the opening post and the branch above the comment reach the prompt", async () => {
+    reply = JSON.stringify({ answer: "Krytox 205g0 is the usual pick.", claims: [] });
+    const id = "t1_m9c3c3c";
+    await rt.pipeline.ingest({
+      author: "kbd_curious",
+      text: "would 205g0 be overkill on a budget board?",
+      externalId: id,
+      threadId: "t3_1n4k2qp",
+      parentId: "t1_m9b2b2b",
+      room: "r/mechmarket",
+    });
+    const settled = () => rt.pipeline.list().find((p) => p.message.id === id && p.status !== "drafting");
+    for (let i = 0; i < 100 && !settled(); i++) await new Promise((r) => setTimeout(r, 25));
+    const p = settled()!;
+
+    // The branch, oldest first, with the opening post as its root — and
+    // WITHOUT the sibling subthread, which is the room's activity rather than
+    // this conversation.
+    assert.deepEqual(
+      p.thread?.ancestors.map((a) => a.author),
+      ["kbd_curious", "switch_nerd", "kbd_curious"],
+    );
+    assert.match(p.thread!.ancestors[0]!.text, /Are lubed linears worth it/);
+    assert.equal(p.thread?.threadId, "t3_1n4k2qp");
+    assert.equal(p.thread?.room, "r/mechmarket");
+
+    // In the prompt, as data, with the rules of the room under it as
+    // constraints rather than as things to answer from.
+    assert.match(lastContext, /=== THE THREAD ===/);
+    assert.match(lastContext, /Are lubed linears worth it/);
+    assert.match(lastContext, /Rules in force in this room/);
+    assert.match(lastContext, /No vendor self-promotion/);
+
+    // And on the card the operator reads.
+    const summary = {
+      showId, source: "reddit" as const, sellerHandle: "r/mechmarket",
+      title: "r/mechmarket", externalId: "r/mechmarket",
+    };
+    const draft = draftsFromSession(
+      summary as unknown as Parameters<typeof draftsFromSession>[0],
+      [p],
+    )[0]!;
+    assert.equal(draft.thread?.ancestors.length, 3);
+    assert.equal(draft.thread?.rules.every((r) => r.corpus === "community"), true);
+  });
+
+  test("a POST opens its own thread, and we do not spend a request to discover it", async () => {
+    const before = asked.filter((u) => u.includes("/comments/")).length;
+    const ctx = await threadFrom(
+      client,
+      redditAdapter.parseTarget("r/mechmarket")!,
+      { id: "t3_1n4k2qp", threadId: "t3_1n4k2qp", room: "r/mechmarket" },
+      [],
+    );
+    assert.equal(ctx, null);
+    assert.equal(asked.filter((u) => u.includes("/comments/")).length, before);
   });
 });
