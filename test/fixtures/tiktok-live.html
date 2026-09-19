@@ -1,0 +1,42 @@
+<!--
+  A TikTok Live room, trimmed to the shape src/surfaces/tiktoklive/scrape.ts
+  reads. Hand-reduced for the same reasons as the Whatnot fixture, plus one
+  more: this surface is OFF by default (TIKTOK_LIVE_ENABLED), so there is no
+  routine run against a live room that would keep a capture current.
+
+  The thing this fixture is really here to pin down is the rows with no id.
+  TikTok keys its chat list in React and the key does not reach the DOM, so two
+  of the rows below carry `data-id` and two carry nothing — which is exactly
+  the case `dedupeKey` falls back on, and exactly the case where a viewer who
+  repeats themselves is heard once. The last two rows are that repeat.
+-->
+<div id="main-content-live_detail">
+  <div data-e2e="live-people-count" class="viewer-count-9a1">18.4K</div>
+
+  <div data-e2e="live-product-card" data-product-id="tts_7731" class="product-card-2b0">
+    <div data-e2e="live-product-title" class="product-title-7c1">Hydrating Lip Oil &mdash; Peach</div>
+    <div data-e2e="live-product-price" class="product-price-4d2">$12.99</div>
+  </div>
+
+  <div class="webcast-chatroom___list">
+    <div data-e2e="chat-message" data-id="7731900100001" class="webcast-chatroom___item">
+      <span data-e2e="message-owner-name" class="nickname-3f0">glowbyjune</span>
+      <span data-e2e="chat-content" class="chat-content-8b2">does the peach one smell like the mango?</span>
+    </div>
+
+    <div data-e2e="chat-message" data-id="7731900100002" class="webcast-chatroom___item">
+      <span data-e2e="message-owner-name" class="nickname-3f0">mk_reviews</span>
+      <span data-e2e="chat-content" class="chat-content-8b2">shipping to the UK?</span>
+    </div>
+
+    <div class="webcast-chatroom___item">
+      <span class="nickname-3f0">sunsetsam</span>
+      <span class="chat-content-8b2">🔥</span>
+    </div>
+
+    <div class="webcast-chatroom___item">
+      <span class="nickname-3f0">sunsetsam</span>
+      <span class="chat-content-8b2">🔥</span>
+    </div>
+  </div>
+</div>

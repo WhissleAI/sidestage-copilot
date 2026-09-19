@@ -16,6 +16,8 @@ import { ebayLiveAdapter } from "./ebaylive/adapter.js";
 import { simulatedAdapter } from "./simulated/adapter.js";
 import { dmAdapter } from "./dm/adapter.js";
 import { redditAdapter } from "./reddit/adapter.js";
+import { whatnotAdapter } from "./whatnot/adapter.js";
+import { tiktokLiveAdapter } from "./tiktoklive/adapter.js";
 
 const adapters = new Map<SurfaceId, SurfaceAdapter>();
 
@@ -49,9 +51,16 @@ export function resolve(input: string): { adapter: SurfaceAdapter; target: Surfa
   return null;
 }
 
-// The built-ins, registered at import. Both are pure-local modules — the eBay
-// adapter defers its Playwright work to the watcher it wraps — so importing the
+// The built-ins, registered at import. Every one of them is a pure-local
+// module — the scraped adapters defer their Playwright work to the watcher they
+// wrap, and none of them touches a browser until `open()` — so importing the
 // registry costs nothing a caller did not already pay.
+//
+// TikTok Live is registered even though it is off by default. An adapter that
+// registered only when its switch was on would make the console's answer to
+// "which surfaces exist" depend on the environment, so a surface would vanish
+// from the UI rather than say why it cannot run. Capabilities resolve; `open()`
+// is the thing that refuses, naming the variable (docs/SURFACES.md).
 register(ebayLiveAdapter);
 register(simulatedAdapter);
 // The follow-up inbox parses `show:<id>` and `inbox:<handle>` — prefixes no
@@ -68,3 +77,5 @@ register(dmAdapter);
 // the scripted show or an inbox prefix, and registering it behind them keeps
 // that true even if its patterns loosen later.
 register(redditAdapter);
+register(whatnotAdapter);
+register(tiktokLiveAdapter);

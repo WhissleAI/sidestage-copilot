@@ -1,0 +1,19 @@
+<!--
+  TikTok's verification interstitial, trimmed to what identifies it.
+
+  This is the fixture behind the whole TIKTOK_LIVE_ENABLED decision. TikTok can
+  drop a session into this challenge at any moment, including one that has been
+  reading a room for an hour, and the browser on the other side of it belongs
+  to a real seller's account. The extractor recognises the page so the watcher
+  reports "a person is needed here" and stops reloading into it — a retry loop
+  against this page is what turns a temporary challenge into a restricted
+  account.
+-->
+<div id="app">
+  <div id="captcha_container">
+    <div class="captcha_verify_container captcha_verify_container--ios">
+      <div class="captcha_verify_bar"></div>
+      <div class="captcha_verify_message">Verify to continue</div>
+    </div>
+  </div>
+</div>

@@ -78,7 +78,8 @@ have told them.
 | Twitch | `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`, `TWITCH_BOT_REFRESH_TOKEN` | adapter and tests ship; `open()` 409s naming the variable |
 | Reddit | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `REDDIT_USER_AGENT` | same |
 | YouTube Live | `YOUTUBE_API_KEY` (+ an OAuth client for posting) | same |
-| Whatnot / TikTok | none — Playwright, reusing `EBAY_DISCOVERY_PROXY` | works, subject to the page |
+| Whatnot | none — real Chrome via `openContext`, reusing `EBAY_DISCOVERY_PROXY` | works, subject to Cloudflare; a challenge is reported by name |
+| TikTok Live | `TIKTOK_LIVE_ENABLED` — a person deciding to run it, not a credential | registered and resolvable; `open()` refuses, naming the switch |
 
 ## eBay Live is a delegation, not a rewrite
 
@@ -180,6 +181,75 @@ solicited — so it never becomes a draft; `admit` refuses it and raises
 ("is this a scam?") is one of the commonest honest questions a buyer asks and is
 `asking`; the asserted one ("this is a scam") is the verdict looking for an
 argument.
+## Whatnot and TikTok Live are read, not spoken to
+
+Both are the eBay Live problem again: no public API for the chat of a room, a
+React app that renders it, and a browser as the only reader. What they are not
+is eBay Live's *position* — we hold no seller credentials on either platform,
+and neither exposes a way for us to post into a room.
+
+So both declare `SCRAPED_LIVE_CAPABILITIES`: live tempo, `draft-only` delivery,
+`perception: false` (we read the DOM; the audio and video are in a player we
+never decode, so the host-signal work has nothing to run on here), and only two
+actions — `mark_highlight` and `flag_for_human`. The five listing writes are
+gone on purpose. Every one of them ends at a marketplace we hold credentials
+for, and a markdown here would change our row while the platform kept selling
+at the old price: a write that reports success and changes nothing a buyer can
+see.
+
+### One loop, two selector tables
+
+`src/surfaces/scrapeWatcher.ts` is the poll loop — backlog suppression, dedupe,
+the silence watchdog, the reload, the crashed-renderer recovery — and it is
+shared. The constants in it are the eBay watcher's, re-declared with their
+reasoning because that file keeps them private and is frozen. Each surface
+contributes a `ScrapeSpec`: a URL, a selector table, and how to read its
+numbers.
+
+`src/surfaces/scrapeDom.ts` holds the one thing that reads a page. It is handed
+to `page.evaluate`, which serialises it with `toString()`, so it closes over
+nothing and takes its selectors as data — which is also what lets the test run
+it outside a browser.
+
+### The fixtures are the contract
+
+`test/fixtures/*.html` are hand-trimmed pages of the shape each selector table
+assumes, not captures of real rooms. Two reasons: a capture would put a real
+seller's chat in the repo, and neither page can be re-captured on demand —
+Whatnot answered a plain GET with a Cloudflare challenge (403, `<title>Just a
+moment...</title>`, measured 2026-09-18) and TikTok Live is off by default.
+
+When a platform changes its markup, change the fixture and the selectors in the
+same commit. The suite then tells you whether the extractor still works,
+instead of a live room at 9pm on a Friday.
+
+`test/domlite.ts` is the DOM those tests run against: enough of `Element` to
+satisfy the extractor, over an HTML string, no dependency and no browser.
+Checked against real Chromium on 2026-09-18 — identical output, field for
+field, on all four fixtures.
+
+### A wall is a named failure, not a quiet room
+
+Both extractors look for the sign-in wall and the bot challenge BEFORE they
+look for chat, because a challenge page has a perfectly good DOM with no
+messages in it. Without the check, the busiest room in the world reads as
+silent and the operator watches a feed that was never going to move. The
+watchdog also declines to reload while a wall is up: a reload cannot answer a
+challenge, it can only ask for one again.
+
+### TikTok Live ships off
+
+`TIKTOK_LIVE_ENABLED` is unset by default and `open()` refuses while it is,
+naming the variable the way a missing key does. Not because the adapter is
+unfinished — because TikTok can drop any session into a verification challenge
+at any moment, including one that has been reading a room for an hour, and the
+browser on the other side of that challenge belongs to a real seller's account.
+A retry loop against that page is how a temporary challenge becomes a
+restricted account. The switch is a person saying "I am here, run it".
+
+It is still registered, still resolves a pasted link, and still reports its
+capabilities: a surface that vanished from the UI when its switch was off would
+leave the console unable to say why it cannot run.
 
 ## Posting is off until a human turns it on
 
