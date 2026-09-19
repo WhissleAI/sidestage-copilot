@@ -1,0 +1,43 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "before": null,
+    "children": [
+      {
+        "kind": "t1",
+        "data": {
+          "subreddit": "mechmarket",
+          "name": "t1_m9c3c3c",
+          "id": "m9c3c3c",
+          "author": "linear_fan",
+          "body": "You can get there with a kit, but which lube are people using for budget linears these days?",
+          "created_utc": 1789044300,
+          "parent_id": "t1_m9b2b2b",
+          "link_id": "t3_1n4k2qp",
+          "link_title": "Are lubed linears worth it on a budget TKL?",
+          "permalink": "/r/mechmarket/comments/1n4k2qp/_/m9c3c3c/",
+          "score": 6,
+          "replies": ""
+        }
+      },
+      {
+        "kind": "t1",
+        "data": {
+          "subreddit": "MechanicalKeyboards",
+          "name": "t1_m8x9y0z",
+          "id": "m8x9y0z",
+          "author": "linear_fan",
+          "body": "Top mount, always. The gasket hype is mostly marketing.",
+          "created_utc": 1788961200,
+          "parent_id": "t3_1n2p7bb",
+          "link_id": "t3_1n2p7bb",
+          "link_title": "Gasket vs top mount for a first build",
+          "permalink": "/r/MechanicalKeyboards/comments/1n2p7bb/_/m8x9y0z/",
+          "score": 31,
+          "replies": ""
+        }
+      }
+    ]
+  }
+}

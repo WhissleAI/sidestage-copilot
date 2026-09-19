@@ -1,0 +1,64 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_1n4j8aa",
+    "before": null,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "approved_at_utc": null,
+          "subreddit": "mechmarket",
+          "selftext": "Budget is about $150 all in and I keep reading that unlubed linears feel scratchy. Is hand-lubing worth the weekend or should I just buy pre-lubed?",
+          "author_fullname": "t2_9qp1x",
+          "title": "Are lubed linears worth it on a budget TKL?",
+          "name": "t3_1n4k2qp",
+          "upvote_ratio": 0.93,
+          "ups": 41,
+          "created_utc": 1789041600,
+          "num_comments": 12,
+          "permalink": "/r/mechmarket/comments/1n4k2qp/are_lubed_linears_worth_it_on_a_budget_tkl/",
+          "link_flair_text": "Question",
+          "author": "kbd_curious",
+          "id": "1n4k2qp",
+          "over_18": false,
+          "stickied": false
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "subreddit": "mechmarket",
+          "selftext": "",
+          "title": "[US-CA] [H] Keychron Q1 v2, barely used [W] PayPal",
+          "name": "t3_1n4jx7m",
+          "created_utc": 1789040100,
+          "num_comments": 3,
+          "permalink": "/r/mechmarket/comments/1n4jx7m/usca_h_keychron_q1_v2_barely_used_w_paypal/",
+          "link_flair_text": "Selling",
+          "author": "quietclack",
+          "id": "1n4jx7m",
+          "ups": 7,
+          "stickied": false
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "subreddit": "mechmarket",
+          "selftext": "Third time I've asked about my order from the January group buy and still no response from anyone.",
+          "title": "Still waiting on a January GB, no response in six weeks",
+          "name": "t3_1n4j8aa",
+          "created_utc": 1789038300,
+          "num_comments": 24,
+          "permalink": "/r/mechmarket/comments/1n4j8aa/still_waiting_on_a_january_gb_no_response_in_six/",
+          "link_flair_text": "Discussion",
+          "author": "gb_waiter",
+          "id": "1n4j8aa",
+          "ups": 112,
+          "stickied": false
+        }
+      }
+    ]
+  }
+}

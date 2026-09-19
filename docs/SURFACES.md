@@ -126,6 +126,60 @@ Instagram's is behind an app review this project has not applied for, so
 `POST /api/followups/:id/sent` records a human's claim that they sent it from
 their own account. `sent_at` is stamped once, by `COALESCE`, so a retried press
 cannot move when a buyer was actually contacted.
+## Reddit: monitor, ground, draft — never post
+
+`src/surfaces/reddit/` is the first asynchronous surface, and the first one
+where we deliberately built less than we could.
+
+**Reddit is monitor-and-draft. Posting is off in code, not in configuration.**
+Undisclosed automation replying as a person breaks Reddit's own rules and is
+reputationally fatal; the value is a grounded draft with its sources, which a
+human sends from their own account. The code says it three times so that no
+single edit undoes it quietly: `delivery` is a constant in `adapter.ts`, the
+action list is `["flag_for_human"]` and does not contain `post_reply` at all,
+and preflight refuses any action a surface does not declare. A row in
+`surface_rooms` cannot reach any of the three.
+
+| | |
+|---|---|
+| `adapter.ts` | `parseTarget` for a subreddit, a user or a thread; `open` starts the poller and warms the room's rules |
+| `api.ts` | the OAuth script-app client — token cache, the User-Agent Reddit rate-limits by, and `x-ratelimit-*` pacing |
+| `poll.ts` | a subreddit's new posts, a profile's comments, or one thread; deduped by fullname |
+| `thread.ts` | the comment tree, and the branch above a message as a `ThreadContext` |
+| `rules.ts` | `/r/<sub>/about/rules` as `community` facts, cached an hour |
+
+Three decisions are worth knowing before changing anything here.
+
+**Every id is a fullname.** `t3_…` for a post, `t1_…` for a comment — the ids
+Reddit's own `parent_id` and `link_id` point at. The thread engine rebuilds a
+branch by following parents, so the ids it walks and the ids the platform links
+with have to be the same strings. Short ids would mean translating at every
+boundary and getting it wrong at one of them.
+
+**A 429 is a bug in our pacing, not an outcome.** Reddit reports the remaining
+budget and the seconds to reset on every response, including the token mint. The
+client waits before the request that would have spent the last of it rather than
+discovering the limit by being refused, because by the time a 429 arrives the
+request has been counted and the account is closer to a block.
+
+**The rules of the room are constraints, never answers.** `rules.ts` turns each
+rule into one fact with its number and short name in the label, so a blocked
+draft reads "r/mechmarket rule 3 — No vendor self-promotion (community:mechmarket#3)"
+and the operator's "says who" is answerable from the card. They are cached for
+an hour and warmed at attach, because a draft path that fetched them would
+either block on a network call or compose without them.
+
+**Some messages should not be drafted for at all.** `src/ingest/classify.ts`
+gained a third axis alongside topic and speech act: is this person **asking**,
+**complaining**, or **baiting**. They need three different answers. A question
+has one. A grievance needs acknowledgement first, and a reply that cheerfully
+restates the returns policy to somebody on their third unanswered email makes it
+worse. Bait has no correct answer at all, because answering is the thing being
+solicited — so it never becomes a draft; `admit` refuses it and raises
+`flag_for_human`, which is the only action this surface has. An asked accusation
+("is this a scam?") is one of the commonest honest questions a buyer asks and is
+`asking`; the asserted one ("this is a scam") is the verdict looking for an
+argument.
 
 ## Posting is off until a human turns it on
 

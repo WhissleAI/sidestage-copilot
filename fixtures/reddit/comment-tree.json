@@ -1,0 +1,123 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "after": null,
+      "before": null,
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "subreddit": "mechmarket",
+            "selftext": "Budget is about $150 all in and I keep reading that unlubed linears feel scratchy. Is hand-lubing worth the weekend or should I just buy pre-lubed?",
+            "title": "Are lubed linears worth it on a budget TKL?",
+            "name": "t3_1n4k2qp",
+            "id": "1n4k2qp",
+            "author": "kbd_curious",
+            "created_utc": 1789041600,
+            "num_comments": 12,
+            "permalink": "/r/mechmarket/comments/1n4k2qp/are_lubed_linears_worth_it_on_a_budget_tkl/",
+            "link_flair_text": "Question"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "after": null,
+      "before": null,
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "subreddit": "mechmarket",
+            "name": "t1_m9a1a1a",
+            "id": "m9a1a1a",
+            "author": "switch_nerd",
+            "body": "Depends entirely on what you mean by budget. Under $100 the case matters more than the switches.",
+            "created_utc": 1789042500,
+            "parent_id": "t3_1n4k2qp",
+            "link_id": "t3_1n4k2qp",
+            "permalink": "/r/mechmarket/comments/1n4k2qp/_/m9a1a1a/",
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "subreddit": "mechmarket",
+                      "name": "t1_m9b2b2b",
+                      "id": "m9b2b2b",
+                      "author": "kbd_curious",
+                      "body": "Under $150 all in, including switches and keycaps.",
+                      "created_utc": 1789043400,
+                      "parent_id": "t1_m9a1a1a",
+                      "link_id": "t3_1n4k2qp",
+                      "permalink": "/r/mechmarket/comments/1n4k2qp/_/m9b2b2b/",
+                      "replies": {
+                        "kind": "Listing",
+                        "data": {
+                          "children": [
+                            {
+                              "kind": "t1",
+                              "data": {
+                                "subreddit": "mechmarket",
+                                "name": "t1_m9c3c3c",
+                                "id": "m9c3c3c",
+                                "author": "linear_fan",
+                                "body": "You can get there with a kit, but which lube are people using for budget linears these days?",
+                                "created_utc": 1789044300,
+                                "parent_id": "t1_m9b2b2b",
+                                "link_id": "t3_1n4k2qp",
+                                "permalink": "/r/mechmarket/comments/1n4k2qp/_/m9c3c3c/",
+                                "replies": ""
+                              }
+                            },
+                            { "kind": "more", "data": { "count": 4, "name": "t1_m9zzzzz", "id": "m9zzzzz" } }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "subreddit": "mechmarket",
+            "name": "t1_m9d4d4d",
+            "id": "m9d4d4d",
+            "author": "hall_effect_guy",
+            "body": "What about hall effect instead? Different question but worth asking.",
+            "created_utc": 1789043100,
+            "parent_id": "t3_1n4k2qp",
+            "link_id": "t3_1n4k2qp",
+            "permalink": "/r/mechmarket/comments/1n4k2qp/_/m9d4d4d/",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "subreddit": "mechmarket",
+            "name": "t1_m9e5e5e",
+            "id": "m9e5e5e",
+            "author": "[deleted]",
+            "body": "[removed]",
+            "created_utc": 1789043900,
+            "parent_id": "t3_1n4k2qp",
+            "link_id": "t3_1n4k2qp",
+            "permalink": "/r/mechmarket/comments/1n4k2qp/_/m9e5e5e/",
+            "replies": ""
+          }
+        }
+      ]
+    }
+  }
+]
