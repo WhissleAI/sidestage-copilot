@@ -10,6 +10,9 @@ import type { AutonomyLevel } from "../domain/types.js";
 import { LADDER } from "../autonomy/ladder.js";
 import { discoverLiveShows, discoverSellerShows, parseEventId } from "../ingest/ebaylive/discovery.js";
 import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid, rememberGrid } from "../sellers/following.js";
+import { SurfaceRooms } from "../surfaces/rooms.js";
+import { all as surfaceAdapters } from "../surfaces/registry.js";
+import { SURFACE_CAPABILITIES, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
 import { Preparer } from "../shows/prepareEvent.js";
 import { sessionStatus } from "../ingest/ebaylive/session.js";
 import { BudgetWatch, budgetState, setBudgetWatch } from "../llm/budget.js";
@@ -1499,6 +1502,90 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       checking: cachedGrid().checking,
     };
   });
+
+  // ── the rooms we are allowed to speak in ──────────────────────────────────
+  //
+  // Posting into somebody else's room is irreversible in the way that matters:
+  // the undo window can delete the comment, it cannot unsee it, and the price
+  // of getting it wrong is the operator's own account banned from a place they
+  // have posted in for years. So a room is a record of a HUMAN switching it on,
+  // it is off until they do, and a room with no row is off rather than unknown.
+  const rooms = new SurfaceRooms(pgPool());
+
+  /** A surface we actually know about. 404 rather than an empty list, because
+   *  "no rooms on twitchh" reads as an answer and is a typo. */
+  const knownSurface = (
+    raw: string,
+    reply: { code(n: number): { send(b: unknown): unknown } },
+  ): SurfaceId | null => {
+    const id = raw.trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(SURFACE_CAPABILITIES, id)) return id as SurfaceId;
+    reply.code(404).send({ error: `no surface called "${raw}"`, surfaces: Object.keys(SURFACE_CAPABILITIES) });
+    return null;
+  };
+
+  /** Every surface this build knows, with what it can do and whether an
+   *  adapter is wired for it yet. The console reads this to decide which
+   *  columns a session even has. */
+  app.get("/api/surfaces", async () => {
+    const wired = new Set(surfaceAdapters().map((a) => a.id));
+    return {
+      surfaces: (Object.keys(SURFACE_CAPABILITIES) as SurfaceId[]).map((id) => ({
+        id,
+        label: surfaceAdapters().find((a) => a.id === id)?.label ?? id,
+        capabilities: capabilitiesOf(id),
+        attachable: wired.has(id),
+      })),
+    };
+  });
+
+  app.get<{ Params: { surface: string } }>("/api/surfaces/:surface/rooms", async (req, reply) => {
+    const surface = knownSurface(req.params.surface, reply);
+    if (!surface) return reply;
+    const a = actorOf(req as object);
+    return { surface, rooms: a ? await rooms.list(a.id, surface) : [] };
+  });
+
+  app.post<{ Params: { surface: string }; Body: { room?: string; posting?: boolean; disclosure?: string | null } }>(
+    "/api/surfaces/:surface/rooms",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "watch a room");
+      if (!actor) return reply;
+      const surface = knownSurface(req.params.surface, reply);
+      if (!surface) return reply;
+      const room = (req.body?.room ?? "").trim();
+      if (!room) return reply.code(400).send({ error: "a room is required — a subreddit, a channel or a conversation id" });
+      // Turning posting ON for a surface that cannot deliver is not a setting
+      // we are willing to store: it would show as on in the console and be
+      // refused at preflight every time, which is worse than refusing here.
+      if (req.body?.posting && capabilitiesOf(surface).delivery !== "api") {
+        return reply.code(409).send({
+          error: `${surface} is draft-only — replies there are yours to send, so posting cannot be turned on`,
+          code: "draft-only",
+        });
+      }
+      const saved = await rooms.upsert(actor.id, surface, room, {
+        posting: req.body?.posting,
+        disclosure: req.body?.disclosure,
+      });
+      return { surface, room: saved, rooms: await rooms.list(actor.id, surface) };
+    },
+  );
+
+  app.delete<{ Params: { surface: string }; Querystring: { room?: string } }>(
+    "/api/surfaces/:surface/rooms",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "stop watching a room");
+      if (!actor) return reply;
+      const surface = knownSurface(req.params.surface, reply);
+      if (!surface) return reply;
+      const room = (req.query?.room ?? "").trim();
+      if (!room) return reply.code(400).send({ error: "a room is required" });
+      const removed = await rooms.remove(actor.id, surface, room);
+      if (!removed) return reply.code(404).send({ error: `${room} is not on the list` });
+      return { surface, removed: room, rooms: await rooms.list(actor.id, surface) };
+    },
+  );
 
   /**
    * Start a monitoring session: attach to a live eBay show AND load the catalog
