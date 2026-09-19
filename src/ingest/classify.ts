@@ -11,7 +11,7 @@
 // robotic. Everything is still shown to the seller in the ticker; only genuine
 // questions become proposals.
 
-import type { ChatIntent, SpeechAct } from "../domain/types.js";
+import type { ActionKind, ChatIntent, SpeechAct, Stance } from "../domain/types.js";
 
 const CUES: [ChatIntent, RegExp][] = [
   // "10% off", "$20 off", "will you take less", "any deals", "price drop" were
@@ -78,10 +78,104 @@ export function isHype(text: string): boolean {
   return words.every((w) => HYPE_TOKENS.has(w) || /^(?:ha)+h?$/.test(w) || /^\d+$/.test(w));
 }
 
+// ── the third axis: what they want from us ───────────────────────────────────
+//
+// Topic and speech act between them still cannot tell apart three things that
+// need three different answers, and the gap only shows on a surface where the
+// reply is permanent.
+//
+//   asking       a question with an answer. Answer it.
+//   complaining  a grievance. The answer is acknowledgement FIRST; a reply that
+//                cheerfully restates the returns policy to somebody on their
+//                third unanswered email makes it worse, and it is still a
+//                question by every other measure.
+//   baiting      an invitation to argue. Every correct answer is wrong, because
+//                answering is the thing being solicited — so this never becomes
+//                a draft. It becomes a hand-off, and the human may well decide
+//                the right move is silence.
+//
+// Deliberately narrow. A false `baiting` silently drops a real customer, so the
+// cues are provocation and personal attack — not rudeness, not swearing, and
+// not the word "scam" on its own: "is this a scam?" is one of the commonest
+// honest questions a buyer asks, and it is `asking`.
+
+/**
+ * Bait whatever the punctuation: aimed at a person, or soliciting an argument.
+ * "Are you a bot?" is a question by every formal measure and is still not a
+ * question we should answer on our own.
+ */
+const BAIT_ALWAYS: RegExp[] = [
+  // Soliciting a fight. None of these has an answer that ends the exchange.
+  // `ratio'd` and not bare "ratio": a card show says "the PSA 10 ratio on these
+  // is nuts" all night, and dropping those as bait would be the expensive kind
+  // of wrong.
+  /\b(prove me wrong|prove it then|cope|seethe|cry more|cry about it|touch grass|skill issue|ratio'?e?d|fight me|change my mind|do something about it|go on then|downvote me|try me)\b/i,
+  // A personal attack. "you" plus contempt, which is the pattern that survives
+  // paraphrase — the specific insult never does.
+  /\b(?:you|u|ur|you'?re|your)\b[^.?!]{0,40}\b(clown|clowns|idiot|idiots|moron|morons|dumb|stupid|pathetic|joke|trash|garbage|liar|lying|scum|shill|bot|bots)\b/i,
+  /\b(shut up|get lost|piss off|kys|nobody asked|who asked|didn'?t ask)\b/i,
+];
+
+/**
+ * An accusation, and only when it is ASSERTED.
+ *
+ * "Is this a scam?" is one of the commonest honest questions a buyer asks and
+ * it has an answer. "This is a scam" is a verdict looking for an argument. The
+ * words are the same; the punctuation is the whole difference, so these are
+ * checked only on a message that is not asking anything.
+ */
+const BAIT_ASSERTED: RegExp[] = [
+  /\b(?:this|that|it|these|they|y'?all|you(?:'| a)?re|its|it'?s)\b[^.?!]{0,30}\b(scam|scammer|scammers|grift|grifter|fraud|ripoff|rip[- ]off|snake oil|astroturf\w*|shill\w*)\b/i,
+  /\b(obvious (?:shill|scam|ad|astroturf)|literally a scam|corporate shill|paid shill|just an ad|another ad|sponsored garbage)\b/i,
+];
+
+/** A grievance about something that actually happened to them. */
+const COMPLAINT: RegExp[] = [
+  // Time passing with nothing happening — the single most reliable complaint
+  // signal, and the one a policy paragraph answers worst.
+  /\b(still (?:waiting|haven'?t|hasn'?t|no)|never (?:arrived|received|got|shipped|showed)|no (?:response|reply|answer|update)|third time|second time|twice now|\d+ (?:days?|weeks?|months?) (?:and|now|later|ago)|been (?:waiting|\d+))\b/i,
+  // Said plainly.
+  /\b(ridiculous|unacceptable|disappointed|disappointing|frustrat\w*|fed up|worst|terrible|awful|useless|waste of (?:money|time)|never again)\b/i,
+  // Something is broken, or the money went the wrong way.
+  /\b(broke after|stopped working|doesn'?t work|does not work|won'?t work|arrived (?:broken|damaged|cracked|wrong)|wrong item|charged (?:me )?twice|double charged|still charged|want (?:my|a) refund|refund me)\b/i,
+];
+
+/**
+ * What the person wants from us.
+ *
+ * Order is the argument. Provocation and personal attack come first because a
+ * hand-off is the stricter answer and those are bait however they are phrased.
+ * An ASKED accusation is spared next — that ordering is the only thing
+ * separating "is this a scam?" from "this is a scam", and getting it wrong
+ * drops a real buyer's most reasonable question. Complaint then outranks
+ * asking, because a grievance is usually also a question and "answer it" is
+ * the wrong instruction for one.
+ */
+export function classifyStance(text: string): Stance {
+  const t = (text || "").trim();
+  if (!t) return "neutral";
+  if (BAIT_ALWAYS.some((re) => re.test(t))) return "baiting";
+  const asking = t.includes("?") || INTERROGATIVE.test(t);
+  if (!asking && BAIT_ASSERTED.some((re) => re.test(t))) return "baiting";
+  if (COMPLAINT.some((re) => re.test(t))) return "complaining";
+  return asking ? "asking" : "neutral";
+}
+
+/** What to do with a message instead of drafting for it, when the answer is
+ *  "not this". Only bait has one today; the shape is here because the console
+ *  needs to know a hand-off was RAISED, not merely that a draft was skipped. */
+export function handoffFor(stance: Stance): ActionKind | undefined {
+  return stance === "baiting" ? "flag_for_human" : undefined;
+}
+
 export interface AdmissionResult {
   admitted: boolean;
   intent: ChatIntent;
   speechAct: SpeechAct;
+  /** What they want from us — see `classifyStance`. */
+  stance: Stance;
+  /** Set when the message should reach a person instead of a draft. */
+  handoff?: ActionKind;
   reason?: string;
 }
 
@@ -125,8 +219,23 @@ export function admit(
   intent: ChatIntent,
   rateOk: boolean,
   speechAct: SpeechAct = classifySpeechAct(text),
+  stance: Stance = classifyStance(text),
 ): AdmissionResult {
   const t = (text || "").trim();
+
+  // Bait is refused before every other check, including the command exemption.
+  // It is the one case where the gate's usual question — is this worth
+  // answering — has the wrong shape: the message is worth a PERSON, and a
+  // draft, however good, is the response being fished for. The hand-off is on
+  // the result rather than implied by the refusal, because the console has to
+  // show that somebody was asked to look, not merely that we stayed quiet.
+  if (stance === "baiting") {
+    return {
+      admitted: false, intent, speechAct, stance,
+      handoff: handoffFor(stance),
+      reason: "bait, not a question — handed to a human",
+    };
+  }
 
   // Reaction is checked before length, and stays there: the operator console
   // shows this reason on the dropped row, and "reaction, not a question" tells
@@ -139,18 +248,18 @@ export function admit(
     // The speech act names the reason when it has something specific to say,
     // because "a greeting" is more use to the operator than "reaction".
     if (speechAct === "greeting") {
-      return { admitted: false, intent, speechAct, reason: "a greeting, not a question" };
+      return { admitted: false, intent, speechAct, stance, reason: "a greeting, not a question" };
     }
     if (speechAct === "wish") {
       // Still a demand signal the action proposer wants — just not a reply.
-      return { admitted: false, intent, speechAct, reason: "wants the item, but asked nothing" };
+      return { admitted: false, intent, speechAct, stance, reason: "wants the item, but asked nothing" };
     }
     if (intent === "hype") {
-      return { admitted: false, intent, speechAct, reason: "reaction, not a question" };
+      return { admitted: false, intent, speechAct, stance, reason: "reaction, not a question" };
     }
   }
-  if (t.length < 3) return { admitted: false, intent, speechAct, reason: "too short to be a question" };
-  if (t.length > 500) return { admitted: false, intent, speechAct, reason: "too long for a live-chat reply" };
+  if (t.length < 3) return { admitted: false, intent, speechAct, stance, reason: "too short to be a question" };
+  if (t.length > 500) return { admitted: false, intent, speechAct, stance, reason: "too long for a live-chat reply" };
 
   // The speech act is decided FIRST, because it is the stronger signal about
   // whether a comment wants an answer at all — and because the topic axis gets
@@ -160,12 +269,12 @@ export function admit(
   //
   // A command is answerable whatever its topic.
   if (speechAct !== "command" && speechAct !== "query") {
-    return { admitted: false, intent, speechAct, reason: "a statement, not a question" };
+    return { admitted: false, intent, speechAct, stance, reason: "a statement, not a question" };
   }
 
-  if (!rateOk) return { admitted: false, intent, speechAct, reason: "proposal rate cap reached" };
+  if (!rateOk) return { admitted: false, intent, speechAct, stance, reason: "proposal rate cap reached" };
 
-  return { admitted: true, intent, speechAct };
+  return { admitted: true, intent, speechAct, stance };
 }
 
 /** Refilling token bucket. Caps how many proposals a burst of chat can create,

@@ -77,6 +77,35 @@ export const config = {
     endpoint: process.env.EBAY_DELETION_ENDPOINT || "",
   },
 
+  /**
+   * The Reddit script application.
+   *
+   * Five values, all five required: Reddit's script grant is a password grant,
+   * so the app identity and the account identity are separate halves of the
+   * same credential and four out of five authenticates nobody.
+   *
+   * `userAgent` is not politeness. Reddit rate-limits and then blocks on the
+   * User-Agent string, it wants it to identify the app and its owner, and a
+   * default Node agent earns a 429 that looks exactly like pacing we got wrong.
+   *
+   * Blank under test, for the same reason the eBay keys are: the suite must
+   * never reach Reddit. The client's behaviour — token refresh, rate-limit
+   * backoff, parsing — is exercised with an injected fetcher and recorded
+   * fixtures.
+   */
+  reddit: {
+    clientId: process.env.NODE_ENV === "test" ? "" : process.env.REDDIT_CLIENT_ID || "",
+    clientSecret: process.env.NODE_ENV === "test" ? "" : process.env.REDDIT_CLIENT_SECRET || "",
+    username: process.env.NODE_ENV === "test" ? "" : process.env.REDDIT_USERNAME || "",
+    password: process.env.NODE_ENV === "test" ? "" : process.env.REDDIT_PASSWORD || "",
+    userAgent: process.env.REDDIT_USER_AGENT || "",
+    /** How often a watched subreddit, profile or thread is re-read. Reddit's
+     *  own guidance is one request a second sustained; a minute between polls
+     *  on a handful of rooms sits far inside it and still reads as prompt on a
+     *  surface where people answer in hours. */
+    pollMs: num("REDDIT_POLL_MS", 60_000),
+  },
+
   /** Bounded fan-out. The gateway runs a shared 8-wide LLM semaphore; stay under it. */
   replyConcurrency: num("REPLY_CONCURRENCY", 3),
   /** Token bucket: how many buyer questions per minute may become proposals. */

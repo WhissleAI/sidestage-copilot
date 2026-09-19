@@ -15,6 +15,7 @@ import type { SurfaceAdapter, SurfaceId, SurfaceTarget } from "./types.js";
 import { ebayLiveAdapter } from "./ebaylive/adapter.js";
 import { simulatedAdapter } from "./simulated/adapter.js";
 import { dmAdapter } from "./dm/adapter.js";
+import { redditAdapter } from "./reddit/adapter.js";
 
 const adapters = new Map<SurfaceId, SurfaceAdapter>();
 
@@ -60,3 +61,10 @@ register(simulatedAdapter);
 // string is, and "that is a follow-up inbox, built this other way" is a far
 // better answer than "we do not recognise that".
 register(dmAdapter);
+
+// Reddit last of them all: its patterns are the widest (a bare `r/x` handle,
+// every Reddit URL form), so it is the one most able to claim a link that
+// belongs to somebody else. Nothing it accepts overlaps with an eBay event id,
+// the scripted show or an inbox prefix, and registering it behind them keeps
+// that true even if its patterns loosen later.
+register(redditAdapter);

@@ -170,7 +170,14 @@ export const SURFACE_CAPABILITIES: Record<SurfaceId, SurfaceCapabilities> = {
     // subreddit has a rule against, and no setting should be able to grant it.
     delivery: "draft-only",
     perception: { audio: false, video: false },
-    actions: ["post_reply", "flag_for_human"],
+    // `post_reply` is absent deliberately, and its absence is a second lock on
+    // the same door: `delivery` already refuses it, and an action a surface
+    // does not declare is refused by preflight before delivery is even read.
+    // Undisclosed automation replying as a person breaks Reddit's own rules,
+    // so the only thing this surface hands a human is a draft — and
+    // `flag_for_human` is how anything that should not be drafted at all
+    // (bait, a moderator matter) reaches one.
+    actions: ["flag_for_human"],
     corpora: ["product", "policy", "qa", "community"],
     communityRules: true,
   },

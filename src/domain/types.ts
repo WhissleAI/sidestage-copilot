@@ -27,6 +27,26 @@ export type ChatIntent =
  */
 export type SpeechAct = "query" | "command" | "inform" | "greeting" | "wish" | "other";
 
+/**
+ * The third axis: what the person WANTS from us, as distinct from what they
+ * said and what it was about.
+ *
+ * Topic and speech act between them still cannot tell three things apart that
+ * need three different answers. "Does this ship to Canada?" is a question with
+ * an answer. "Third time I've asked about my refund" is a question whose answer
+ * is not information — it is acknowledgement, and a reply that cheerfully
+ * restates the returns policy makes it worse. "lol this whole thing is a scam,
+ * prove me wrong" is not a question at all; every correct answer to it is
+ * wrong, because answering is the thing being solicited.
+ *
+ * Asynchronous surfaces are where this stops being a nicety. A live chat moves
+ * on in ten seconds; a subreddit comment is permanent, public, and read by
+ * people deciding whether the operator is worth trusting. So `baiting` never
+ * becomes a draft — it becomes a hand-off to a human, who may well decide the
+ * right move is to say nothing.
+ */
+export type Stance = "asking" | "complaining" | "baiting" | "neutral";
+
 export type GuardName =
   | "price" | "availability" | "policy" | "claim_grounding" | "tone" | "pii"
   // Surface-specific checks. Both return n/a on a surface that does not use

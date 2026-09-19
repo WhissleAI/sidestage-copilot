@@ -1,0 +1,42 @@
+{
+  "rules": [
+    {
+      "kind": "link",
+      "description": "Every post must use the [Region] [H] [W] title format. Posts without it are removed automatically.",
+      "short_name": "Use the required title format",
+      "violation_reason": "Title format",
+      "created_utc": 1521072000.0,
+      "priority": 0
+    },
+    {
+      "kind": "all",
+      "description": "You must have a confirmed trade before selling. New accounts are not allowed to post selling threads.",
+      "short_name": "Confirmed trades required to sell",
+      "violation_reason": "No confirmed trades",
+      "created_utc": 1521072000.0,
+      "priority": 1
+    },
+    {
+      "kind": "comment",
+      "description": "Do not advertise your own store, group buy or affiliate link in comments. Vendors post in the weekly vendor thread only.",
+      "short_name": "No vendor self-promotion",
+      "violation_reason": "Vendor self-promotion",
+      "created_utc": 1521072000.0,
+      "priority": 2
+    },
+    {
+      "kind": "comment",
+      "description": "Arrange every trade in public comments first. Moving straight to private messages is how scams start here.",
+      "short_name": "Do not say \"DM me\" as a first reply",
+      "violation_reason": "DM-first trading",
+      "created_utc": 1600000000.0,
+      "priority": 3
+    }
+  ],
+  "site_rules": [
+    "Spam",
+    "Personal and confidential information",
+    "Threatening, harassing, or inciting violence"
+  ],
+  "site_rules_flow": []
+}

@@ -71,7 +71,18 @@ export function preflight(
   // eBay Live to run a poll has a bug, and the honest answer is "this surface
   // cannot", not a floor-price check on a poll.
   if (!ctx.surface.actions.includes(kind)) {
-    return { ok: false, checks: [no("this surface supports the action", `this surface cannot ${kind}`)], before: {} };
+    // One kind gets a more useful sentence. A draft-only surface does not
+    // declare `post_reply` at all — reddit's list is `flag_for_human` and
+    // nothing else — and "this surface cannot post_reply" reads as a feature
+    // we have not built yet. It is a decision, and the refusal should say so.
+    const detail =
+      kind === "post_reply" && ctx.surface.delivery !== "api"
+        ? "this surface is draft-only — the reply is yours to send"
+        : `this surface cannot ${kind}`;
+    const name = kind === "post_reply" && ctx.surface.delivery !== "api"
+      ? "the surface delivers replies"
+      : "this surface supports the action";
+    return { ok: false, checks: [no(name, detail)], before: {} };
   }
 
   // Posting a reply into somebody else's room is the one action in this system
