@@ -23,6 +23,7 @@ import { ebay } from "../ingest/ebay/client.js";
 import { marketIndex } from "../shows/catalogMarket.js";
 import { analyticsOverview } from "../shows/analytics.js";
 import { EbayOAuth } from "../ingest/ebay/oauth.js";
+import { TwitchOAuth } from "../surfaces/twitch/oauth.js";
 import { importSellerListings } from "../ingest/ebay/import.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
 import { addCatalogQa, applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
@@ -124,13 +125,18 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // before the `following` block, and a `const` used above its declaration is a
   // runtime error rather than a compile one.
   const ebayAuth = new EbayOAuth(pgPool());
+  const twitchAuth = new TwitchOAuth(pgPool());
   const preparer = new Preparer(pgPool());
   const actors = new WeakMap<object, Account | null>();
 
   // Paths a signed-out caller may reach: the front door, health, eBay's own
   // callbacks, and the bridge page (which carries its token as a query
   // parameter because it is a bare HTML page, not the console).
-  const OPEN = [/^\/health$/, /^\/api\/auth\/(register|login)$/, /^\/api\/ebay\/callback/, /^\/api\/ebay\/account-deletion/, /^\/audio-bridge/];
+  // `/api/twitch/callback` is here for the same reason eBay's is: the browser
+  // that lands on it came back from Twitch, not from the console, so it carries
+  // no bearer token. The `state` is what proves the callback is ours, and it is
+  // checked in the handler rather than here.
+  const OPEN = [/^\/health$/, /^\/api\/auth\/(register|login)$/, /^\/api\/ebay\/callback/, /^\/api\/ebay\/account-deletion/, /^\/api\/twitch\/callback/, /^\/audio-bridge/];
   app.addHook("onRequest", async (req, reply) => {
     const header = req.headers.authorization;
     const q = (req.query ?? {}) as { token?: string };
@@ -1405,6 +1411,72 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     await ebayAuth.disconnect(actor.id);
     return { ok: true };
   });
+
+  // ── twitch ────────────────────────────────────────────────────────────────
+  //
+  // The same two routes the eBay connection has, and the same argument for
+  // them: the alternative is an operator producing a refresh token by hand,
+  // which on Twitch means either a CLI that wants their client secret or a
+  // third-party site offering to mint one — a stranger holding a token that can
+  // talk in their chat. A consent link costs one click and nobody's clipboard
+  // ever holds the token.
+
+  app.post("/api/twitch/connect", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "connect a Twitch account");
+    if (!actor) return reply;
+    try {
+      // Returns the URL rather than redirecting: the console is a single-page
+      // app and a 302 out of an XHR is a silent failure. The caller opens it.
+      return await twitchAuth.begin(actor.id);
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+
+  /**
+   * Where Twitch sends the operator back.
+   *
+   * A browser lands here, not an XHR, so it answers with a page rather than
+   * JSON — and it never echoes the code or the state back into the document.
+   */
+  app.get<{ Querystring: { code?: string; state?: string; error_description?: string; error?: string } }>(
+    "/api/twitch/callback",
+    async (req, reply) => {
+      const { code, state } = req.query;
+      const fail = (msg: string) =>
+        reply.code(400).type("text/html").send(closingPage("Could not connect Twitch", msg, false));
+
+      // Twitch sends `error=access_denied` when the operator presses Cancel.
+      // That is a decision, not a fault, and it should not read like one.
+      if (req.query.error === "access_denied") {
+        return fail("You cancelled on Twitch, so nothing was connected.");
+      }
+      if (req.query.error_description || req.query.error) {
+        return fail(req.query.error_description || req.query.error!);
+      }
+      if (!code) return fail("Twitch sent no authorisation code.");
+      if (!state) {
+        return fail(
+          "This sign-in did not start from SideStage, so there is no account to attach it to. " +
+            "Open Settings → Twitch in the app and press Connect Twitch; that link carries the state Twitch hands back here.",
+        );
+      }
+      try {
+        const c = await twitchAuth.complete(code, state);
+        return reply.type("text/html").send(
+          closingPage(
+            "Twitch connected",
+            c.twitchLogin
+              ? `SideStage reads chat and acts as @${c.twitchLogin} on the channels you attach.`
+              : "SideStage can now read chat and act on the channels you attach.",
+            true,
+          ),
+        );
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    },
+  );
 
   /**
    * Import the seller's own eBay listings as a catalog.

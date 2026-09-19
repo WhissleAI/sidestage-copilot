@@ -357,12 +357,22 @@ export class ActionExecutor {
     }
 
     await tx(this.d, async (c) => {
-      await this.repo.bind(c).mutateListing(action.listingId, {
-        priceCents: action.before.priceCents as number,
-        qty: action.before.qty as number,
-        state: action.before.state as never,
-        pinned: action.before.pinned as boolean,
-      });
+      // An action with no captured prior state has nothing local to restore.
+      // Preflight writes `before = {}` for every kind that does not target a
+      // listing — a clip, a poll, a reply, a hand-off — and calling
+      // `mutateListing` for one of those threw "listing kicksbyrae not found"
+      // AFTER the remote compensation had already succeeded: the poll was
+      // archived on Twitch and the action was still recorded as committed.
+      // The `version` key is the marker, because preflight sets it only when a
+      // listing was found (src/actions/preflight.ts).
+      if (action.before.version !== undefined) {
+        await this.repo.bind(c).mutateListing(action.listingId, {
+          priceCents: action.before.priceCents as number,
+          qty: action.before.qty as number,
+          state: action.before.state as never,
+          pinned: action.before.pinned as boolean,
+        });
+      }
       await c.query(
         `INSERT INTO action_commits (idempotency_key, show_id, action_id, committed_at, result)
          VALUES ($1,$2,$3,$4,$5::jsonb)

@@ -250,6 +250,59 @@ restricted account. The switch is a person saying "I am here, run it".
 It is still registered, still resolves a pasted link, and still reports its
 capabilities: a surface that vanished from the UI when its switch was off would
 leave the console unable to say why it cannot run.
+## Twitch: chat in, clips and polls out
+
+`src/surfaces/twitch/` is the first surface that sells nothing, which is the
+whole reason the abstraction exists. There is no catalog, so no price can be
+stale and no lot can run out — the listing guards find no `listing` corpus and
+return `n/a` on their own. What grounds an answer instead is a schedule, a
+sponsor brief and the channel's own chat rules (`corpus.ts`), and the actions
+are the ones a creator actually takes: a clip, a stream marker, a poll, a
+shoutout, an announcement, a reply.
+
+| file | what it is |
+|---|---|
+| `adapter.ts` | `parseTarget` for a link, an `@handle` or a bare login; `open()` starts chat |
+| `chat.ts` | EventSub over WebSocket (`channel.chat.message`), IRC over TLS behind `CHAT_TRANSPORT` |
+| `api.ts` | the six Helix calls the actions need, plus the app and user grants |
+| `actions.ts` | a `MarketplaceAdapter` for the creator kinds — the existing executor runs unchanged |
+| `corpus.ts` | schedule, sponsor and channel rules as facts with the right `CorpusKind` |
+| `oauth.ts` | the consent round trip, so nobody pastes a refresh token |
+
+**EventSub is primary; IRC is the documented fallback.** IRC still works and is
+frozen: the structured event carries typed fragments instead of a tag soup, it
+carries the same `message_id` that `DELETE /helix/moderation/chat` takes — the
+only reason a posted reply is undoable at all — and it authenticates with the
+same user token as every write. IRC survives for the case EventSub cannot
+serve: a websocket session caps at 300 subscriptions and one chat read is one
+subscription, so a deployment watching hundreds of channels from one process
+runs out where an IRC connection just joins another channel. Nobody is watching
+hundreds of channels yet, so the switch is a constant rather than a setting.
+
+**Twitch is registered LAST** (`registry.ts`). It is the only adapter that
+accepts a bare word, and `demo` is both a valid Twitch login and how an operator
+asks for the scripted show. Narrower claims resolve first.
+
+**The undo is not uniform, and the refusal says so.** A poll is archived and a
+posted message is deleted, so those two roll back properly. Helix lists exactly
+two clip endpoints, Create and Get — there is no delete — and a stream marker,
+a shoutout and an announcement cannot be withdrawn either. `compensate` throws
+with the clip URL and where to go, rather than reporting a rollback it did not
+perform. The executor marks such an action `failed` while the write stands;
+distinguishing "irreversible" from "failed to reverse" on the card needs a flag
+on the action row, and is Wave C.
+
+**`pin_message` posts an announcement.** Helix has no pin. An announcement is
+the closest a bot gets: the line is highlighted and stays legible in the
+scrollback, which is what "pin this" is asking for. The kind is named after the
+intent and the call after the platform.
+
+**A sponsor's prohibitions are emitted as constraints.** `sponsorGuard` only
+checks that a sponsored claim CITES an approved fact, so a draft that cites the
+brief correctly and then calls the board waterproof would pass it. Each
+`mustNotClaim` entry is therefore also emitted as a `community` fact phrased as
+a quoted prohibition, which is the corpus the chain treats as a rule rather than
+an answer. The label names the sponsor, so "says who" still answers correctly.
 
 ## Posting is off until a human turns it on
 
