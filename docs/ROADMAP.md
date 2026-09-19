@@ -134,10 +134,12 @@ This makes the audit log mean something. "Who approved that markdown" is not
 answerable today.
 
 **Shipped.** `accounts` + `auth_sessions` + a bearer token the console mints on
-first load. A guest may read every route and change nothing; the six command
-routes (send, dismiss, regenerate, approve, reject, rollback, autonomy) require
-a seller, enforced in one place so a route added later is not left open by
-omission. `audit.actor_id` now references the account, and the console shows
+first load. **Every mutation** requires a signed-in seller — not a named list of
+routes, but one `preHandler` that lets GET/HEAD/OPTIONS and a small OPEN
+allow-list through and refuses everything else with 403 (`src/api/routes.ts`), so
+a route added later is not left open by omission. The guest kind this paragraph
+was written against is gone: migration 015 dropped guest sessions and
+`accounts.ts` types the kind as `"seller"` only. `audit.actor_id` now references the account, and the console shows
 which it is acting as — amber "watching · take control" for a guest, the
 operator's name once claimed. Five contract tests cover the boundary.
 
