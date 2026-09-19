@@ -14,13 +14,14 @@
  *   2. an operator's EDIT is judged as a human assertion: every guard that
  *      protects the buyer runs on it, and the one that audits the model's
  *      citation discipline does not.
- *   3a. a guard that reasons about a corpus does not fire on a surface that has
- *      none (policy, exactly as price and availability already did).
- *   3b. a money amount whose only source is the host's live speech is not a
- *      price we may quote.
  *   3. a held card's own instruction — "edit it and send, the edit is checked
  *      again" — is true. An edit that clears the block sends; one that does not
  *      is refused by name.
+ *   4. a guard that reasons about a corpus does not fire on a surface that has
+ *      none (policy, exactly as price and availability already did).
+ *   5. a money amount whose only source is the host's live speech is not a
+ *      price we may quote.
+ *   6. a rate-cap token is spent on a reply, never on a greeting.
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -508,5 +509,37 @@ describe("a money amount the host said out loud", () => {
       ],
     );
     assert.equal(priceGuard.run(i).verdict, "allow");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 6. the rate cap
+// ════════════════════════════════════════════════════════════════════════════
+
+describe("what a proposal token is spent on", () => {
+  test("a greeting, a reaction and a wish cost nothing", () => {
+    // DURING-10. `tryAdmit()` was evaluated as an ARGUMENT, so a token was
+    // drawn for every message before `admit` ran — and `admit` rejects bait,
+    // greetings, wishes and hype well before it reads the cap. Roughly two
+    // thirds of the budget went on chat that was never going to be answered.
+    let drawn = 0;
+    const limiter = () => { drawn++; return true; };
+    for (const t of ["hey everyone", "W", "LETS GOOO", "i need these", "ok"]) {
+      assert.equal(admit(t, classify(t), limiter).admitted, false);
+    }
+    assert.equal(drawn, 0, "not one token spent on chat that was never answerable");
+  });
+
+  test("a real question draws exactly one", () => {
+    let drawn = 0;
+    const limiter = () => { drawn++; return true; };
+    assert.equal(admit("how much for the pandas", "price_question", limiter).admitted, true);
+    assert.equal(drawn, 1);
+  });
+
+  test("and an exhausted cap still says so, in the operator's words", () => {
+    const d = admit("how much for the pandas", "price_question", () => false);
+    assert.equal(d.admitted, false);
+    assert.match(d.reason!, /rate cap/);
   });
 });

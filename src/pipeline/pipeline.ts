@@ -141,7 +141,10 @@ export class Pipeline {
     // own override, because "answer this one anyway" is a request to spend and
     // the cap is the seller's standing answer to that request.
     const capped = isOverBudget(this.d.repo.showId);
-    const natural = admit(incoming.text, intent, observing ? false : this.rate.tryAdmit(), speechAct);
+    // The limiter goes in as a THUNK, not as a value: `admit` draws the token
+    // at the last gate rather than the caller drawing it at the first, so a
+    // greeting or a "W" no longer costs a proposal the seller could have had.
+    const natural = admit(incoming.text, intent, () => !observing && this.rate.tryAdmit(), speechAct);
     const decision = capped
       ? { admitted: false, reason: BUDGET_REASON }
       : opts.force

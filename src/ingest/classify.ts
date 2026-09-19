@@ -214,10 +214,21 @@ export function classifySpeechAct(text: string): SpeechAct {
   return "inform";
 }
 
+/**
+ * The gate.
+ *
+ * `rate` may be a boolean or a THUNK, and the thunk is the form production
+ * uses. A token bucket evaluated as an argument is spent on every message the
+ * gate was about to drop anyway — "W", "LETS GOOO", "gm" — so on a fast chat
+ * roughly two thirds of a 30/min budget went on hype and real questions hit
+ * "proposal rate cap reached" at about a third of the intended cap. Passing the
+ * limiter in and calling it LAST, at the one point where the message is
+ * otherwise admissible, is the whole fix: a token now buys a proposal.
+ */
 export function admit(
   text: string,
   intent: ChatIntent,
-  rateOk: boolean,
+  rate: boolean | (() => boolean),
   speechAct: SpeechAct = classifySpeechAct(text),
   stance: Stance = classifyStance(text),
 ): AdmissionResult {
@@ -272,7 +283,11 @@ export function admit(
     return { admitted: false, intent, speechAct, stance, reason: "a statement, not a question" };
   }
 
-  if (!rateOk) return { admitted: false, intent, speechAct, stance, reason: "proposal rate cap reached" };
+  // LAST. Everything above this line is a reason not to reply that costs
+  // nothing; the token is only drawn once none of them applied.
+  if (!(typeof rate === "function" ? rate() : rate)) {
+    return { admitted: false, intent, speechAct, stance, reason: "proposal rate cap reached" };
+  }
 
   return { admitted: true, intent, speechAct, stance };
 }
