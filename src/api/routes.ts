@@ -13,6 +13,8 @@ import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid, rememb
 import { SurfaceRooms } from "../surfaces/rooms.js";
 import { all as surfaceAdapters, resolve as resolveSurface } from "../surfaces/registry.js";
 import { SURFACE_CAPABILITIES, SurfaceUnavailable, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
+import { surfaceReadiness } from "../surfaces/readiness.js";
+import { behindBand, nowBand } from "./home.js";
 import {
   FollowUpInbox, buildFollowUps, openDrafter, type FollowUpStatus,
 } from "../surfaces/dm/drafts.js";
@@ -1591,15 +1593,130 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
-  /** The whole home surface in one read: live now, what is prepared, your shows. */
+  /**
+   * The whole home surface in one read.
+   *
+   * Two shapes live here, and that is deliberate. The original five keys —
+   * `live`, `discovery`, `prepared`, `preparing`, `watching` — are eBay Live
+   * discovery seen from the outside, and they are byte-for-byte what they
+   * always were, because a browser tab left open on the old bundle keeps
+   * polling this route and must keep working through a deploy.
+   *
+   * The four new ones describe the PRODUCT: what needs a human now, what is
+   * being prepared, what finished, and what each surface still needs. `now.live`
+   * is every session on air on ANY surface, read off the registry rather than
+   * the eBay grid — the grid cannot see a subreddit, and six surfaces out of
+   * seven were invisible to this endpoint until it stopped asking eBay who is
+   * live and started asking ourselves.
+   */
   app.get<{ Querystring: { refresh?: string } }>("/api/home", async (req) => {
-    const [discovery, prepared, watched] = await Promise.all([
-      req.query.refresh === "1"
-        ? discoverLiveShows({ limit: 24 })
-        : Promise.resolve(cachedDiscovery()),
-      preparer.list(actorOf(req as object)?.id ?? null),
-      shows.list(actorOf(req as object)?.id),
-    ]);
+    const actor = actorOf(req as object);
+    const accountId = actor?.id ?? null;
+    const [discovery, prepared, watched, ebayConn, twitchConn, roomRows, inbox, reportRows] =
+      await Promise.all([
+        req.query.refresh === "1"
+          ? discoverLiveShows({ limit: 24 })
+          : Promise.resolve(cachedDiscovery()),
+        preparer.list(accountId),
+        shows.list(accountId ?? undefined),
+        accountId ? ebayAuth.connection(accountId).catch(() => null) : Promise.resolve(null),
+        accountId ? twitchAuth.connection(accountId).catch(() => null) : Promise.resolve(null),
+        // One aggregate per fact, never one per surface or one per show: this
+        // route is polled by an open tab.
+        accountId
+          ? pgPool()
+              .query<{ surface: string; n: number }>(
+                "SELECT surface, count(*)::int AS n FROM surface_rooms WHERE account_id = $1 GROUP BY surface",
+                [accountId],
+              )
+              .then((r) => r.rows)
+              .catch(() => [])
+          : Promise.resolve([] as { surface: string; n: number }[]),
+        accountId
+          ? pgPool()
+              .query<{ total: number; ready: number }>(
+                `SELECT count(*)::int AS total,
+                        (count(*) FILTER (WHERE status = 'draft'))::int AS ready
+                   FROM followups WHERE account_id = $1`,
+                [accountId],
+              )
+              .then((r) => r.rows[0] ?? { total: 0, ready: 0 })
+              .catch(() => ({ total: 0, ready: 0 }))
+          : Promise.resolve({ total: 0, ready: 0 }),
+        // Reports only — a session that ended without one has no answered
+        // count, no blocked count and no gap to name, and a row of nulls in
+        // "behind you" is worse than one fewer row. `/api/reports` remains the
+        // place that shows those, because there it is the point.
+        pgPool()
+          .query<{
+            show_id: string; title: string; surface: string | null; source: string;
+            generated_at: Date; report: ShowReport | null;
+          }>(
+            `SELECT s.id AS show_id, s.title, s.surface, s.source, r.generated_at, r.report
+               FROM show_reports r JOIN shows s ON s.id = r.show_id
+              WHERE s.owner_account_id IS NULL OR s.owner_account_id = $1
+              ORDER BY r.generated_at DESC LIMIT 6`,
+            [accountId],
+          )
+          .then((r) => r.rows)
+          .catch(() => []),
+      ]);
+
+    // ── now / behind ─────────────────────────────────────────────────────────
+    //
+    // `watched` already carries the queue depth and the blocked count for every
+    // runtime (ShowRegistry.list), so the NOW band costs no query of its own.
+    const now = nowBand(watched, inbox.ready);
+    const behind = behindBand(
+      reportRows.map((x) => ({
+        showId: x.show_id, title: x.title, surface: x.surface, source: x.source,
+        generatedAt: x.generated_at, report: x.report,
+      })),
+      inbox,
+    );
+
+    // ── surfaces ─────────────────────────────────────────────────────────────
+    //
+    // The catalogs this account OWNS — its imports and its preparations, not
+    // the two demo fixtures. The same rule `visibleCatalogs` applies, minus the
+    // seeds, and computed off the `prepared` list already in hand rather than
+    // asking for it twice.
+    const mineCatalogs = new Set(prepared.map((p) => p.catalogId).filter(Boolean) as string[]);
+    const own = listCatalogs().filter(
+      (c) => mineCatalogs.has(c.id) || (actor ? c.id === `ebay-${actor.handle}` : false),
+    );
+    const liveBySurface: Partial<Record<SurfaceId, number>> = {};
+    for (const s of now.live) liveBySurface[s.surface] = (liveBySurface[s.surface] ?? 0) + 1;
+    const roomsBySurface: Partial<Record<SurfaceId, number>> = {};
+    for (const r of roomRows) roomsBySurface[r.surface as SurfaceId] = r.n;
+
+    const surfaces = surfaceReadiness({
+      // The REGISTRY, not the capability table: `youtubelive` has capabilities
+      // and no adapter in this build, and a row an operator cannot attach to is
+      // an invitation the attach route then refuses. `/api/surfaces` still
+      // lists it, which is where a client asks what this build KNOWS about.
+      surfaces: surfaceAdapters().map((a) => ({ id: a.id, label: a.label, attachable: isAttachable(a.id) })),
+      // Read now, not at import: an operator who sets a key and restarts
+      // expects the next poll of this route to say so.
+      env: process.env,
+      ebayConnected: Boolean(ebayConn?.valid),
+      // Present, fresh, and not being served the anonymous grid — the three
+      // things Discover and Prepare actually need, which is what the old
+      // checklist meant by "signed in".
+      ebaySignedIn: Boolean(
+        discovery.session?.present &&
+          !discovery.session.stale &&
+          !["blocked", "signed-out"].includes(discovery.reason),
+      ),
+      twitchConnected: Boolean(twitchConn?.valid),
+      ownCatalogs: own.length,
+      ownCatalogItems: own.reduce((a, c) => a + c.itemCount, 0),
+      prepared: prepared.length,
+      liveBySurface,
+      roomsBySurface,
+      followups: inbox.total,
+    });
+
     return {
       live: discovery.shows,
       // `checkedAt` is when the grid was last actually read — the number the
@@ -1609,6 +1726,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       prepared,
       preparing: [...preparing],
       watching: watched,
+      now,
+      next: {
+        prepared,
+        // The surfaces with a grid we can READ. eBay Live is the only one: the
+        // others have discovery pages behind a login or an app review, and
+        // listing them here would imply the console is broken rather than that
+        // the platform never opened the door.
+        discoverable: ["ebaylive"] as SurfaceId[],
+      },
+      behind,
+      surfaces,
     };
   });
 
