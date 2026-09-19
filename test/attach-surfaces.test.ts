@@ -12,11 +12,13 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { FastifyInstance } from "fastify";
 
-// Its OWN catalogs directory, set before anything reads the variable. The
-// runner runs test FILES concurrently and the seeded catalogs are files on
-// disk: this file building a fifth app in the shared directory raced the two
-// suites that read a seeded catalog back, and they failed with a 404 that had
-// nothing to do with either of them.
+// Its OWN catalogs directory, set before anything reads the variable.
+//
+// `pretest` seeds `.tmp/test-catalogs` once, and the runner then runs test
+// FILES concurrently: several of them boot an app that WRITES into that
+// directory while others read a seeded catalog back. Adding a fifth writer is
+// what tipped it — two unrelated suites started failing with a 404 for a
+// catalog that exists. Removing this line reproduces it.
 process.env.CATALOGS_DIR = ".tmp/test-catalogs-attach";
 
 const { buildApp } = await import("../src/api/server.js");

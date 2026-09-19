@@ -37,6 +37,12 @@ try {
 // The catalogs are files, and one route writes to them. Without a copy, a test
 // that closes a gap edits the fixture a reviewer is about to read.
 const catalogs = process.env.TEST_CATALOGS_DIR || ".tmp/test-catalogs";
-rmSync(catalogs, { recursive: true, force: true });
-mkdirSync(catalogs, { recursive: true });
-cpSync("fixtures/catalogs", catalogs, { recursive: true });
+for (const dir of [catalogs, `${catalogs}-attach`]) {
+  // The second copy is not redundancy. Test files run concurrently and several
+  // of them boot an app that WRITES catalogs; a suite that only reads one was
+  // failing with a 404 for a catalog that plainly exists. A writer that wants
+  // its own directory says so with CATALOGS_DIR and finds it seeded here.
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  cpSync("fixtures/catalogs", dir, { recursive: true });
+}
