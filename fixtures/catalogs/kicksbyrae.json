@@ -463,5 +463,13 @@
       "condition": "DS",
       "size": "9"
     }
+  ],
+  "qa": [
+    {
+      "id": "qa_mu7s4kjs_a8jv",
+      "question": "do you ship to iceland 1789785585927",
+      "answer": "Yes — Iceland ships DHL at cost, 5–7 days.",
+      "fromShowId": "show_ep42"
+    }
   ]
 }
