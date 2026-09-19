@@ -28,6 +28,8 @@ import { EventHub } from "../src/api/hub.js";
 import { db, migrate, closeDb } from "../src/db/pg.js";
 import { register } from "../src/surfaces/registry.js";
 import { redditAdapter, watchFor } from "../src/surfaces/reddit/adapter.js";
+import { whatnotAdapter } from "../src/surfaces/whatnot/adapter.js";
+import { twitchAdapter } from "../src/surfaces/twitch/adapter.js";
 import type {
   SurfaceAdapter, SurfaceConnection, SurfaceEvents, SurfaceTarget,
 } from "../src/surfaces/types.js";
@@ -52,15 +54,33 @@ const stub = (id: SurfaceAdapter["id"], parse: SurfaceAdapter["parseTarget"]): S
 let shows: ShowRegistry;
 const created: string[] = [];
 
+/** Two real accounts: `shows.owner_account_id` is a foreign key, so "operator
+ *  B" has to be a row rather than a string. */
+const A = `acct_seam_a_${process.pid.toString(36)}`;
+const B = `acct_seam_b_${process.pid.toString(36)}`;
+
 before(async () => {
   await migrate(db());
   register(stub("reddit", (input: string) => redditAdapter.parseTarget(input)));
+  // The two surfaces from the report: `whatnot:kicksbyrae` and
+  // `twitch:kicksbyrae` both parse to `externalId: "kicksbyrae"`. Their real
+  // `parseTarget`s, so the collision under test is the real one; stub `open`s,
+  // so no browser starts and no socket opens.
+  register(stub("whatnot", (input: string) => whatnotAdapter.parseTarget(input)));
+  register(stub("twitch", (input: string) => twitchAdapter.parseTarget(input)));
+  for (const id of [A, B]) {
+    await db().query(
+      "INSERT INTO accounts (id, kind, handle) VALUES ($1, 'seller', $1) ON CONFLICT (id) DO NOTHING",
+      [id],
+    );
+  }
   shows = new ShowRegistry(new EventHub());
 });
 
 after(async () => {
   await shows.stopAll();
   for (const id of created) await db().query("DELETE FROM shows WHERE id = $1", [id]).catch(() => {});
+  for (const id of [A, B]) await db().query("DELETE FROM accounts WHERE id = $1", [id]).catch(() => {});
   await closeDb();
 });
 
@@ -132,5 +152,49 @@ describe("the target survives attach", () => {
     } finally {
       await resumed.close();
     }
+  });
+});
+
+/**
+ * A runtime's identity is the surface, the id AND the account.
+ *
+ * `attach` found an existing live runtime by `externalId` alone, and an
+ * external id is not an identity: `whatnot:kicksbyrae` and `twitch:kicksbyrae`
+ * both produce `kicksbyrae`, and the attach route's ownership hook cannot help
+ * because it keys on a showId while an attach names an event id. So the second
+ * operator to paste a handle somebody else was already watching was handed
+ * that operator's RUNNING session — and the route then replaced its agent and
+ * applied the newcomer's catalog to it. A live cross-tenant takeover.
+ */
+describe("whose session is this", () => {
+  test("two surfaces that share a handle are two sessions", async () => {
+    const wn = await attach("whatnot:kicksbyrae", A);
+    const tw = await attach("twitch:kicksbyrae", A);
+    assert.equal(wn.externalId, "kicksbyrae");
+    assert.equal(tw.externalId, "kicksbyrae", "the same id — which is the whole hazard");
+    assert.notEqual(wn.showId, tw.showId);
+    assert.equal(wn.surface, "whatnot");
+    assert.equal(tw.surface, "twitch");
+  });
+
+  test("the same room from two accounts is two sessions, and neither is handed the other's", async () => {
+    const mine = await attach("whatnot:kicksbyrae", A);
+    const theirs = await attach("whatnot:kicksbyrae", B);
+    assert.notEqual(mine.showId, theirs.showId, "operator B was handed operator A's live session");
+    assert.equal(await mine.loadOwner(), A);
+    assert.equal(await theirs.loadOwner(), B);
+
+    // Three runtimes for one handle, and each account sees only its own.
+    const forA = (await shows.list(A)).map((s) => s.showId);
+    const forB = (await shows.list(B)).map((s) => s.showId);
+    assert.equal(forA.includes(theirs.showId), false);
+    assert.equal(forB.includes(mine.showId), false);
+    assert.equal(new Set([...forA, ...forB]).size >= 3, true);
+  });
+
+  test("re-pasting the same thing from the same account is still the same session", async () => {
+    const first = await attach("whatnot:kicksbyrae", A);
+    const again = await attach("whatnot:kicksbyrae", A);
+    assert.equal(first.showId, again.showId, "a re-attach must not fork a second watch");
   });
 });
