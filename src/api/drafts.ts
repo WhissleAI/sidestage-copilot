@@ -309,18 +309,10 @@ export async function persistedAsyncDrafts(
   accountId: string,
   limit = 200,
 ): Promise<SurfaceDraft[]> {
-  const asyncSurfaces = (Object.keys(SURFACE_CAPABILITIES) as SurfaceId[]).filter(
-    (id) => id !== "dm" && capabilitiesOf(id).tempo === "async",
-  );
+  const asyncSurfaces = ASYNC_SURFACES();
   if (!asyncSurfaces.length) return [];
   const { rows } = await q.query<PersistedRow>(
-    `SELECT p.show_id, p.id, p.author, p.question, p.draft, p.sent_text, p.status,
-            p.verdict, p.confidence, p.guards, p.evidence, p.rules, p.thread,
-            p.at, p.sent_at, p.url, p.room,
-            s.title, s.seller_handle, s.external_id,
-            COALESCE(s.surface, s.source) AS surface
-       FROM reply_proposals p
-       JOIN shows s ON s.id = p.show_id
+    `${STORED_SELECT}
       WHERE (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
         AND COALESCE(s.surface, s.source) = ANY($2)
       ORDER BY p.at DESC
@@ -328,47 +320,79 @@ export async function persistedAsyncDrafts(
     [accountId, asyncSurfaces, limit],
   );
   return rows.flatMap((r) => {
-    const status = STATUS[r.status as ProposalStatus];
-    if (!status) return [];
-    const origin = originOfSession({
-      showId: r.show_id, source: r.surface as SurfaceId, sellerHandle: r.seller_handle,
-      title: r.title, externalId: r.external_id,
-    } as ShowSummary);
-    // The room this DRAFT was written in, when the session spans several.
-    const room = r.room?.trim() || origin.label;
-    const rules = rulesOf({
-      guards: r.guards ?? [], evidence: r.evidence ?? [], rules: r.rules ?? undefined,
-    } as ReplyProposal);
-    return [{
-      id: r.id,
-      surface: r.surface as SurfaceId,
-      origin: { ...origin, label: room },
-      room,
-      sessionId: r.show_id,
-      question: { author: r.author, text: r.question, at: r.at, url: r.url ?? null },
-      draft: r.sent_text ?? r.draft,
-      createdAt: r.at,
-      status,
-      sentAt: r.sent_at ?? null,
-      ...(r.thread ? { thread: r.thread } : {}),
-      evidence: r.evidence ?? [],
-      guards: r.guards ?? [],
-      verdict: r.verdict as Verdict,
-      confidence: r.confidence,
-      ...(rules.length ? { rules } : {}),
-    }];
+    const d = toStoredDraft(r);
+    return d ? [d] : [];
   });
 }
 
-/** One stored draft, by the id the queue gave it. Scoped in the statement. */
+/** One row of `reply_proposals`, as the card the queue renders. Null for a
+ *  status that is not a draft yet — `drafting` is never written, but a row is
+ *  data from a database and this is the one place that decides. */
+function toStoredDraft(r: PersistedRow): SurfaceDraft | null {
+  const status = STATUS[r.status as ProposalStatus];
+  if (!status) return null;
+  const origin = originOfSession({
+    showId: r.show_id, source: r.surface as SurfaceId, sellerHandle: r.seller_handle,
+    title: r.title, externalId: r.external_id,
+  } as ShowSummary);
+  // The room this DRAFT was written in, when the session spans several.
+  const room = r.room?.trim() || origin.label;
+  const rules = rulesOf({
+    guards: r.guards ?? [], evidence: r.evidence ?? [], rules: r.rules ?? undefined,
+  } as ReplyProposal);
+  return {
+    id: r.id,
+    surface: r.surface as SurfaceId,
+    origin: { ...origin, label: room },
+    room,
+    sessionId: r.show_id,
+    question: { author: r.author, text: r.question, at: r.at, url: r.url ?? null },
+    draft: r.sent_text ?? r.draft,
+    createdAt: r.at,
+    status,
+    sentAt: r.sent_at ?? null,
+    ...(r.thread ? { thread: r.thread } : {}),
+    evidence: r.evidence ?? [],
+    guards: r.guards ?? [],
+    verdict: r.verdict as Verdict,
+    confidence: r.confidence,
+    ...(rules.length ? { rules } : {}),
+  };
+}
+
+/** One stored draft, by the id the queue gave it. Scoped in the statement: a
+ *  stranger's draft is not found rather than refused, which is the answer that
+ *  does not confirm it exists. */
 export async function storedDraft(
   q: Queryable,
   accountId: string,
   id: string,
 ): Promise<SurfaceDraft | null> {
-  const all = await persistedAsyncDrafts(q, accountId, 1000);
-  return all.find((d) => d.id === id) ?? null;
+  const { rows } = await q.query<PersistedRow>(
+  `${STORED_SELECT}
+    WHERE (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND COALESCE(s.surface, s.source) = ANY($2)
+      AND p.id = $3
+    LIMIT 1`,
+  [accountId, ASYNC_SURFACES(), id],
+  );
+  return rows[0] ? toStoredDraft(rows[0]) : null;
 }
+
+/** The async surfaces a session can be open on. `dm` is the follow-up inbox,
+ *  which is its own table and its own half of the queue. */
+const ASYNC_SURFACES = (): SurfaceId[] =>
+  (Object.keys(SURFACE_CAPABILITIES) as SurfaceId[]).filter(
+  (id) => id !== "dm" && capabilitiesOf(id).tempo === "async",
+  );
+
+const STORED_SELECT = `SELECT p.show_id, p.id, p.author, p.question, p.draft, p.sent_text, p.status,
+          p.verdict, p.confidence, p.guards, p.evidence, p.rules, p.thread,
+          p.at, p.sent_at, p.url, p.room,
+          s.title, s.seller_handle, s.external_id,
+          COALESCE(s.surface, s.source) AS surface
+     FROM reply_proposals p
+     JOIN shows s ON s.id = p.show_id`;
 
 /**
  * The operator pasted a RESTORED draft in themselves.
@@ -393,16 +417,16 @@ export async function markStoredSent(
   if (existing.status === "blocked") return { draft: existing, refused: "blocked" };
   if (existing.status === "dismissed") return { draft: existing, refused: "dismissed" };
   await q.query(
-    `UPDATE reply_proposals p
-        SET status = 'sent',
-            sent_text = COALESCE(p.sent_text, p.draft),
-            sent_at = COALESCE(p.sent_at, $3),
-            decided_at = COALESCE(p.decided_at, $3)
-       FROM shows s
-      WHERE s.id = p.show_id AND p.id = $2
-        AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
-        AND p.status NOT IN ('blocked', 'dismissed')`,
-    [accountId, id, new Date().toISOString()],
+  `UPDATE reply_proposals p
+      SET status = 'sent',
+          sent_text = COALESCE(p.sent_text, p.draft),
+          sent_at = COALESCE(p.sent_at, $3),
+          decided_at = COALESCE(p.decided_at, $3)
+     FROM shows s
+    WHERE s.id = p.show_id AND p.id = $2
+      AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND p.status NOT IN ('blocked', 'dismissed')`,
+  [accountId, id, new Date().toISOString()],
   );
   return { draft: await storedDraft(q, accountId, id) };
 }
@@ -417,13 +441,13 @@ export async function dismissStored(
   if (!existing) return null;
   if (existing.status === "sent") return existing;
   await q.query(
-    `UPDATE reply_proposals p
-        SET status = 'dismissed', decided_at = COALESCE(p.decided_at, $3)
-       FROM shows s
-      WHERE s.id = p.show_id AND p.id = $2
-        AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
-        AND p.status NOT IN ('sent', 'auto_sent')`,
-    [accountId, id, new Date().toISOString()],
+  `UPDATE reply_proposals p
+      SET status = 'dismissed', decided_at = COALESCE(p.decided_at, $3)
+     FROM shows s
+    WHERE s.id = p.show_id AND p.id = $2
+      AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND p.status NOT IN ('sent', 'auto_sent')`,
+  [accountId, id, new Date().toISOString()],
   );
   return storedDraft(q, accountId, id);
 }
