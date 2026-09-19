@@ -100,7 +100,13 @@ export interface ChatMessage {
   proposalId?: string;
 }
 
-export type EvidenceSource = "listing" | "policy" | "catalog" | "qa" | "market" | "host";
+export type EvidenceSource =
+  | "listing" | "policy" | "catalog" | "qa" | "market" | "host"
+  // The operator's own past text. Never grounding: a fact from this source is a
+  // STYLE reference, cited the way a fact is so the console can show which of
+  // the operator's own sentences shaped the draft, and kept out of the evidence
+  // the guards check a claim against. See src/persona/voice.ts.
+  | "persona";
 
 export interface Evidence {
   /** Stable, addressable id: `listing:lst_aj1_10#price`, `policy:shipping#intl`, … */
@@ -158,6 +164,10 @@ export interface ReplyProposal {
   spans: SpanBreakdown;
   createdAt: string;
   sentText?: string;
+  /** The operator's own past reply this draft was written in the manner of.
+   *  Style, not evidence — the console renders it as "written the way you
+   *  answered this in March", beside the citations rather than among them. */
+  styleRef?: { factId: string; text: string; label: string };
 }
 
 export type ActionKind =

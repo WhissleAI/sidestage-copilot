@@ -8,6 +8,7 @@
 // grounding guard with zero claims and gets flagged there.
 
 import type { Claim } from "../domain/types.js";
+import type { StyleRef } from "../persona/voice.js";
 import type { LlmPort } from "../llm/types.js";
 import {
   buildContextBlock, buildRegenerateBlock, buildRepairBlock, buildUserMessage, type ComposeInputs,
@@ -25,6 +26,12 @@ export interface Draft {
   /** false when the model did not return usable JSON — surfaced, never hidden. */
   parsedOk: boolean;
   raw: string;
+  /** The operator's own past reply this draft was written in the manner of, when
+   *  one was close enough to show. Carried on the draft so the console can say
+   *  "written the way you answered this in March" — style is cited the way a
+   *  fact is. It is NOT evidence: no claim may rest on it, and it never enters
+   *  the grounding set the guards check citations against. */
+  styleRef?: StyleRef;
 }
 
 export class Composer {
@@ -60,7 +67,8 @@ export class Composer {
         }, { maxTokens: REPLY_MAX_TOKENS })
       : await this.llm.chatTurn(msg, contextBlock, { maxTokens: REPLY_MAX_TOKENS });
 
-    return { draft: parseDraft(raw), contextBlock };
+    const draft = parseDraft(raw);
+    return { draft: inputs.styleRef ? { ...draft, styleRef: inputs.styleRef } : draft, contextBlock };
   }
 
   async repair(
@@ -143,7 +151,7 @@ export function normalizeFactId(raw: string): string {
  *  punctuation left stranded, rather than shipping an id to a buyer. */
 function stripFactIds(s: string): string {
   return s
-    .replace(/[\[(]?\b(?:listing|policy|qa|market|catalog):[A-Za-z0-9_.:-]+(?:#[A-Za-z_]+)?[\])]?/g, "")
+    .replace(/[\[(]?\b(?:listing|policy|qa|market|catalog|persona):[A-Za-z0-9_.:-]+(?:#[A-Za-z_]+)?[\])]?/g, "")
     .replace(/\s+([,.;:!?])/g, "$1")
     .replace(/\(\s*\)/g, "")
     .replace(/\s{2,}/g, " ")

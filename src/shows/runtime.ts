@@ -33,6 +33,8 @@ import { Pipeline } from "../pipeline/pipeline.js";
 import { WhissleClient } from "../llm/whissle.js";
 import { meter } from "../llm/meter.js";
 import { policy, policyScope, type SellerGuardrailPolicy } from "../guardrails/policy.js";
+import type { Persona } from "../persona/store.js";
+import type { Fact } from "../retrieval/facts.js";
 import { spendWindow } from "../llm/billing.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
 import type { SurfaceConnection, SurfaceId } from "../surfaces/types.js";
@@ -61,6 +63,9 @@ export interface ShowRuntimeOpts {
    *  comment arriving from eBay) runs inside this policy; request-driven
    *  work runs inside the caller's. */
   policyFor?: () => Promise<SellerGuardrailPolicy>;
+  /** The owner's persona and voice corpus, for the composer. Same contract as
+   *  `policyFor`: looked up per draft, so an edit reaches the next reply. */
+  personaFor?: () => Promise<{ persona: Persona; voice: Fact[] } | null>;
   /** The watcher decided the show is over. The registry finishes the session. */
   onEnded?: (showId: string, why: string) => void;
 }
@@ -189,6 +194,7 @@ export class ShowRuntime {
     this.pipeline = new Pipeline({
       repo: this.repo,
       seller: () => this.seller,
+      persona: this.o.personaFor,
       llm: this.llm,
       retriever: this.retriever,
       research: this.research,

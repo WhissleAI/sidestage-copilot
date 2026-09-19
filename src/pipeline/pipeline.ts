@@ -29,6 +29,8 @@ import type { Repo } from "../domain/repo.js";
 import type { LlmPort } from "../llm/types.js";
 import { LlmError } from "../llm/types.js";
 import { Composer } from "../compose/composer.js";
+import type { Persona } from "../persona/store.js";
+import { styleRef, type StyleRef } from "../persona/voice.js";
 import { Retriever } from "../retrieval/retriever.js";
 import type { ResearchService } from "../research/research.js";
 import type { GuardInput } from "../guardrails/types.js";
@@ -39,6 +41,7 @@ import type { IncomingMessage } from "../ingest/sources.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
 import { hostFacts } from "../retrieval/hostFacts.js";
 import { toEvidence, type RetrievalResult } from "../retrieval/retriever.js";
+import type { Fact } from "../retrieval/facts.js";
 import { LatencyTracker, SpanTimer } from "../latency/spans.js";
 import { cacheKey, ReplyCache } from "../latency/cache.js";
 import { decideAction, decideReply } from "../autonomy/ladder.js";
@@ -58,6 +61,15 @@ export interface PipelineDeps {
   repo: Repo;
   /** Who is selling, and in what voice. Supplied by the chosen catalog. */
   seller?: () => { handle: string; name: string; about: string; voice: string } | null;
+  /**
+   * The owner's persona and their voice corpus, looked up per draft so an edit
+   * made mid-show reaches the next reply — the same contract `policyFor` has.
+   *
+   * Absent for a show with no owner, and null for an owner who has not written
+   * one; in both cases nothing below runs and the prompt is the prompt that
+   * shipped before personas existed.
+   */
+  persona?: () => Promise<{ persona: Persona; voice: Fact[] } | null>;
   llm: LlmPort;
   retriever: Retriever;
   /** Comps and market position. Called on the reply path for the questions that
@@ -312,12 +324,19 @@ export class Pipeline {
         this.d.events.onProposal(streaming);
       };
 
+      // The voice corpus is NOT merged into `r.facts`. A style reference that
+      // sat among the grounding facts would be citable, and a claim citing one
+      // would pass the grounding guard with a provenance chip pointing at a
+      // sentence about a different item on a different day.
+      const p = await this.persona();
       const { draft, contextBlock } = await this.composer.draft(
         {
           show,
           pinned: show.pinnedListingId ? await this.d.repo.listing(show.pinnedListingId) : null,
           context: this.d.showContext.current(),
           seller: this.d.seller?.() ?? null,
+          persona: p?.persona ?? null,
+          styleRef: p ? styleRef(msg.text, p.voice) : null,
           facts: r.facts,
           abstain: r.abstain,
           viaAnaphora: r.slots.viaAnaphora,
@@ -369,6 +388,9 @@ export class Pipeline {
       const result = {
         answer: finalDraft.answer,
         claims: finalDraft.claims,
+        // From the FIRST draft: a repair rewrites the words, not the manner it
+        // was asked to write them in.
+        ...(draft.styleRef ? { styleRef: draft.styleRef } : {}),
         evidence: r.evidence,
         guards: chain.guards,
         verdict: chain.verdict,
@@ -401,6 +423,19 @@ export class Pipeline {
     }
   }
 
+  /** The owner's persona, or null — and never a reason to fail a draft. A
+   *  persona lookup that throws would cost a buyer their answer over a voice
+   *  setting, so the reply is written in the default voice instead. */
+  private async persona(): Promise<{ persona: Persona; voice: Fact[] } | null> {
+    if (!this.d.persona) return null;
+    try {
+      return await this.d.persona();
+    } catch (e) {
+      console.warn(`[pipeline] persona unavailable: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
   /** Apply the autonomy ladder, record metrics, emit. */
   private async finish(
     base: ReplyProposal,
@@ -408,6 +443,7 @@ export class Pipeline {
       answer: string; claims: ReplyProposal["claims"]; evidence: Evidence[];
       guards: ReplyProposal["guards"]; verdict: ReplyProposal["verdict"];
       confidence: number; repaired: boolean; spans: ReplyProposal["spans"];
+      styleRef?: StyleRef;
     },
     msg: ChatMessage,
   ): Promise<ReplyProposal> {
@@ -567,12 +603,15 @@ export class Pipeline {
     const r = this.d.retriever.retrieve(question, { pinnedId: show.pinnedListingId });
     this.addHostFacts(question, r);
 
+    const p = await this.persona();
     const { draft } = await this.composer.draft(
       {
         show,
         pinned: show.pinnedListingId ? await this.d.repo.listing(show.pinnedListingId) : null,
         context: this.d.showContext.current(),
         seller: this.d.seller?.() ?? null,
+        persona: p?.persona ?? null,
+        styleRef: p ? styleRef(question, p.voice) : null,
         facts: r.facts,
         abstain: r.abstain,
         viaAnaphora: r.slots.viaAnaphora,

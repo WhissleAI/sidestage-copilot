@@ -39,6 +39,9 @@ import {
   type SettingsView,
 } from "../settings/store.js";
 import { policy, policyScope, DEFAULT_POLICY } from "../guardrails/policy.js";
+import { PersonaStore, sanitizePersona, type Persona } from "../persona/store.js";
+import { VoiceCorpus } from "../persona/voice.js";
+import { withBoundaries } from "../persona/boundaries.js";
 import { WhissleSessions } from "../llm/sessions.js";
 import { SessionSignals } from "../shows/signals.js";
 import { showRecord } from "../shows/record.js";
@@ -147,8 +150,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.addHook("onRequest", (req, _reply, done) => {
     const a = actorOf(req as object);
     if (!a) return done();
-    settings
-      .forAccount(a.id)
+    armedFor(a.id)
       .then((p) => policyScope.run(p, done))
       .catch(() => done());
   });
@@ -438,7 +440,28 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // in this process on the next reply, and on the agent itself for every other
   // channel it answers on.
   const settings = new SettingsStore(pgPool());
-  shows.policyFor = (accountId) => settings.forAccount(accountId);
+  const personas = new PersonaStore(pgPool());
+  const voice = new VoiceCorpus(pgPool());
+
+  /**
+   * The policy this account's replies are actually checked against.
+   *
+   * One function, because there are two enforcement points — the request hook
+   * above and each show runtime's watcher-driven work — and a persona boundary
+   * armed in only one of them would hold when a seller pressed send and not
+   * when a buyer's comment arrived from eBay. `withBoundaries` returns the
+   * policy unchanged for an account with no persona, so this is the same object
+   * `settings.forAccount` returned before.
+   */
+  const armedFor = async (accountId: string) =>
+    withBoundaries(await settings.forAccount(accountId), await personas.forAccount(accountId));
+
+  shows.policyFor = armedFor;
+  shows.personaFor = async (accountId) => {
+    const persona = await personas.forAccount(accountId);
+    if (!persona) return null;
+    return { persona, voice: await voice.facts(accountId) };
+  };
 
   /** The agents a save has to reach: one per catalog, and the active show's. */
   const armTargets = async (): Promise<string[]> => {
@@ -505,6 +528,61 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
 
+
+  // ── persona ───────────────────────────────────────────────────────────────
+  //
+  // Owner-scoped throughout, like every other account-shaped resource here: the
+  // account on the request is the only persona and the only voice corpus any of
+  // these three routes can reach. That matters more than usual — the corpus is
+  // the operator's own past text, and a route that took an account id from the
+  // body would let one seller read another's sentences and then write in them.
+  const personaView = async (accountId: string) => {
+    const persona = await personas.load(accountId);
+    const docs = await voice.docs(accountId, 50);
+    return {
+      persona,
+      voice: {
+        total: docs.length,
+        // What the corpus is MADE of, not just how big it is: an operator
+        // deciding whether to trust the voice needs to see whose shows it came
+        // out of.
+        docs: docs.slice(0, 20).map((d) => ({
+          factId: `persona:${d.docId}`, question: d.question, text: d.text,
+          origin: d.origin, showId: d.showId, showTitle: d.showTitle, at: d.at,
+        })),
+      },
+    };
+  };
+
+  app.get("/api/persona", async (req) => {
+    const a = actorOf(req as object);
+    return a ? personaView(a.id) : { persona: null, voice: { total: 0, docs: [] } };
+  });
+
+  app.put<{ Body: unknown }>("/api/persona", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "edit the persona");
+    if (!actor) return;
+    const patch: Partial<Persona> = sanitizePersona(req.body);
+    await personas.upsert(actor.id, patch);
+    // Boundaries are guard rules the moment they are saved. Re-arm Layer B for
+    // THIS request's scope so the seller's own dry-run checks against what they
+    // just wrote rather than against the policy that was scoped in at the top
+    // of the request.
+    settings.activate(await armedFor(actor.id));
+    return personaView(actor.id);
+  });
+
+  app.post<{ Body: { paste?: unknown } }>("/api/persona/learn", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "learn the persona's voice");
+    if (!actor) return;
+    const paste = Array.isArray(req.body?.paste)
+      ? (req.body!.paste as unknown[]).map((x) => String(x)).slice(0, 50)
+      : typeof req.body?.paste === "string"
+        ? [req.body.paste as string]
+        : [];
+    const report = await voice.learn(actor.id, { paste });
+    return { ...report, ...(await personaView(actor.id)) };
+  });
 
   // ── health ────────────────────────────────────────────────────────────────
   app.get("/health", async () => ({

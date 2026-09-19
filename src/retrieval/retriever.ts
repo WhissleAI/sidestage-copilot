@@ -21,8 +21,10 @@ import { cosine, ngramVector, terms } from "./text.js";
 import { GENERIC_TITLE_TOKENS, POLICY_LED, resolveSlots, type Slots } from "./slots.js";
 
 /** RRF damping. 60 is the value from the original Cormack et al. formulation;
- *  it flattens the head enough that one leg cannot dominate the fusion. */
-const RRF_K = 60;
+ *  it flattens the head enough that one leg cannot dominate the fusion.
+ *  Exported so `persona/voice.ts` fuses its two legs with the same constant
+ *  rather than picking a second one that drifts from this. */
+export const RRF_K = 60;
 const MAX_FACTS = 8;
 /**
  * Abstention backstop.
