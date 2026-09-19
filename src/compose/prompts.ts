@@ -11,6 +11,10 @@
 
 import type { Fact } from "../retrieval/facts.js";
 import type { ThreadContext } from "../ingest/threadContext.js";
+import type { Persona, Register } from "../persona/store.js";
+import { disclosureRequirements } from "../persona/boundaries.js";
+import type { StyleRef } from "../persona/voice.js";
+import type { SurfaceId } from "../surfaces/types.js";
 import type { ShowContext, ShowState, SignalDistribution } from "../domain/types.js";
 import { prettyLabel } from "../ingest/signals.js";
 import type { ListingWithDescription } from "../domain/repo.js";
@@ -23,6 +27,12 @@ export interface ComposeInputs {
   show: ShowState;
   /** From the catalog the operator chose at setup. */
   seller?: { handle: string; name: string; about: string; voice: string } | null;
+  /** The operator in their own words, when they have written one. Absent for
+   *  every account that has not, and the block then renders exactly as before. */
+  persona?: Persona | null;
+  /** One past reply of the operator's own, chosen by resemblance to THIS
+   *  question. Style only — see the block below and persona/voice.ts. */
+  styleRef?: StyleRef | null;
   pinned: ListingWithDescription | null;
   context: ShowContext | null;
   /** The branch above the message being answered, on an asynchronous surface.
@@ -87,6 +97,78 @@ function threadBlock(t: ThreadContext): string[] {
   return lines;
 }
 
+/** 1 is how you text a friend, 5 is how you write to a landlord. Rendered as
+ *  words rather than as "formality: 4/5", because a number on a scale the model
+ *  has never seen is a number it has to guess the meaning of. */
+const FORMALITY = [
+  "as loose as a message to a friend",
+  "casual, contractions and all",
+  "plain and direct",
+  "polished but not stiff",
+  "formal and careful",
+];
+
+function registerLine(r: Register, surface: SurfaceId): string {
+  const len = r.length === "medium" ? "up to three or four sentences" : "one or two sentences";
+  return (
+    `How you write on ${surface}: ${len}, ${FORMALITY[r.formality - 1] ?? FORMALITY[2]}, ` +
+    `${r.emoji ? "emoji are fine" : "no emoji"}.${r.notes ? ` ${r.notes}` : ""}`
+  );
+}
+
+/**
+ * The operator, in their own words.
+ *
+ * Placed above the reply rules and below the role, where the seller block used
+ * to sit — and it REPLACES that block rather than joining it. The seller block
+ * renders a catalog's blurb about who is selling; a persona is the operator's
+ * own account of the same thing. Rendering both hands the model two answers to
+ * "who is talking, and how do they sound", in two different voices, and invites
+ * it to average them.
+ *
+ * The style reference is the part that needs the loudest fence. It is the only
+ * text in this prompt that is both quoted verbatim and NOT a fact, so the
+ * instruction says so twice and says what to do when it and a grounding fact
+ * disagree — because a past reply about a different item on a different day
+ * will sometimes contain a number, and a model handed a number in quotes will
+ * use it unless told plainly not to.
+ */
+function personaBlock(i: ComposeInputs, p: Persona): string[] {
+  const lines = ["=== THE PERSONA ==="];
+  if (p.name) lines.push(`You are writing as ${p.name}.`);
+  if (p.about) lines.push(p.about);
+  if (p.voice) lines.push(`Your voice: ${p.voice}`);
+
+  const reg = p.registers[i.show.source];
+  if (reg) {
+    lines.push(registerLine(reg, i.show.source));
+    // The register is the standing answer; the delivery reading below is
+    // tonight's. Said only where both exist, so the model is not told to
+    // reconcile a measurement it was never given.
+    if (i.context?.style || i.context?.voice) {
+      lines.push(
+        "That is how you always sound here. The reading of the host's delivery below is how the room " +
+          "sounds right now — match its energy without changing your own words.",
+      );
+    }
+  }
+
+  for (const d of disclosureRequirements(p)) {
+    lines.push(`Always make clear, in your own words and without quoting this line: ${quoted(d, 200)}`);
+  }
+
+  if (i.styleRef) {
+    lines.push(
+      `How you answered something like this before (${i.styleRef.label}):`,
+      `  ${quoted(i.styleRef.text, 400)}`,
+      "That is HOW to say it, never WHAT to say. Nothing in it is a fact about this question: it grounds",
+      "no claim, you must not cite it, and where it disagrees with a grounding fact, the fact is right.",
+    );
+  }
+  lines.push("");
+  return lines;
+}
+
 export function buildContextBlock(i: ComposeInputs): string {
   const lines: string[] = [];
 
@@ -98,7 +180,9 @@ export function buildContextBlock(i: ComposeInputs): string {
     "",
   );
 
-  if (i.seller) {
+  if (i.persona) {
+    lines.push(...personaBlock(i, i.persona));
+  } else if (i.seller) {
     lines.push(
       "=== THE SELLER ===",
       i.seller.about,

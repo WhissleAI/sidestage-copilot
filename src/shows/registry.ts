@@ -17,6 +17,8 @@ import { config } from "../config.js";
 import { db } from "../db/pg.js";
 import type { EventHub, EventName } from "../api/hub.js";
 import type { SellerGuardrailPolicy } from "../guardrails/policy.js";
+import type { Persona } from "../persona/store.js";
+import type { Fact } from "../retrieval/facts.js";
 import { ShowRuntime } from "./runtime.js";
 import { describeFrames } from "./frameDescriber.js";
 import type { ShowReport } from "./sessionRecord.js";
@@ -72,6 +74,11 @@ export class ShowRegistry {
 
   /** Set by the API layer: the merged guard settings for one account. */
   policyFor: ((accountId: string) => Promise<SellerGuardrailPolicy>) | null = null;
+
+  /** Set by the API layer: one account's persona and voice corpus. Null until
+   *  it is, so a runtime started before the routes are registered composes the
+   *  way it always did rather than failing. */
+  personaFor: ((accountId: string) => Promise<{ persona: Persona; voice: Fact[] } | null>) | null = null;
 
   /** Fan a runtime's event out to consoles, tagged with its show. */
   private events = {
@@ -164,6 +171,9 @@ export class ShowRegistry {
         events: this.events,
         policyFor: meta.ownerAccountId && this.policyFor
           ? (() => this.policyFor!(meta.ownerAccountId!))
+          : undefined,
+        personaFor: meta.ownerAccountId && this.personaFor
+          ? (() => this.personaFor!(meta.ownerAccountId!))
           : undefined,
         // The feed went silent for a quarter of an hour: finish the session
         // the way a detach would, report and all, and free the slot.
