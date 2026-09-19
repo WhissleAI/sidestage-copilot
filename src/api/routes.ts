@@ -15,10 +15,13 @@ import { all as surfaceAdapters, resolve as resolveSurface } from "../surfaces/r
 import { SURFACE_CAPABILITIES, SurfaceUnavailable, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
 import { surfaceReadiness } from "../surfaces/readiness.js";
 import { behindBand, nowBand } from "./home.js";
+import { AuditLog } from "../actions/audit.js";
 import { DiscoverService } from "../discover/service.js";
 import { InterestStore, deriveInterests, itemForDerivation, slugify, type Interest } from "../discover/interests.js";
 import {
-  draftFromFollowUp, draftQueue, draftsFromSession, type DraftStatus,
+  dismissStored, draftFromFollowUp, draftQueue, draftsFromSession, markStoredSent,
+  persistedAsyncDrafts, storedDraft, storedEntries,
+  type DraftStatus, type SurfaceDraft,
 } from "./drafts.js";
 import {
   FollowUpInbox, buildFollowUps, openDrafter, type FollowUpStatus,
@@ -1831,7 +1834,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     //
     // `watched` already carries the queue depth and the blocked count for every
     // runtime (ShowRegistry.list), so the NOW band costs no query of its own.
-    const now = nowBand(watched, inbox.ready);
+    // The same durable half `/api/drafts` reads, through the same functions, so
+    // the count here and the list there cannot disagree.
+    const stored = accountId
+      ? await persistedAsyncDrafts(pgPool(), accountId).catch(() => [] as SurfaceDraft[])
+      : [];
+    const stillLive = new Set(
+      watched.flatMap((w) => (shows.has(w.showId) ? shows.get(w.showId).pipeline.list().map((p) => p.id) : [])),
+    );
+    const now = nowBand(watched, inbox.ready, storedEntries(stored.filter((d) => !stillLive.has(d.id))));
     const behind = behindBand(
       reportRows.map((x) => ({
         showId: x.show_id, title: x.title, surface: x.surface, source: x.source,
@@ -2237,11 +2248,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       return reply.code(404).send({ error: `no surface called "${req.query.surface}"` });
     }
 
-    const [sessions, inbox] = await Promise.all([
+    const [sessions, stored, inbox] = await Promise.all([
       asyncSessions(actor.id),
+      // The durable half: every async draft this account has, whether or not a
+      // runtime is holding it. A deploy used to empty this page.
+      persistedAsyncDrafts(pgPool(), actor.id).catch((e) => {
+        console.warn(`[drafts] stored drafts unavailable — ${(e as Error).message}`);
+        return [];
+      }),
       followups.queue(actor.id),
     ]);
-    const queue = draftQueue({ sessions, followups: inbox });
+    const queue = draftQueue({ sessions, persisted: stored, followups: inbox });
 
     // `waiting` is the WHOLE account's waiting queue, whatever the filters say:
     // it is the number home prints, and a per-surface tab must not change it
@@ -2279,6 +2296,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     for (const s of await asyncSessions(accountId)) {
       if (s.proposals.some((p) => p.id === id)) return { kind: "proposal" as const, session: s.summary };
     }
+    // A draft whose runtime is gone is still in the queue and still actionable.
+    // Looked at LAST, so a live session's copy always wins.
+    const stored = await storedDraft(pgPool(), accountId, id).catch(() => null);
+    if (stored) return { kind: "stored" as const, draft: stored };
     return null;
   };
 
@@ -2305,6 +2326,25 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       }
       return { draft: draftFromFollowUp(row, found.title) };
     }
+    if (found.kind === "stored") {
+      const { draft, refused, already } = await markStoredSent(pgPool(), actor.id, req.params.id);
+      if (!draft) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+      if (refused === "blocked") {
+        return reply.code(409).send({
+          error: "this reply was blocked and cannot be sent — a guard blocked it",
+          refused: true, draft,
+        });
+      }
+      if (refused === "dismissed") return reply.code(409).send({ error: "that draft was dismissed", draft });
+      if (already) return { draft };
+      // The ledger is per show and outlives the runtime that wrote to it.
+      await new AuditLog(pgPool(), draft.sessionId)
+        .append("reply_sent", who(req as object), `sent to ${draft.question.author}`, {
+          proposalId: draft.id, text: draft.draft, restored: true,
+        })
+        .catch((e: unknown) => console.warn(`[drafts] audit for ${draft.id} not written — ${(e as Error).message}`));
+      return { draft };
+    }
     try {
       const p = await shows.get(found.session.showId).pipeline.send(req.params.id, undefined, who(req as object));
       return { draft: draftsFromSession(found.session, [p])[0] ?? null };
@@ -2325,6 +2365,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const row = await followups.dismiss(actor.id, req.params.id);
       if (!row) return reply.code(404).send({ error: `no draft ${req.params.id}` });
       return { draft: draftFromFollowUp(row, found.title) };
+    }
+    if (found.kind === "stored") {
+      const draft = await dismissStored(pgPool(), actor.id, req.params.id);
+      if (!draft) return reply.code(404).send({ error: `no draft ${req.params.id}` });
+      return { draft };
     }
     try {
       const p = shows.get(found.session.showId).pipeline.dismiss(req.params.id);

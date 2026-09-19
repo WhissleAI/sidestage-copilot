@@ -103,12 +103,18 @@ export class SessionRecord {
         // zero drafted replies for as long as it stayed that way.
         `INSERT INTO reply_proposals (show_id, id, message_id, author, question, draft, sent_text,
            status, verdict, confidence, repaired, abstained, latency_ms, cache_hit, guards, evidence, intent, at,
-           decided_at, edited)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18,$19,$20)
+           decided_at, edited, sent_at, rules, thread, url, room)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18,$19,$20,
+                 $21,$22::jsonb,$23::jsonb,$24,$25)
          ON CONFLICT (show_id, id) DO UPDATE SET
            draft = EXCLUDED.draft, sent_text = EXCLUDED.sent_text, status = EXCLUDED.status,
            verdict = EXCLUDED.verdict, confidence = EXCLUDED.confidence,
            guards = EXCLUDED.guards, evidence = EXCLUDED.evidence,
+           rules = EXCLUDED.rules, thread = EXCLUDED.thread,
+           -- Stamped once. The moment a draft went out does not move, whatever
+           -- a later write says — the same rule FollowUpInbox.markSent keeps in
+           -- SQL for the other half of this queue.
+           sent_at = COALESCE(reply_proposals.sent_at, EXCLUDED.sent_at),
            -- Stamped the first time the seller acts and never moved after, so a
            -- later status change cannot rewrite how long they took to decide.
            decided_at = COALESCE(reply_proposals.decided_at, EXCLUDED.decided_at),
@@ -124,6 +130,10 @@ export class SessionRecord {
           // would make an ignored proposal look like a considered one.
           DECIDED.has(p.status) ? new Date().toISOString() : null,
           Boolean(p.sentText && p.sentText.trim() !== (p.draft ?? "").trim()),
+          p.sentAt ?? null,
+          p.rules ? JSON.stringify(p.rules) : null,
+          p.thread ? JSON.stringify(p.thread) : null,
+          p.message.url ?? null, p.message.room ?? null,
         ],
       )
       // Fire-and-forget is right; silent is not. A record that quietly fails

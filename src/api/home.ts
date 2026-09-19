@@ -124,7 +124,18 @@ export interface ReportRow {
  * some process once attached it; a runtime IS the watching, and a session whose
  * process died is not something a human can do anything about.
  */
-export function nowBand(shows: ShowSummary[], followupsReady: number): NowBand {
+export function nowBand(
+  shows: ShowSummary[],
+  followupsReady: number,
+  /**
+   * The drafts of async sessions this process is NOT holding — rooms whose
+   * watch ended, or whose runtime a restart took with it. They are work waiting
+   * for a person exactly as the live ones are, and leaving them out is what
+   * made a deploy look like an empty queue. Entries, in first-appearance order,
+   * from `storedEntries` — the same list `/api/drafts` counts.
+   */
+  storedDrafts: { surface: SurfaceId; count: number }[] = [],
+): NowBand {
   const onAir = shows.filter((s) => s.status === "live");
 
   // An asynchronous session has nobody sitting in front of it: everything it
@@ -138,6 +149,7 @@ export function nowBand(shows: ShowSummary[], followupsReady: number): NowBand {
     ...onAir
       .filter((s) => capabilitiesOf(s.source).tempo === "async")
       .map((s) => ({ surface: s.source, count: s.awaiting })),
+    ...storedDrafts,
     { surface: "dm" as SurfaceId, count: followupsReady },
   ]);
 
