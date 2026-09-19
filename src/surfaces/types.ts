@@ -142,11 +142,42 @@ export const SIMULATED_CAPABILITIES: SurfaceCapabilities = {
   ...EBAYLIVE_CAPABILITIES,
 };
 
+/**
+ * Whatnot and TikTok Live: live commerce read through a browser, and nothing
+ * more. The difference from eBay Live is not the tempo, it is what we HOLD.
+ *
+ * · `delivery: "draft-only"` — neither platform exposes a way for us to post
+ *   into a room's chat. Automating a keystroke into the seller's own browser
+ *   would be a way, and it is the kind of way that gets an account banned, so
+ *   the reply is written for a human to send and the code cannot be configured
+ *   out of that.
+ * · `perception: false` — we read the DOM, not the stream. The audio and video
+ *   are in a player we never decode, so the host-signal work (pace, dead air,
+ *   what the host just said) has nothing to run on here and must not be
+ *   offered as if it did.
+ * · The five listing writes are gone. Every one of them ends at a marketplace
+ *   we hold seller credentials for; we hold none for Whatnot or TikTok, so a
+ *   markdown here would change OUR row while the platform kept selling at the
+ *   old price — a write that reports success and changes nothing a buyer can
+ *   see. What is left is the two kinds that only ever write to records we own:
+ *   marking a moment, and handing a question to the human.
+ * · `communityRules: false` — a room's rules on these platforms are said out
+ *   loud by the host, not published anywhere we can retrieve per room.
+ */
+export const SCRAPED_LIVE_CAPABILITIES: SurfaceCapabilities = {
+  tempo: "live",
+  delivery: "draft-only",
+  perception: { audio: false, video: false },
+  actions: ["mark_highlight", "flag_for_human"],
+  corpora: ["listing", "policy", "qa"],
+  communityRules: false,
+};
+
 export const SURFACE_CAPABILITIES: Record<SurfaceId, SurfaceCapabilities> = {
   simulated: SIMULATED_CAPABILITIES,
   ebaylive: EBAYLIVE_CAPABILITIES,
-  whatnot: { ...EBAYLIVE_CAPABILITIES },
-  tiktoklive: { ...EBAYLIVE_CAPABILITIES },
+  whatnot: SCRAPED_LIVE_CAPABILITIES,
+  tiktoklive: SCRAPED_LIVE_CAPABILITIES,
   twitch: {
     tempo: "live",
     delivery: "api",

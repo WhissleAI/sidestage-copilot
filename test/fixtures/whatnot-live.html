@@ -1,0 +1,50 @@
+<!--
+  A Whatnot live room, trimmed to the shape src/surfaces/whatnot/scrape.ts
+  reads. Hand-reduced, not a capture of a real room: Whatnot sits behind a
+  Cloudflare managed challenge (a plain GET returns 403 "Just a moment...",
+  measured 2026-09-18), so a capture cannot be refreshed on demand, and a real
+  capture would mean committing a real seller's chat.
+
+  Two markups on purpose. The first three messages carry `data-testid`, which
+  is what the current app ships; the fourth uses the hashed CSS-module shape
+  the app still falls back to on narrow viewports. Both are in the selector's
+  comma list, and this fixture is what proves the list is doing its job.
+-->
+<div id="root">
+  <header>
+    <h1 class="ShowTitle-a91f">Sunday Night Slabs — PSA 10 hunting</h1>
+    <div data-testid="viewer-count" class="viewerCount-31ab">1.2K watching</div>
+  </header>
+
+  <section data-testid="auction-card" data-listing-id="lot_9f31c2" class="AuctionCard-77de">
+    <h2 data-testid="listing-title">2003 Topps Chrome LeBron RC — PSA 9</h2>
+    <div data-testid="current-bid" class="currentBid-0b12">$1,250.00</div>
+    <div class="startPrice-77aa">Started at $0.99</div>
+  </section>
+
+  <ul data-testid="chat-feed" class="chatFeed-4c8a">
+    <li class="topSpacer-11aa"></li>
+
+    <div data-testid="chat-message" data-message-id="wn_msg_01HQ7">
+      <span data-testid="chat-message-username" class="username-2f10">sneakerdad</span>
+      <span data-testid="chat-message-body" class="messageText-9c04">is the size 10 still open?</span>
+    </div>
+
+    <div data-testid="chat-message" data-message-id="wn_msg_01HQ8">
+      <span data-testid="chat-message-username" class="username-2f10">cardsbykat</span>
+      <span data-testid="chat-message-body" class="messageText-9c04">
+        what&rsquo;s shipping to Canada on this one?
+      </span>
+    </div>
+
+    <!-- A system row: no author, no body. Chrome, not a buyer. -->
+    <div data-testid="chat-message" data-message-id="wn_sys_0003">
+      <span class="systemNotice-6b21">gradedgems started a giveaway</span>
+    </div>
+
+    <li data-id="wn_msg_01HQ9" class="chatMessage-BPsSWw">
+      <span class="Username__handle-a1b2">slabhunter</span>
+      <span class="MessageText__body-c3d4">GL all &mdash; in for $1,300</span>
+    </li>
+  </ul>
+</div>

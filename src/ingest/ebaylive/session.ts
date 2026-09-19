@@ -128,6 +128,20 @@ export async function openContext(o: {
   headless: boolean;
   userAgent: string;
   viewport?: { width: number; height: number };
+  /**
+   * Whether this browser carries the eBay session. Default true — every
+   * existing caller is an eBay read and none of them pass it.
+   *
+   * False is for the other scraped surfaces (Whatnot, TikTok Live), which are
+   * public pages needing none of it, and which need something eBay's own
+   * callers do not: to run for HOURS. The persistent profile is a single-writer
+   * lock — Chromium refuses a second launch against it with "browser is already
+   * running" — and discovery takes that lock every five minutes forever. A room
+   * watched through the profile would starve Discover for the length of the
+   * show. What those surfaces actually want from this function is the proxy,
+   * the shm flag and the real-Chrome channel, and they keep all three.
+   */
+  ebaySession?: boolean;
 }): Promise<{ ctx: BrowserContext; close: () => Promise<void> }> {
   const viewport = o.viewport ?? { width: 1440, height: 1200 };
   const args = [
@@ -140,7 +154,7 @@ export async function openContext(o: {
     "--disable-gpu",
   ];
   const proxy = discoveryProxy();
-  const profile = profileDir();
+  const profile = o.ebaySession === false ? null : profileDir();
   if (profile) {
     const persistent = (channel?: "chrome") =>
       chromium.launchPersistentContext(profile, {
@@ -154,7 +168,7 @@ export async function openContext(o: {
   const launch = (channel?: "chrome") =>
     chromium.launch({ headless: o.headless, args, ...(channel ? { channel } : {}), ...(proxy ? { proxy } : {}) });
   const browser = await launch("chrome").catch(() => launch());
-  const state = loadSession();
+  const state = o.ebaySession === false ? undefined : loadSession();
   const ctx = await browser.newContext({
     viewport, userAgent: o.userAgent,
     ...(state ? { storageState: state as never } : {}),

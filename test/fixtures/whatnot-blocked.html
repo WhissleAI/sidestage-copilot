@@ -1,0 +1,24 @@
+<!--
+  What Whatnot actually served this repo on 2026-09-18: a Cloudflare managed
+  challenge, HTTP 403, 5.8 KB, in place of the room. Trimmed to the parts the
+  page is identified by — the challenge container and the error slot are the
+  only stable ids in it.
+
+  This fixture exists because the failure it represents is SILENT. A challenge
+  page has a perfectly good DOM with no chat in it, so an extractor that only
+  looked for messages would report a busy room as a quiet one and the operator
+  would sit watching a feed that was never going to move.
+-->
+<!DOCTYPE html>
+<html lang="en-US">
+  <head><title>Just a moment...</title></head>
+  <body class="no-js">
+    <div class="main-wrapper" role="main">
+      <div class="main-content">
+        <h1 class="zone-name-title h1">whatnot.com</h1>
+        <h2 class="h2" id="challenge-running">Verifying you are human. This may take a few seconds.</h2>
+        <div id="challenge-error-text"></div>
+      </div>
+    </div>
+  </body>
+</html>
