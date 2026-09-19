@@ -15,6 +15,8 @@ import { all as surfaceAdapters, resolve as resolveSurface } from "../surfaces/r
 import { SURFACE_CAPABILITIES, SurfaceUnavailable, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
 import { surfaceReadiness } from "../surfaces/readiness.js";
 import { behindBand, nowBand } from "./home.js";
+import { DiscoverService } from "../discover/service.js";
+import { InterestStore, deriveInterests, itemForDerivation, slugify, type Interest } from "../discover/interests.js";
 import {
   draftFromFollowUp, draftQueue, draftsFromSession, type DraftStatus,
 } from "./drafts.js";
@@ -132,6 +134,20 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   const ebayAuth = new EbayOAuth(pgPool());
   const twitchAuth = new TwitchOAuth(pgPool());
   const preparer = new Preparer(pgPool());
+  // Discovery: the interests an operator sells around, and the surfaces that
+  // can be asked about them. One service per process — it holds the per-account
+  // cache that keeps Twitch and Reddit inside their rate limits and keeps a
+  // Whatnot read from launching a browser per poll.
+  const interests = new InterestStore(pgPool());
+  const discover = ctx.discover ?? new DiscoverService({
+    reddit: {
+      // Reddit meters per ACCOUNT, and a watched room spends that budget
+      // continuously. When one is open, discovery gives way: the drafts the
+      // operator is waiting on are worth more than a subreddit search, and the
+      // source says so rather than quietly returning nothing.
+      activeWatch: () => shows.anyLiveOn("reddit"),
+    },
+  });
   const actors = new WeakMap<object, Account | null>();
 
   // Paths a signed-out caller may reach: the front door, health, eBay's own
@@ -1596,6 +1612,135 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
   });
 
+  // ── discover ──────────────────────────────────────────────────────────────
+  //
+  // One question, asked of every surface: given what this operator sells, what
+  // is worth their attention right now, and why?
+  //
+  // The second half is the half that matters. A grid of what is live is a phone
+  // book; the operator's own catalogs say what they sell, and every hit carries
+  // the terms that put it on screen so the answer can be argued with by editing
+  // a chip rather than by trusting a score.
+
+  /** The catalogs this account OWNS — its imports and its preparations, not the
+   *  seeds. The same rule `visibleCatalogs` applies, minus the demos: a
+   *  fixture nobody imported is not evidence of what anybody sells. */
+  const ownCatalogIds = async (req: object): Promise<string[]> => {
+    const a = actorOf(req);
+    if (!a) return [];
+    const prepared = await preparer.list(a.id).catch(() => []);
+    const mine = new Set(prepared.map((p) => p.catalogId).filter(Boolean) as string[]);
+    return listCatalogs()
+      .filter((c) => mine.has(c.id) || c.id === `ebay-${a.handle}`)
+      .map((c) => c.id);
+  };
+
+  /**
+   * This account's interests: derived from Knowledge, then owned.
+   *
+   * Derivation runs on every read rather than on import, which sounds
+   * expensive and is not — the catalogs are already in memory and the whole
+   * pass is over a few hundred titles. It buys one thing that an import-time
+   * hook does not: an operator who loads listings and opens Discover in the
+   * next second sees chips, with no job to have run in between.
+   *
+   * `absorb` is additive and tombstone-aware, so a term the operator deleted
+   * stays deleted through every future import. That is the rule this whole
+   * table exists for.
+   */
+  const interestsFor = async (req: object): Promise<Interest[]> => {
+    const a = actorOf(req);
+    if (!a) return [];
+    const items = (await ownCatalogIds(req))
+      .flatMap((id) => getCatalog(id)?.items ?? [])
+      .map(itemForDerivation);
+    // Never invent an interest. No catalog is no interests, and Discover says
+    // so and points at Knowledge rather than showing a grid of strangers.
+    if (items.length) await interests.absorb(a.id, deriveInterests(items)).catch(() => {});
+    return interests.list(a.id);
+  };
+
+  app.get("/api/discover/interests", async (req) => {
+    const rows = await interestsFor(req as object);
+    return {
+      interests: rows,
+      // What the chips would be derived FROM, so the empty state can point
+      // somewhere real instead of saying "no interests".
+      catalogs: (await ownCatalogIds(req as object)).length,
+    };
+  });
+
+  /**
+   * Replace the operator's set.
+   *
+   * A PUT rather than a pair of add/remove routes because the interface is a
+   * row of chips edited in place, and a replace is what that edit means. The
+   * removals become tombstones (interests.ts), so the next catalog import
+   * cannot quietly put back a term the operator took out.
+   */
+  app.put<{ Body: { interests?: { term?: string; pinned?: boolean }[] } }>(
+    "/api/discover/interests",
+    async (req, reply) => {
+      const actor = mustWrite(req as object, reply, "edit your interests");
+      if (!actor) return reply;
+      const body = Array.isArray(req.body?.interests) ? req.body!.interests! : null;
+      if (!body) return reply.code(400).send({ error: "send { interests: [{ term }] }" });
+      if (body.length > 60) return reply.code(400).send({ error: "sixty interests is more than a shop" });
+      const rows = await interests.replace(
+        actor.id,
+        body.map((i) => ({ term: String(i?.term ?? ""), pinned: Boolean(i?.pinned) })),
+      );
+      return { interests: rows, catalogs: (await ownCatalogIds(req as object)).length };
+    },
+  );
+
+  /**
+   * `GET /api/discover?surface=&q=&limit=&all=1`
+   *
+   * Every source answers, including the ones that cannot: a surface that is
+   * missing a key returns `unavailable` with an empty hit list and the variable
+   * named, never an omitted source, because a missing tab reads as a broken
+   * product rather than a door the platform never opened.
+   *
+   * `q` is an interest for this request only — the search box, which is how an
+   * operator asks about something before it is in their catalog. It is not
+   * stored; adding it to the set is what the chips are for.
+   *
+   * `all=1` suspends the every-hit-has-a-why rule, and only alongside
+   * `surface=`: it is the "show me everything live here" question, which is a
+   * different question from "what should I look at".
+   */
+  app.get<{ Querystring: { surface?: string; q?: string; limit?: string; all?: string } }>(
+    "/api/discover",
+    async (req) => {
+      const actor = actorOf(req as object);
+      const owned = await interestsFor(req as object);
+      const q = (req.query.q ?? "").trim().slice(0, 60);
+      const asked = q ? [{ slug: slugify(q), term: q }] : [];
+      // The typed query first: an operator who typed something meant it, and it
+      // should decide the ranking rather than sit behind twelve derived chips.
+      const terms = [...asked, ...owned.map((i) => ({ slug: i.slug, term: i.term }))]
+        .filter((t, n, all) => t.slug && all.findIndex((x) => x.slug === t.slug) === n);
+
+      const surface = (req.query.surface ?? "").trim() as SurfaceId | "";
+      const sources = await discover.run({
+        accountId: actor?.id ?? null,
+        interests: terms,
+        surface: surface || null,
+        limit: Math.min(50, Math.max(1, Number(req.query.limit) || 12)),
+        all: req.query.all === "1",
+      });
+
+      return {
+        interests: owned,
+        // Echoed so a client can render the ad-hoc term as a chip that is
+        // clearly not saved yet.
+        query: q || null,
+        sources,
+      };
+    },
+  );
+
   /**
    * The whole home surface in one read.
    *
@@ -1750,11 +1895,23 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       now,
       next: {
         prepared,
-        // The surfaces with a grid we can READ. eBay Live is the only one: the
-        // others have discovery pages behind a login or an app review, and
-        // listing them here would imply the console is broken rather than that
-        // the platform never opened the door.
-        discoverable: ["ebaylive"] as SurfaceId[],
+        /**
+         * The surfaces Discover can READ for this account, right now.
+         *
+         * This was the literal `["ebaylive"]`, under a comment saying the
+         * others had "discovery pages behind a login or an app review". That
+         * was true of Whatnot and TikTok and plainly wrong about the two with
+         * public APIs: an app access token lists live Twitch streams and
+         * searches its categories with no user sign-in and no scope, and
+         * Reddit's script grant already searches subreddits and threads through
+         * the client this repo ships. Two surfaces were invisible because a
+         * constant said so.
+         *
+         * Computed from the sources themselves, each asked whether it could
+         * answer WITHOUT doing any work — so a keyless Twitch is honestly
+         * absent today and present the minute the key lands, with no deploy.
+         */
+        discoverable: discover.discoverable(process.env),
       },
       behind,
       surfaces,

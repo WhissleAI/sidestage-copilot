@@ -10,6 +10,7 @@ import { KbSync } from "../llm/kbSync.js";
 import { db as pgPool, migrate, closeDb } from "../db/pg.js";
 import { applyCatalog, getCatalog } from "../shows/catalogs.js";
 import { seed, DEMO_SHOW_ID as SEED_SHOW } from "../db/seed.js";
+import { DiscoverService } from "../discover/service.js";
 
 /**
  * `DEMO_SHOW=1` runs the scripted show; the test suite gets it unconditionally
@@ -26,6 +27,14 @@ export interface AppContext {
   llm: WhissleClient;
   llmName: string;
   kb: KbSync;
+  /**
+   * The surfaces Discover can ask, and the per-account cache in front of them.
+   *
+   * Optional so a test can substitute a set of sources that answer from
+   * recorded shapes — there is no key for Twitch or Reddit in the suite and
+   * there must never be one. Absent, the routes build the real set.
+   */
+  discover?: DiscoverService;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
