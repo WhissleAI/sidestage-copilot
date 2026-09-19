@@ -483,6 +483,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
     const wallet = walletR.ok ? walletR.value : null;
     if (wallet) spendWindow.open(target.showId, wallet.balanceUsd);
+    // Read to anchor this show's spend window, never returned: the balance is
+    // the workspace's, and this page is one seller's. Same rule as
+    // `/api/billing` and `/api/cost`.
+    const mineHere = await myShowIds(req as object);
 
     return {
       showId: target.showId,
@@ -498,12 +502,22 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       },
       agent,
       cost: {
-        wallet,
-        walletError: walletR.ok ? null : walletR.error,
-        usage: usageR.ok ? usageR.value : null,
-        usageError: usageR.ok ? null : usageR.error,
-        meter: meter.snapshot(),
-        spend: wallet ? spendWindow.since(wallet.balanceUsd) : {},
+        wallet: null,
+        walletError: {
+          status: 403,
+          message: "the wallet is the workspace's — one Whissle key answers for every seller on it, so its balance is nobody's number. What your own shows consumed is /api/cost.",
+        },
+        usage: null,
+        usageError: {
+          status: 403,
+          message: "consumption on this key is org-wide. This show's own calls are in `meter`.",
+        },
+        meter: meter.snapshotFor(mineHere),
+        spend: wallet
+          ? Object.fromEntries(
+              Object.entries(spendWindow.since(wallet.balanceUsd)).filter(([id]) => mineHere.has(id)),
+            )
+          : {},
       },
       policy: {
         maxDiscountPct: policy().maxDiscountPct,
@@ -810,9 +824,31 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     if (w.ok) spendWindow.open(showId, w.value.balanceUsd);
   };
 
-  /** One reader, two routes: `/api/billing` is the live rail, `/api/cost` is the
-   *  history. They must never disagree about what the wallet says. */
-  const billingSnapshot = async (days: number) => {
+  /** The shows this caller may be told anything about: the ones this process
+   *  is watching that belong to them. The same question `GET /api/shows`
+   *  answers, asked of the cost surfaces so they cannot answer a wider one. */
+  const myShowIds = async (req: object): Promise<Set<string>> =>
+    new Set((await shows.list(actorOf(req)?.id ?? null)).map((s) => s.showId));
+
+  /**
+   * One reader, two routes: `/api/billing` is the live rail, `/api/cost` is the
+   * history. They must never disagree about what the wallet says — and what
+   * they say to a SELLER is the same thing `/api/cost` has always said.
+   *
+   * `/api/cost` states the rule in its own comment: "The backend holds one
+   * Whissle key for everyone, so the wallet is shared and its balance is
+   * nobody's number to see." `/api/billing` and `/api/analytics` returned that
+   * balance, the org-wide usage rows, and the whole process meter to any
+   * signed-in caller — so seller B read the workspace's real balance and could
+   * infer from the per-show meter what seller A was spending. One rule for all
+   * three now: the wallet and org usage are withheld with a reason, and the
+   * meter is cut to the caller's own shows.
+   *
+   * `forOwner` is the internal/unscoped read — the spend anchor and `/api/cost`
+   * need the wallet to COMPUTE a per-show delta; that number is the seller's
+   * own and is what they are shown instead of a balance.
+   */
+  const billingSnapshot = async (days: number, opts: { mine?: Set<string> } = {}) => {
     // Both reads in flight together — this panel is polled, and two sequential
     // round-trips to the gateway is a visibly slower page for no reason.
     const [walletR, usageR] = await Promise.all([billing.wallet(), billing.usage(days)]);
@@ -825,15 +861,28 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       for (const s of await shows.list()) spendWindow.open(s.showId, wallet.balanceUsd);
     }
 
+    const mine = opts.mine;
+    const spend = wallet ? spendWindow.since(wallet.balanceUsd) : {};
     return {
       // A failed read reports WHY. A missing scope and a zero balance are
-      // different facts and must never render the same.
-      wallet: walletR.ok ? walletR.value : null,
-      walletError: walletR.ok ? null : walletR.error,
-      usage: usageR.ok ? usageR.value : null,
-      usageError: usageR.ok ? null : usageR.error,
-      meter: meter.snapshot(),
-      spend: wallet ? spendWindow.since(wallet.balanceUsd) : {},
+      // different facts and must never render the same — and "this is not
+      // yours to see" is a third, so it says so rather than reading as an
+      // outage.
+      wallet: mine ? null : wallet,
+      walletError: mine
+        ? { status: 403, message: "the wallet is the workspace's — one Whissle key answers for every seller on it, so its balance is nobody's number. What your own shows consumed is /api/cost." }
+        : walletR.ok ? null : walletR.error,
+      usage: mine ? null : usageR.ok ? usageR.value : null,
+      usageError: mine
+        ? { status: 403, message: "consumption on this key is org-wide. Your own shows' calls are in `meter`, and their cost is /api/cost." }
+        : usageR.ok ? null : usageR.error,
+      meter: mine ? meter.snapshotFor(mine) : meter.snapshot(),
+      // The per-show wallet delta IS the seller's own number — it is what
+      // /api/cost calls the `wallet-exclusive` basis — so it stays, cut to
+      // their shows.
+      spend: mine
+        ? Object.fromEntries(Object.entries(spend).filter(([id]) => mine.has(id)))
+        : spend,
       attribution: {
         perShow: "app-metered",
         // Said in the payload, not only in the docs, so any client that renders
@@ -847,7 +896,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   };
 
   app.get<{ Querystring: { days?: string } }>("/api/billing", async (req) =>
-    billingSnapshot(Math.min(90, Math.max(1, Number(req.query.days) || 7))),
+    billingSnapshot(Math.min(90, Math.max(1, Number(req.query.days) || 7)), {
+      mine: await myShowIds(req as object),
+    }),
   );
 
   /** The report a finished session left behind. */
@@ -982,7 +1033,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           ORDER BY c.closed_at DESC`,
         [since, actor.id],
       ),
-      billingSnapshot(7),
+      // Scoped, like everything else this route answers with: `live` below is
+      // the caller's own shows, and the wallet is read only to compute their
+      // per-show delta, never returned.
+      billingSnapshot(7, { mine: await myShowIds(req as object) }),
       // The measured price of one gateway call, from every show that ran
       // alone with a readable wallet — across all sellers, because the key
       // and the tariff are shared even though the spend is not.
@@ -1059,13 +1113,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         usdPerCall: Math.round(usdPerCall * 100000) / 100000,
       },
       byDoor,
-      /** What is running right now, for this seller, which the rows cannot know yet. */
-      live: Object.fromEntries(
-        Object.entries(snapshot.meter.byShow).filter(([id]) => {
-          const s = shows.find((x) => x.showId === id);
-          return s ? true : shows.length === 0 ? false : true;
-        }),
-      ),
+      /** What is running right now, for this seller, which the rows cannot know
+       *  yet. The filter used to read `s ? true : shows.length === 0 ? false :
+       *  true` — which is `true` for every show in the process as soon as the
+       *  caller had one row of their own, so this page leaked the same
+       *  cross-tenant meter the audit found on /api/billing. `snapshot.meter`
+       *  is already cut to the caller's shows; this keeps the ones that are
+       *  live NOW as well. */
+      live: snapshot.meter.byShow,
       attribution: snapshot.attribution,
     };
   });

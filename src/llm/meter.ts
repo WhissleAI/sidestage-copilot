@@ -167,6 +167,51 @@ export class GatewayMeter {
     };
   }
 
+  /**
+   * The snapshot ONE SELLER may see: their own shows and nothing else.
+   *
+   * `snapshot()` is the whole process — every show, every account — because
+   * the gateway bill is one bill. That is the right object for an operator of
+   * the box and the wrong one to hand a seller: `/api/billing` and
+   * `/api/analytics` returned it to anyone signed in, so seller B could read
+   * how many calls seller A's show was making and infer what they were
+   * spending — the exact number `/api/cost` deliberately withholds.
+   *
+   * Counts are re-summed from the named shows. Latency percentiles are NOT:
+   * p50/p95 and the last error are this process's gateway health, the same
+   * fact for everyone on it, and they are not a per-tenant number to protect.
+   * Per-door context characters are not attributed per show, so they are zero
+   * here; the seller's own total is in `totals`.
+   */
+  snapshotFor(showIds: Iterable<string>): MeterSnapshot {
+    const mine = new Set(showIds);
+    const whole = this.snapshot();
+    const byShow = Object.fromEntries(Object.entries(whole.byShow).filter(([id]) => mine.has(id)));
+
+    const doors = {} as MeterSnapshot["doors"];
+    for (const d of DOORS) {
+      let calls = 0, failures = 0, totalMs = 0;
+      for (const s of Object.values(byShow)) {
+        const sd = s.byDoor[d];
+        if (!sd) continue;
+        calls += sd.calls; failures += sd.failures; totalMs += sd.totalMs;
+      }
+      const health = whole.doors[d];
+      doors[d] = {
+        calls, failures, totalMs, contextChars: 0,
+        lastStatus: health.lastStatus, lastError: health.lastError, lastErrorAt: health.lastErrorAt,
+        p50Ms: health.p50Ms, p95Ms: health.p95Ms,
+        meanMs: calls ? Math.round(totalMs / calls) : 0,
+      };
+    }
+
+    const totals = Object.values(byShow).reduce(
+      (a, s) => ({ calls: a.calls + s.calls, failures: a.failures + s.failures, contextChars: a.contextChars + s.contextChars }),
+      { calls: 0, failures: 0, contextChars: 0 },
+    );
+    return { since: whole.since, doors, totals, byShow };
+  }
+
   reset(): void {
     this.since = new Date().toISOString();
     this.doors = new Map(DOORS.map((d) => [d, blank()]));
