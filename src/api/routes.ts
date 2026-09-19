@@ -926,6 +926,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             )`,
       ),
     ]);
+    // The running sessions this account owns, by id. Asked of the registry
+    // rather than inferred from the cost rows: a session that has not finished
+    // has no cost row yet, which is exactly the case this block exists for.
+    const mineNow = new Set(
+      (await ctx.shows.list()).filter((s) => s.ownerAccountId === actor.id).map((s) => s.showId),
+    );
+
     const learnedUsd = Number(learned.rows[0]?.usd ?? 0);
     const learnedCalls = Number(learned.rows[0]?.calls ?? 0);
     /** Measured 2026-09-15: $0.52 over 80 calls on a nine-minute show. */
@@ -989,12 +996,23 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         usdPerCall: Math.round(usdPerCall * 100000) / 100000,
       },
       byDoor,
-      /** What is running right now, for this seller, which the rows cannot know yet. */
+      /**
+       * What is running right now, for THIS seller, which the rows cannot know
+       * yet.
+       *
+       * `snapshot.meter.byShow` is the process-wide meter — one instance, every
+       * show every account has attached to this deployment. The filter used to
+       * read `s ? true : shows.length === 0 ? false : true`, which returns true
+       * in every branch but one, so any seller with a single finished session
+       * was handed every other seller's live show id, call count, failure count
+       * and context characters under a label that says the block is theirs.
+       *
+       * The registry knows who owns a running show, so that is what this asks.
+       * A show with no owner at all belongs to nobody and is not offered to
+       * anybody as "yours" — this is the money page.
+       */
       live: Object.fromEntries(
-        Object.entries(snapshot.meter.byShow).filter(([id]) => {
-          const s = shows.find((x) => x.showId === id);
-          return s ? true : shows.length === 0 ? false : true;
-        }),
+        Object.entries(snapshot.meter.byShow).filter(([id]) => mineNow.has(id)),
       ),
       attribution: snapshot.attribution,
     };
