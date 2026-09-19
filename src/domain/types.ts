@@ -170,6 +170,18 @@ export interface SpanBreakdown {
 export type ProposalStatus =
   | "drafting" | "ready" | "needs_review" | "blocked" | "sent" | "auto_sent" | "dismissed";
 
+/**
+ * Who puts a reply in front of the person who asked.
+ *
+ * `status` says where a proposal got to in the queue; this says what actually
+ * happened to it in the world, and they are not the same question. A `sent`
+ * proposal with `delivery: "human"` means the copilot wrote it, guarded it and
+ * recorded it, and the operator is the one who pastes it into the room — which
+ * is the truth on every surface that has no chat-post API. `"api"` is only ever
+ * stamped by a path that really delivered.
+ */
+export type ReplyDelivery = "api" | "human";
+
 export interface ReplyProposal {
   id: string;
   message: ChatMessage;
@@ -183,6 +195,14 @@ export interface ReplyProposal {
   repaired: boolean;
   spans: SpanBreakdown;
   createdAt: string;
+  /**
+   * What accepting this reply will do — decided by the server from the surface
+   * and from whether a delivery path is actually wired, never by the client.
+   * The console renders its primary button and its confirmation off THIS, not
+   * off the surface table: a surface that cannot deliver must not offer a Send
+   * button, and must not say a reply was sent.
+   */
+  delivery: ReplyDelivery;
   sentText?: string;
   /** The operator's own past reply this draft was written in the manner of.
    *  Style, not evidence — the console renders it as "written the way you
@@ -251,7 +271,18 @@ export interface AuditEntry {
 
 export interface Metrics {
   proposals: number;
+  /**
+   * Replies that left the queue as the seller's answer — delivered by us or
+   * handed to the operator to post. It is the numerator of `answeredRate`, and
+   * the two fields below say which kind it was, because "we answered it" and
+   * "we delivered it" are different claims and only one of them is ours to
+   * make on a draft-only surface.
+   */
   sent: number;
+  /** Of `sent`: replies a wired delivery path actually put in front of the buyer. */
+  delivered: number;
+  /** Of `sent`: replies recorded for a human to post, because nothing here can. */
+  handedOff: number;
   autoSent: number;
   dismissed: number;
   blocked: number;

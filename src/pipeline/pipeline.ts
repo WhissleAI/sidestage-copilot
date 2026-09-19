@@ -23,7 +23,7 @@
 
 import { config } from "../config.js";
 import type {
-  AutonomyLevel, ChatMessage, Evidence, GuardName, Metrics, ReplyProposal,
+  AutonomyLevel, ChatMessage, Evidence, GuardName, Metrics, ReplyDelivery, ReplyProposal,
 } from "../domain/types.js";
 import type { Repo } from "../domain/repo.js";
 import type { LlmPort } from "../llm/types.js";
@@ -80,7 +80,29 @@ export interface PipelineDeps {
   showContext: ShowContextEngine;
   audit: AuditLog;
   events: PipelineEvents;
+  /**
+   * Put a reply in front of the person who asked.
+   *
+   * The seam, and nothing wires one today — which is the honest state of this
+   * product and the reason `send` records rather than delivers. eBay Live
+   * publishes no chat-post API (that absence is why the surface is scraped at
+   * all), Whatnot and TikTok would need us to drive the seller's own browser,
+   * and Reddit is draft-only in code as a product commitment. The one real
+   * delivery mechanism in the build is Twitch's `post_reply`, which runs
+   * through the action executor — preflight, the rooms posting switch, the
+   * audit chain and the undo window — and has never been connected to the
+   * console's Send button.
+   *
+   * Supplying this is the whole of "this surface can deliver". Until one is,
+   * every reply is recorded as delivered by a human, because it is.
+   */
+  deliver?: ReplyDeliverer;
 }
+
+/** @see PipelineDeps.deliver */
+export type ReplyDeliverer = (m: {
+  proposalId: string; to: string; text: string;
+}) => Promise<void>;
 
 /** Said the same way in the firehose, in the report and in the audit entry. */
 const BUDGET_REASON = "this show reached its spend cap — the copilot stopped drafting";
@@ -108,7 +130,7 @@ export class Pipeline {
   private queue: ChatMessage[] = [];
   private inflight = 0;
   private counters = {
-    proposals: 0, sent: 0, autoSent: 0, dismissed: 0, blocked: 0,
+    proposals: 0, sent: 0, delivered: 0, handedOff: 0, autoSent: 0, dismissed: 0, blocked: 0,
     admitted: 0, guardBlocks: emptyGuardBlocks(),
   };
 
@@ -274,6 +296,9 @@ export class Pipeline {
       draft: "",
       claims: [], evidence: [], guards: [],
       verdict: "allow", confidence: 0, repaired: false,
+      // Carried from the first frame the console renders, so a card never
+      // offers a Send button for a second and then takes it away.
+      delivery: this.deliveryFor(show.source),
       spans: timer.result(config.latencyBudgetMs, false),
       createdAt: new Date().toISOString(),
     };
@@ -423,6 +448,25 @@ export class Pipeline {
     }
   }
 
+  /**
+   * What accepting a reply on this show actually DOES.
+   *
+   * Two conditions, and both are required. The surface has to declare that a
+   * reply can be delivered here at all — `capabilitiesOf(...).delivery` — and
+   * this process has to hold a path that does it. Declaring the capability is
+   * not having it, and the gap between those two is exactly the defect this
+   * function exists to close: eBay Live declared `delivery: "api"`, the console
+   * rendered a primary Send from it, `send` marked the proposal sent, the audit
+   * recorded `reply_sent` and the answered-rate counted it — and no code
+   * anywhere posted a single character to eBay.
+   *
+   * Read on every decision that could claim a delivery, never cached: wiring a
+   * deliverer mid-show should change the next answer, not the next restart.
+   */
+  private deliveryFor(source: string | null | undefined): ReplyDelivery {
+    return capabilitiesOf(source).delivery === "api" && this.d.deliver ? "api" : "human";
+  }
+
   /** The owner's persona, or null — and never a reason to fail a draft. A
    *  persona lookup that throws would cost a buyer their answer over a voice
    *  setting, so the reply is written in the default voice instead. */
@@ -447,14 +491,29 @@ export class Pipeline {
     },
     msg: ChatMessage,
   ): Promise<ReplyProposal> {
-    const level = (await this.d.repo.show()).autonomyLevel;
+    const show = await this.d.repo.show();
+    const delivery = this.deliveryFor(show.source);
     const disposition = decideReply({
-      level, intent: msg.intent, verdict: r.verdict,
+      level: show.autonomyLevel, intent: msg.intent, verdict: r.verdict,
       confidence: r.confidence, abstained: r.evidence.length === 0,
+      delivery,
     });
 
+    // An auto-send that cannot reach a deliverer is not an auto-send. The
+    // ladder already refuses the disposition unless one is wired, so this is
+    // the second lock rather than the first: if delivery throws, the reply
+    // goes to the operator with the reason rather than being filed as sent.
+    let autoSendFailed: string | null = null;
+    if (disposition.kind === "auto_send") {
+      try {
+        await this.d.deliver!({ proposalId: base.id, to: msg.author, text: r.answer });
+      } catch (e) {
+        autoSendFailed = (e as Error).message;
+      }
+    }
+
     const status: ReplyProposal["status"] =
-      disposition.kind === "auto_send" ? "auto_sent"
+      disposition.kind === "auto_send" ? (autoSendFailed ? "needs_review" : "auto_sent")
       : disposition.kind === "blocked" ? "blocked"
       : disposition.kind === "needs_review" ? "needs_review"
       : disposition.kind === "drop" ? "dismissed"
@@ -465,7 +524,7 @@ export class Pipeline {
     // how the console ended up rendering empty cards.
     const { answer, ...rest } = r;
     const proposal: ReplyProposal = {
-      ...base, ...rest, draft: answer, status,
+      ...base, ...rest, draft: answer, status, delivery,
       ...(status === "auto_sent" ? { sentText: answer } : {}),
     };
 
@@ -483,8 +542,10 @@ export class Pipeline {
     if (status === "auto_sent") {
       this.counters.autoSent++;
       this.counters.sent++;
+      // Only reachable with a deliverer wired, and only after it returned.
+      this.counters.delivered++;
       this.d.audit.append("reply_sent", "copilot", `auto-sent to ${msg.author}`, {
-        proposalId: proposal.id, text: r.answer, confidence: r.confidence,
+        proposalId: proposal.id, text: r.answer, confidence: r.confidence, delivery,
       });
     }
 
@@ -497,13 +558,20 @@ export class Pipeline {
 
   // ── operator commands ─────────────────────────────────────────────────────
   /**
-   * Send — the last moment the guards can act, so they do.
+   * Accept a reply — the last moment the guards can act, so they do.
    *
    * A blocked proposal cannot be sent, whatever the client asks; the console
    * hides the button, but a keystroke or a curl is not the console. An EDITED
    * draft is a new draft: it is re-guarded against the facts the original was
    * grounded in and the listings as they stand now, and a block refuses the
    * send with the reason. What was actually checked is what the audit records.
+   *
+   * WHO SENDS IT is decided here and nowhere else. On a surface with a wired
+   * delivery path this hands the text to it and records a delivery; on every
+   * other surface it records that the reply was composed, guarded, audited and
+   * handed to the operator — which is the whole truth of what happened, and is
+   * worth recording honestly rather than dressing up as a send. The proposal
+   * carries `delivery` so the console can say the same thing the audit does.
    */
   async send(id: string, text?: string, actor = "seller"): Promise<ReplyProposal> {
     const p = this.proposals.get(id);
@@ -542,13 +610,31 @@ export class Pipeline {
       guards = chain.guards;
       verdict = chain.verdict;
     }
-    const next: ReplyProposal = { ...p, status: "sent", sentText, guards, verdict };
+    const source = (await this.d.repo.show()).source;
+    const delivery = this.deliveryFor(source);
+    // A delivery that throws is not a send. The operator keeps a usable draft
+    // and hears why, rather than reading "sent" over a reply that is not.
+    if (delivery === "api") {
+      await this.d.deliver!({ proposalId: id, to: p.message.author, text: sentText })
+        .catch((e: Error) => { throw new SendRefused(`not delivered — ${e.message}`); });
+    }
+
+    const next: ReplyProposal = { ...p, status: "sent", sentText, guards, verdict, delivery };
     this.proposals.set(id, next);
     this.counters.sent++;
-    this.d.audit.append("reply_sent", actor, `sent to ${p.message.author}`, {
-      proposalId: id, text: sentText, edited,
-      verdictAtSend: verdict, guardsAtSend: guards.map((g) => `${g.guard}:${g.verdict}`),
-    });
+    if (delivery === "api") this.counters.delivered++;
+    else this.counters.handedOff++;
+    this.d.audit.append(
+      "reply_sent",
+      actor,
+      delivery === "api"
+        ? `delivered to ${p.message.author}`
+        : `answer for ${p.message.author} approved and recorded — ${source ?? "this surface"} has no reply API, so ${actor === "seller" ? "the seller" : actor} posts it`,
+      {
+        proposalId: id, text: sentText, edited, delivery,
+        verdictAtSend: verdict, guardsAtSend: guards.map((g) => `${g.guard}:${g.verdict}`),
+      },
+    );
     this.d.events.onProposal(next);
     void this.emitMetrics();
     return next;
@@ -731,12 +817,20 @@ export class Pipeline {
     return {
       proposals: c.proposals,
       sent: c.sent,
+      delivered: c.delivered,
+      handedOff: c.handedOff,
       autoSent: c.autoSent,
       dismissed: c.dismissed,
       blocked: c.blocked,
       guardBlocks: { ...c.guardBlocks },
       latency: this.latency.percentiles(),
       cacheHitRate: this.latency.cacheHitRate,
+      // Answered means the buyer's question left this queue with an approved
+      // answer on it — delivered by us where we can, handed to the operator
+      // where we cannot. It has never meant anything stronger than that: on
+      // every surface in this build the `sent` here is `handedOff`. Reading it
+      // as "replies buyers received" is the misreading `delivered` exists to
+      // make impossible.
       answeredRate: c.admitted ? Number((c.sent / c.admitted).toFixed(3)) : 0,
       actionsCommitted: recent.filter((a) => a.status === "committed").length,
       actionsRolledBack: recent.filter((a) => a.status === "rolled_back").length,

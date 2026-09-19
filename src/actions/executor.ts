@@ -151,6 +151,18 @@ export interface ExecutorOpts {
   onChange?: (a: ActionProposal) => void;
   /** Called after a committed or rolled-back write so the retriever can reindex. */
   onListingWrite?: (listingId: string) => void;
+  /**
+   * Has a human turned posting on for the room this show is in?
+   *
+   * `preflight` has always asked (`ctx.posting`) and `SurfaceRooms.posting`
+   * has always been able to answer, and nothing joined the two: the only
+   * production caller of `showBudgetContext` passed budget numbers and no
+   * posting, so `ctx.posting` was `undefined` — which preflight reads as OFF,
+   * so the refusal was right by accident and the operator's switch controlled
+   * nothing. Absent here still means off, deliberately: a show that cannot say
+   * whose room it is in is not a show we speak in.
+   */
+  postingFor?: () => Promise<{ room: string; enabled: boolean }>;
 }
 
 export class ActionExecutor {
@@ -182,6 +194,12 @@ export class ActionExecutor {
       await showBudgetContext(this.repo, {
         committedThisShow: await this.store.committedThisShow(),
         committedLastMinute: await this.store.committedLastMinute(),
+        // Looked up only for the one kind that reads it. Every other action
+        // writes to the seller's own catalog or our own rows, and a query per
+        // proposal for a field nothing consults is latency on the hot path.
+        ...(kind === "post_reply" && this.opts.postingFor
+          ? { posting: await this.opts.postingFor() }
+          : {}),
       }),
     );
 

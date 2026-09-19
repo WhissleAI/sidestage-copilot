@@ -5,6 +5,13 @@ import { buildApp } from "../src/api/server.js";
 import type { AppContext } from "../src/api/context.js";
 import { db as pgPool } from "../src/db/pg.js";
 import { SurfaceRooms } from "../src/surfaces/rooms.js";
+import { capabilitiesOf } from "../src/surfaces/types.js";
+import { preflight } from "../src/actions/preflight.js";
+import { ActionExecutor } from "../src/actions/executor.js";
+import { MockMarketplace } from "../src/actions/marketplace/mock.js";
+import { AuditLog } from "../src/actions/audit.js";
+import { Repo } from "../src/domain/repo.js";
+import { seed } from "../src/db/seed.js";
 
 // Posting into somebody else's room is irreversible in the way that matters:
 // the undo window can delete the comment, it cannot unsee it. These tests are
@@ -131,6 +138,60 @@ describe("the rooms an operator watches", () => {
     // Preflight has exactly one safe reading of a missing row.
     const store = new SurfaceRooms(pgPool());
     assert.deepEqual(await store.posting(A.id, "twitch", "#never-added"), { room: "#never-added", enabled: false });
+  });
+
+  test("the switch is READ: an action executor asks it before it proposes a post_reply", async () => {
+    // The switch existed, preflight asked for it, and nothing joined the two —
+    // `ctx.posting` was `undefined` on every proposal ever made, so the refusal
+    // was right by accident rather than because the operator had decided
+    // anything. This is the join.
+    const d = pgPool();
+    const showId = `test_rooms_${process.pid.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    await seed(d, showId);
+    await d.query("UPDATE shows SET source = 'twitch' WHERE id = $1", [showId]);
+    const repo = new Repo(d, showId);
+    const audit = new AuditLog(d, showId);
+    const rooms = new SurfaceRooms(d);
+    const room = "#switch-read";
+
+    const exec = (): ActionExecutor =>
+      new ActionExecutor(d, repo, new MockMarketplace([]), audit, {
+        undoWindowS: 90,
+        postingFor: () => rooms.posting(A.id, "twitch", room),
+      });
+
+    try {
+      const off = await exec().propose("post_reply", room, { message: "hi" }, "reply in chat", "test");
+      assert.equal(off.status, "preflight_failed");
+      assert.equal(off.preflight.checks[0]!.name, "posting is on for this room");
+      assert.match(off.preflight.checks[0]!.detail, new RegExp(`posting is off for ${room}`));
+
+      await rooms.upsert(A.id, "twitch", room, { posting: true });
+      // A different message, because `propose` is idempotent on (kind, target,
+      // version, params) and would hand back the refusal above unchanged.
+      const on = await exec().propose("post_reply", room, { message: "hi again" }, "reply in chat", "test");
+      assert.equal(on.preflight.ok, true, JSON.stringify(on.preflight.checks));
+    } finally {
+      await rooms.remove(A.id, "twitch", room).catch(() => {});
+      await d.query("DELETE FROM shows WHERE id = $1", [showId]).catch(() => {});
+    }
+  });
+
+  test("a draft-only surface refuses a post_reply before the switch is even read", async () => {
+    // Two locks on one door, and this is the outer one. Reddit does not declare
+    // `post_reply` at all and its delivery is `draft-only` in code — so no
+    // switch, no setting and no wiring can make the copilot speak there. eBay
+    // Live now sits behind the same lock.
+    for (const surface of ["reddit", "ebaylive", "whatnot"] as const) {
+      const r = preflight("post_reply", null, { message: "hi" }, {
+        surface: capabilitiesOf(surface),
+        // Even with the switch explicitly ON.
+        posting: { room: "#anything", enabled: true },
+        committedThisShow: 0, actionBudget: 10, committedLastMinute: 0, ratePerMinute: 6,
+      });
+      assert.equal(r.ok, false, surface);
+      assert.match(r.checks[0]!.detail, /draft-only/, surface);
+    }
   });
 
   test("a signed-out caller reaches none of it", async () => {

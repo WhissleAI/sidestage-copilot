@@ -37,6 +37,7 @@ import type { Fact } from "../retrieval/facts.js";
 import { spendWindow } from "../llm/billing.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
 import type { SurfaceConnection, SurfaceId } from "../surfaces/types.js";
+import { SurfaceRooms } from "../surfaces/rooms.js";
 import { get as surfaceAdapter } from "../surfaces/registry.js";
 import { SimulatedShowSource, ScriptedHostAudio, type ChatSource } from "../ingest/sources.js";
 
@@ -103,6 +104,8 @@ export class ShowRuntime {
   readonly showContext: ShowContextEngine;
   readonly pipeline: Pipeline;
   readonly market: MockMarketplace;
+  /** Which rooms this show's owner has agreed we may speak in. */
+  private readonly rooms: SurfaceRooms;
   /**
    * Where this show's writes actually land.
    *
@@ -161,6 +164,7 @@ export class ShowRuntime {
     this.audit = new AuditLog(this.db, o.showId);
     this.market = new MockMarketplace([]);
     this.adapter = this.market;
+    this.rooms = new SurfaceRooms(this.db);
 
     const emit = (event: string, data: unknown) => o.events.emit(this.showId, event, data);
 
@@ -180,6 +184,16 @@ export class ShowRuntime {
       // The seller's setting, not an environment variable — they are the one
       // who decides how long a committed write stays one keystroke from undo.
       undoWindowS: policy().automation.undoWindowS,
+      // The rooms switch, joined to the preflight that has always asked for it.
+      // Scoped to this show's owner and this show's room: a posting permission
+      // is one account's decision about one room, and a lookup that lost either
+      // half would be a permission granted by somebody else.
+      postingFor: async () => {
+        const room = this.o.externalId ?? "";
+        const owner = this.ownerAccountId ?? (await this.loadOwner());
+        if (!owner || !room) return { room: room || "this room", enabled: false };
+        return this.rooms.posting(owner, this.o.source, room);
+      },
       onChange: (a) => {
         emit("action", a);
         void this.audit.list(1).then((rows) => { if (rows[0]) emit("audit", rows[0]); });
@@ -222,6 +236,13 @@ export class ShowRuntime {
       proposer: this.proposer,
       showContext: this.showContext,
       audit: this.audit,
+      // No `deliver`, on any surface, deliberately. Nothing in this build can
+      // put a reply in front of a buyer: eBay Live and the scraped rooms have
+      // no chat-post API, Reddit is draft-only in code as a product
+      // commitment, and Twitch's `post_reply` — the one real mechanism — runs
+      // through the action executor and is not wired to the console's Send.
+      // So every accepted reply is recorded as delivered by a human, which is
+      // what happens. See PipelineDeps.deliver.
       events: {
         onChat: (m) => {
           emit("chat", m);

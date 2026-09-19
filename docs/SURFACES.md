@@ -16,11 +16,53 @@ Every surface now answers the same five questions, in `src/surfaces/types.ts`:
 | | |
 |---|---|
 | **tempo** | `live` (the last ninety seconds are the context) or `async` (the thread is) |
-| **delivery** | `api` (we can send) or `draft-only` (a human sends) |
+| **delivery** | `api` (a code path of ours puts the reply in front of the buyer) or `draft-only` (a human sends). Enforced, not displayed — see below |
 | **perception** | Does it carry the operator's audio and video? |
 | **actions** | Which `ActionKind`s exist here at all |
 | **corpora** | What grounds a claim here (see `src/retrieval/corpus.ts`) |
 | **communityRules** | Does the room impose its own rules, fetched per room? |
+
+## `delivery` is a contract the server keeps, not a hint for the UI
+
+For most of this product's life it was a hint. eBay Live declared `api`, the
+console rendered a primary **Send** from it and toasted "Reply sent to @buyer",
+`Pipeline.send` marked the proposal `sent`, the audit recorded `reply_sent` and
+the answered-rate counted it — and no code anywhere posted a character to eBay,
+because eBay publishes no chat-post API. That absence is the whole reason this
+surface is read through a scraped browser session. The product's most-used
+button on its reference surface reported a success that never happened.
+
+Four things enforce it now, all server-side:
+
+1. **`Pipeline.send` decides who sent it.** A reply is stamped `delivery: "api"`
+   only when the surface declares it AND a `deliver` port is wired for the show.
+   Nothing wires one today, so every reply is `"human"`, the audit says
+   "approved and recorded — … has no reply API, so the seller posts it", and the
+   proposal on the wire tells the console which button to render. A delivery
+   that throws is not a send: the operator keeps the draft and hears why.
+2. **The autonomy ladder will not auto-send where nothing sends.** L3 on a
+   draft-only surface means "pre-approved, no review needed" — the operator is
+   still the sender, because there is nobody else. It used to file the reply as
+   `auto_sent` with no human in the loop at all.
+3. **`preflight` refuses `post_reply`** on a draft-only surface before it reads
+   anything else, and then refuses it again unless a human has turned posting on
+   for that room. The room lookup is now actually passed (`ExecutorOpts.postingFor`
+   → `SurfaceRooms.posting`); it used to be `undefined` on every proposal, so the
+   switch on the Rooms page controlled nothing.
+4. **The rooms route refuses to store `posting: true`** for a surface that
+   cannot deliver, so the switch cannot be turned on for eBay Live at all.
+
+What a draft-only surface does is worth stating plainly, because it is real and
+it is most of the value: the reply is composed against the seller's own catalog,
+checked by eight guards, recorded, audited, and a human posts it. `answeredRate`
+counts exactly that — questions that left the queue with an approved answer on
+them — and `Metrics.delivered` / `Metrics.handedOff` split it so nobody can read
+it as "replies buyers received".
+
+The one real delivery mechanism in the build is Twitch's `post_reply`, which
+goes through the action executor (preflight, the rooms switch, the audit chain,
+the undo window). It is not yet connected to the console's Send button; until it
+is, Twitch is `api` as a surface and `"human"` as a show.
 
 ## What reads the answers
 
@@ -184,9 +226,11 @@ argument.
 ## Whatnot and TikTok Live are read, not spoken to
 
 Both are the eBay Live problem again: no public API for the chat of a room, a
-React app that renders it, and a browser as the only reader. What they are not
-is eBay Live's *position* — we hold no seller credentials on either platform,
-and neither exposes a way for us to post into a room.
+React app that renders it, and a browser as the only reader. Delivery is not
+what separates them from eBay Live — eBay publishes no chat-post API either,
+and all three are `draft-only`. What separates them is CREDENTIALS: we hold a
+seller's own eBay keys, so a markdown on eBay Live really moves a price, and we
+hold nothing on Whatnot or TikTok, so the five listing writes are absent.
 
 So both declare `SCRAPED_LIVE_CAPABILITIES`: live tempo, `draft-only` delivery,
 `perception: false` (we read the DOM; the audio and video are in a player we
