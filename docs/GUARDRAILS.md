@@ -136,8 +136,17 @@ Every money amount in the reply must be one of:
   at `v12` when the live listing is `v13` is stale → **block**, naming both.
 - **the buyer's own number, in a clause that declines it.** "I can't do $300" names
   an offer in order to refuse it, which commits to nothing.
-- **an amount some retrieved fact states verbatim** — a shipping charge, a
-  free-shipping threshold. Repeating a fact is not making an offer.
+- **an amount some retrieved fact states verbatim, where the fact was WRITTEN
+  DOWN** — a shipping charge or a free-shipping threshold in a listing, catalog,
+  policy or past-answer fact. Repeating a written fact is not making an offer.
+  Live host speech and market comps are deliberately excluded: neither is a
+  price we are in a position to honour.
+- **a number the HOST said**, only if it agrees with the live listing or the
+  reply attributes it ("the host just said these go for $200"). Otherwise
+  → **block**. The verbatim escape above once admitted every fact, and a host
+  saying "these usually go for $200 all day" licensed the copilot to quote $200
+  for an $80 lot — a stale price arriving through the door marked "already
+  checked", in the guard whose whole purpose is stale prices.
 - **a discount on the resolved listing**, which the discount policy authorises — and
   which must then clear the floor price and the 15% cap.
 

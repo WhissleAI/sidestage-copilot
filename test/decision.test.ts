@@ -16,6 +16,8 @@
  *      citation discipline does not.
  *   3a. a guard that reasons about a corpus does not fire on a surface that has
  *      none (policy, exactly as price and availability already did).
+ *   3b. a money amount whose only source is the host's live speech is not a
+ *      price we may quote.
  *   3. a held card's own instruction — "edit it and send, the edit is checked
  *      again" — is true. An edit that clears the block sends; one that does not
  *      is refused by name.
@@ -452,5 +454,59 @@ describe("the policy guard on a surface with no policy corpus", () => {
     // told the copilot never to make is not a claim about a corpus.
     const i = input("twitch", "These are guaranteed authentic, 100% legit, no question.");
     assert.equal(policyGuard.run(i).verdict, "block");
+  });
+});
+
+describe("a money amount the host said out loud", () => {
+  const hostFact = (text: string): Fact => ({
+    factId: "host:1758294011234", source: "host", corpus: "listing",
+    label: "the host said, 12s ago", text, field: "price",
+    tokens: terms(text), vector: ngramVector(text),
+  });
+
+  async function priceInput(r: Rig, answer: string): Promise<GuardInput> {
+    const i = await guardInput(r, "how much for the chicagos", answer);
+    return { ...i, facts: [...i.facts, hostFact("these usually go for $200 all day")] };
+  }
+
+  let r: Rig;
+  before(async () => { r = await rig(); });
+
+  test("is NOT a price we may quote as this lot's", async () => {
+    // DURING-14. The verbatim-in-a-fact escape was written for shipping charges
+    // in listing prose and swallowed host speech by accident — so the copilot
+    // quoted $200 for an $80 lot with a green price pill on it, through the one
+    // guard whose entire purpose is stale prices.
+    const i = await priceInput(r, "That one is $200.00.");
+    const g = priceGuard.run(i);
+    assert.equal(g.verdict, "block");
+    assert.match(g.reason!, /the host said/i);
+  });
+
+  test("may be REPORTED, because reporting the room commits us to nothing", async () => {
+    const i = await priceInput(r, "The host just said these usually go for $200.00 — the listed price is what stands.");
+    assert.equal(priceGuard.run(i).verdict, "allow");
+  });
+
+  test("and passes untouched when it agrees with the live listing", async () => {
+    const listing = (await r.repo.listings()).find((l) => l.id === PINNED)!;
+    const i = await guardInput(r, "how much for the chicagos", `That one is $${(listing.priceCents / 100).toFixed(2)}.`);
+    const withHost = {
+      ...i,
+      facts: [...i.facts, hostFact(`this one is $${(listing.priceCents / 100).toFixed(2)} right now`)],
+    };
+    assert.equal(priceGuard.run(withHost).verdict, "allow");
+  });
+
+  test("a shipping charge written into a POLICY clause still passes, as it always did", async () => {
+    const i = await guardInput(
+      r, "how much for the pandas and whats shipping",
+      "The Panda Dunks are $128.00 and ship USPS Ground Advantage at a flat $9.95.",
+      [
+        { text: "they are $128.00", factId: "listing:lst_dunk_panda_11#price" },
+        { text: "ships Ground Advantage at a flat $9.95", factId: "policy:pol_ship_domestic" },
+      ],
+    );
+    assert.equal(priceGuard.run(i).verdict, "allow");
   });
 });
