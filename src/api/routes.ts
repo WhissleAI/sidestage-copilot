@@ -38,6 +38,7 @@ import { catalogFit, checkReadiness } from "../shows/readiness.js";
 import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
 import { prdMetrics } from "../shows/prdMetrics.js";
+import { openReplayRuntime } from "../shows/replay.js";
 import { promotionReadiness } from "../autonomy/promotion.js";
 import { AUDIO_BRIDGE_HTML } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
@@ -780,13 +781,98 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     billingSnapshot(Math.min(90, Math.max(1, Number(req.query.days) || 7))),
   );
 
-  /** The report a finished session left behind. */
+  /** The report a finished session left behind — or why it has none. */
   app.get<{ Params: { showId: string } }>("/api/shows/:showId/report", async (req, reply) => {
+    const showId = req.params.showId;
     const r = await pgPool().query<{ report: unknown; generated_at: Date }>(
-      "SELECT report, generated_at FROM show_reports WHERE show_id = $1", [req.params.showId],
+      "SELECT report, generated_at FROM show_reports WHERE show_id = $1", [showId],
     );
-    if (!r.rows[0]) return reply.code(404).send({ error: "no report for this show yet" });
-    return { ...(r.rows[0].report as object), generatedAt: r.rows[0].generated_at };
+    if (r.rows[0]) return { ...(r.rows[0].report as object), generatedAt: r.rows[0].generated_at };
+
+    // No report. The interesting case is the one where generation was ATTEMPTED
+    // and failed: the reason used to exist only on the container's stdout, so
+    // the page said "the report may never have generated" and the seller had
+    // nothing to act on. It is persisted now (migration 025) and the rows the
+    // report is built from are all still here, so the answer says what went
+    // wrong and that asking again is a thing that can be done.
+    const s = (
+      await pgPool().query<{ status: string; report_error: string | null; report_failed_at: Date | null }>(
+        "SELECT status, report_error, report_failed_at FROM shows WHERE id = $1", [showId],
+      )
+    ).rows[0];
+    if (!s) return reply.code(404).send({ error: `no show ${showId}` });
+    return reply.code(404).send({
+      error: s.report_error
+        ? "this session's report failed to generate"
+        : "no report for this show yet",
+      showId,
+      status: s.status,
+      /** Null when nothing was attempted — a session still live, or one from
+       *  before the cause was recorded. Never a stand-in reason. */
+      reportError: s.report_error,
+      reportFailedAt: s.report_failed_at,
+      /** Whether asking again is worth the button. */
+      canRegenerate: s.status === "ended",
+    });
+  });
+
+  /**
+   * Generate this session's report again.
+   *
+   * Everything a report is built from — chat, proposals, actions, listings,
+   * sales, the audit chain, the signals — is still in Postgres, so a report
+   * that failed on a gateway timeout or an unreadable chain is recoverable by
+   * asking once more. It runs the SAME path the session close runs
+   * (`finishSession` over a replay runtime), so a regenerated report cannot be
+   * a second, subtly different kind of report.
+   *
+   * Ownership is the `:showId` preHandler every show route gets: a stranger is
+   * told there is no such show. The session must have ENDED — regenerating a
+   * report for a show still on air would freeze a statement about something
+   * that is still happening, and the live console is where that question is
+   * answered.
+   */
+  app.post<{ Params: { showId: string } }>("/api/shows/:showId/report", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "generate a report");
+    if (!actor) return reply;
+    const showId = req.params.showId;
+    const row = (
+      await pgPool().query<{ status: string }>("SELECT status FROM shows WHERE id = $1", [showId])
+    ).rows[0];
+    if (!row) return reply.code(404).send({ error: `no show ${showId}` });
+    if (row.status !== "ended") {
+      return reply.code(409).send({
+        error: "this session is still on air — its report is written when it ends",
+        code: "still-live",
+      });
+    }
+
+    let rt;
+    try {
+      rt = await openReplayRuntime(showId);
+    } catch (e) {
+      return reply.code(500).send({ error: (e as Error).message });
+    }
+    try {
+      const report = await rt.finishSession();
+      if (!report) {
+        const why = (
+          await pgPool().query<{ report_error: string | null }>(
+            "SELECT report_error FROM shows WHERE id = $1", [showId],
+          )
+        ).rows[0]?.report_error;
+        // It failed again, and the caller gets the same reason the badge does
+        // rather than a bare 500.
+        return reply.code(502).send({
+          error: "the report failed to generate again",
+          reportError: why ?? null,
+          showId,
+        });
+      }
+      return { showId, report, regenerated: true };
+    } finally {
+      await rt.close().catch(() => {});
+    }
   });
 
   /**
@@ -1828,9 +1914,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             show_id: string; title: string; surface: string | null; source: string;
             generated_at: Date | null; report: ShowReport | null;
             started_at: string; ended_at: Date | null; last_seen_at: string | null;
+            report_error: string | null;
           }>(
             `SELECT s.id AS show_id, s.title, s.surface, s.source, s.started_at, s.ended_at,
-                    r.generated_at, r.report, m.last_seen_at
+                    s.report_error, r.generated_at, r.report, m.last_seen_at
                FROM shows s
                LEFT JOIN show_reports r ON r.show_id = s.id
                LEFT JOIN LATERAL (
@@ -1857,6 +1944,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         showId: x.show_id, title: x.title, surface: x.surface, source: x.source,
         generatedAt: x.generated_at, report: x.report,
         startedAt: x.started_at, endedAt: x.ended_at, lastSeenAt: x.last_seen_at,
+        reportError: x.report_error,
       })),
       inbox,
     );

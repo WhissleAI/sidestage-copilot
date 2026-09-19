@@ -91,6 +91,15 @@ export interface FinishedSession {
    * state to render — "ended, no report" — not a row to drop.
    */
   hasReport: boolean;
+  /**
+   * Why it produced nothing, when generation was attempted and failed.
+   *
+   * Null when nothing was attempted — a session from before the cause was
+   * recorded, or one whose report simply has not been built. The badge used to
+   * say "the report never generated" with nothing to click and no reason
+   * anywhere outside the container's stdout (migration 025).
+   */
+  reportError: string | null;
 }
 
 export interface BehindBand {
@@ -112,6 +121,8 @@ export interface ReportRow {
   /** When the session stopped. Null on rows older than migration 024, and on
    *  a session that has not stopped. */
   endedAt?: Date | string | null;
+  /** Why the report failed, when it did. */
+  reportError?: string | null;
   /** Both optional: they are only ever read when there is no report, and the
    *  fallbacks below degrade in order rather than demanding either. */
   startedAt?: Date | string | null;
@@ -211,6 +222,9 @@ export function behindBand(
         blocked: x.report?.safety.blocked ?? null,
         topGap: top?.question ?? null,
         hasReport: Boolean(x.report),
+        // Only meaningful when there is no report; a session that failed once
+        // and was regenerated has the column cleared.
+        reportError: x.report ? null : x.reportError ?? null,
       };
     }),
     followups,

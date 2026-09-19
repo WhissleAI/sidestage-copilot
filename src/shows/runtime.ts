@@ -663,13 +663,30 @@ export class ShowRuntime {
          ON CONFLICT (show_id) DO UPDATE SET report = EXCLUDED.report, generated_at = now()`,
         [this.showId, JSON.stringify(report)],
       );
+      // A session that failed once and was regenerated must stop explaining an
+      // error it recovered from.
+      await this.db
+        .query("UPDATE shows SET report_error = NULL, report_failed_at = NULL WHERE id = $1", [this.showId])
+        .catch(() => {});
       return report;
     } catch (e) {
       // A report that cannot be built must not stop a session ending — but the
       // show still has to end, or it stays `live` forever in a list that says
       // so. The failure is loud because the report is the most useful artefact
       // the session produces, and losing one silently is how it stays broken.
-      console.error(`  REPORT FAILED for ${this.showId}: ${(e as Error).message}`);
+      //
+      // Loud used to mean stdout and nothing else: the seller saw a badge with
+      // nothing to click and the reason reached nobody. It is persisted now
+      // (migration 025), rendered on the badge, and `POST /api/shows/:id/report`
+      // asks again from rows that are all still here.
+      const why = (e as Error).message;
+      console.error(`  REPORT FAILED for ${this.showId}: ${why}`);
+      await this.db
+        .query(
+          "UPDATE shows SET report_error = $2, report_failed_at = now() WHERE id = $1",
+          [this.showId, why.slice(0, 500)],
+        )
+        .catch((x) => console.warn(`  ${this.showId}: failure not recorded — ${(x as Error).message}`));
       return null;
     } finally {
       await this.db
