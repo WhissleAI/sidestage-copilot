@@ -45,8 +45,10 @@ let reply = JSON.stringify({
   answer: "Happy to help — we do vendor self promotion on our store page, link in bio.",
   claims: [],
 });
-/** Every URL the process asked for, so "no network" is an assertion. */
+/** Every request the process made, so "no network" and "nothing is ever
+ *  posted to Reddit" are both assertions rather than beliefs. */
 const asked: string[] = [];
+const requests: { url: string; method: string }[] = [];
 /** The last context block the composer sent the gateway — the prompt the
  *  thread has to actually reach. */
 let lastContext = "";
@@ -63,6 +65,7 @@ const json = (body: unknown, status = 200) =>
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = String(input);
   asked.push(url);
+  requests.push({ url, method: String(init?.method ?? "GET").toUpperCase() });
   if (url.includes("/chat/turn")) {
     lastContext = String((JSON.parse(String(init?.body ?? "{}")) as { context?: string }).context ?? "");
   }
@@ -314,5 +317,31 @@ describe("marking a session draft sent", () => {
     assert.equal(sent.length, 1, "one thing happened, so there is one entry for it");
     // And the chain is still a chain.
     assert.equal((await rt.audit.verify()).ok, true);
+  });
+});
+
+/**
+ * The product rule, over everything this file just did.
+ *
+ * Reddit is monitor-and-draft: posting is off in CODE, not in configuration.
+ * Reading a room's rules and rebuilding a thread are two new reasons for this
+ * process to talk to Reddit, and the only correct number of non-GET requests
+ * either of them may make is zero. The token mint is the one POST the module
+ * has, and it is a POST because OAuth says so.
+ */
+describe("nothing was posted to reddit", () => {
+  test("every reddit request was a GET, except the token mint", () => {
+    const toReddit = requests.filter((r) => /reddit\.com/.test(r.url));
+    assert.ok(toReddit.length > 0, "this file did talk to reddit");
+    for (const r of toReddit) {
+      if (r.url.includes("/api/v1/access_token")) {
+        assert.equal(r.method, "POST", "the mint, and only the mint");
+        continue;
+      }
+      assert.equal(r.method, "GET", r.url);
+    }
+    // And what it read: the rules of a room, and a comment tree.
+    assert.ok(toReddit.some((r) => r.url.includes("/about/rules")));
+    assert.ok(toReddit.some((r) => r.url.includes("/comments/")));
   });
 });
