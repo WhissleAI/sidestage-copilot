@@ -418,6 +418,7 @@ after(async () => {
 const ebayShow = `home_${run}_ebay`;
 const redditShow = `home_${run}_reddit`;
 const otherShow = `home_${run}_other`;
+const noReportShow = `home_${run}_noreport`;
 
 const home = async () => {
   const r = await app.inject({ method: "GET", url: "/api/home", headers: auth });
@@ -553,6 +554,44 @@ describe("GET /api/home", () => {
     assert.equal(mine.blocked, 2);
     assert.equal(mine.endedAt, "2026-09-18T23:00:00.000Z");
     assert.equal(mine.topGap, "what is the warranty");
+  });
+
+  test("a session that ended and produced NO report is still a row in behind you", async () => {
+    // The row an operator most wants to see: the session finished and nothing
+    // came out of it. An inner join to `show_reports` hid exactly these.
+    showIds.push(noReportShow);
+    await pgPool().query(
+      `INSERT INTO shows (id, owner_account_id, title, seller_handle, started_at, source, surface, status)
+       VALUES ($1,$2,'The one whose report failed','@rae','2026-09-18T20:00:00.000Z','twitch','twitch','ended')
+       ON CONFLICT (id) DO NOTHING`,
+      [noReportShow, accountId],
+    );
+    await pgPool().query(
+      `INSERT INTO chat_messages (show_id, id, author, text, at, admitted)
+       VALUES ($1, 'm1', 'someone', 'is the 517 still up?', '2027-09-18T22:40:00.000Z', TRUE)
+       ON CONFLICT DO NOTHING`,
+      [noReportShow],
+    );
+
+    const body = await home();
+    const row = body.behind.reports.find((r: { showId: string }) => r.showId === noReportShow);
+    assert.ok(row, "a session with no report vanished from behind you");
+    assert.equal(row.hasReport, false);
+    assert.equal(row.surface, "twitch");
+    assert.equal(row.title, "The one whose report failed");
+    // Nulls, not zeroes: "answered 0" is a measurement nobody made.
+    assert.equal(row.answered, null);
+    assert.equal(row.blocked, null);
+    assert.equal(row.topGap, null);
+    // Nothing writes the moment a session stopped, so the end time falls back
+    // to the last thing it heard.
+    assert.equal(row.endedAt, "2027-09-18T22:40:00.000Z");
+
+    // And a session WITH a report is unchanged, down to the flag.
+    const reported = body.behind.reports.find((r: { showId: string }) => r.showId === redditShow);
+    assert.ok(reported);
+    assert.equal(reported.hasReport, true);
+    assert.equal(reported.answered, 6);
   });
 
   test("another seller's follow-ups are not in this seller's numbers", async () => {

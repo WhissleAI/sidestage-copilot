@@ -68,11 +68,29 @@ export interface FinishedSession {
   showId: string;
   surface: SurfaceId;
   title: string;
+  /**
+   * When it finished, as well as this database can say.
+   *
+   * The report's own `endedAt` when there is a report. When there is not, the
+   * schema has no end time to read — `shows` records `started_at` and a status,
+   * and nothing writes the moment a session stopped — so this is the last
+   * message the session recorded, falling back to when it started. `hasReport`
+   * is how a client knows which of the two it is holding.
+   */
   endedAt: string;
-  answered: number;
-  blocked: number;
+  /** Null, never zero, on a session with no report: nobody counted these. */
+  answered: number | null;
+  blocked: number | null;
   /** The question this session was asked most and could not answer. */
   topGap: string | null;
+  /**
+   * Did the report generate?
+   *
+   * A session that ended and produced nothing is the row an operator most wants
+   * to see, and an inner join to `show_reports` hid exactly those. It is a
+   * state to render — "ended, no report" — not a row to drop.
+   */
+  hasReport: boolean;
 }
 
 export interface BehindBand {
@@ -88,8 +106,14 @@ export interface ReportRow {
   /** `surface` since migration 018; `source` on every row written before it. */
   surface: string | null;
   source: string;
-  generatedAt: Date | string;
+  /** Null on a session whose report never generated. */
+  generatedAt: Date | string | null;
   report: ShowReport | null;
+  /** Both optional: they are only ever read when there is no report, and the
+   *  fallbacks below degrade in order rather than demanding either. */
+  startedAt?: Date | string | null;
+  /** The newest message this session recorded, when it recorded any. */
+  lastSeenAt?: Date | string | null;
 }
 
 /**
@@ -135,6 +159,13 @@ export function nowBand(shows: ShowSummary[], followupsReady: number): NowBand {
 /**
  * What finished, and what it left.
  *
+ * Every session that FINISHED is here, whether or not a report came out of it.
+ * The join used to be an inner one, so a session whose report failed to
+ * generate vanished from "behind you" — and that is precisely the session an
+ * operator wants to look at, because something went wrong in it. Such a row
+ * carries `hasReport: false` and nulls where the report's numbers would be,
+ * which a client renders as a badge rather than as a zero.
+ *
  * `topGap` is READ off the report, never recomputed. The report already ranked
  * the questions its session could not answer, at the moment it had the whole
  * session in hand; a second opinion computed here would eventually disagree
@@ -152,16 +183,30 @@ export function behindBand(
         (best, g) => (!best || g.asked > best.asked ? g : best),
         null,
       );
+      const iso = (v: Date | string | null | undefined): string | null =>
+        v == null ? null : new Date(v).toISOString();
       return {
         showId: x.showId,
         // A row written before migration 018 has no `surface`, and every one of
         // them was eBay Live or the scripted show — which is what `source` says.
         surface: (x.surface || x.source || "ebaylive") as SurfaceId,
         title: x.report?.title ?? x.title,
-        endedAt: x.report?.endedAt ?? new Date(x.generatedAt).toISOString(),
-        answered: x.report?.engagement.answered ?? 0,
-        blocked: x.report?.safety.blocked ?? 0,
+        // The report's own time, then the moment the report was written, then
+        // the last thing the session heard, then when it started. Each step
+        // down is a worse answer and the last two only happen when there is no
+        // report at all — which `hasReport` says out loud.
+        endedAt:
+          x.report?.endedAt ??
+          iso(x.generatedAt) ??
+          iso(x.lastSeenAt) ??
+          iso(x.startedAt) ??
+          new Date(0).toISOString(),
+        // Null rather than zero: "answered 0" is a measurement, and nobody made
+        // this one.
+        answered: x.report?.engagement.answered ?? null,
+        blocked: x.report?.safety.blocked ?? null,
         topGap: top?.question ?? null,
+        hasReport: Boolean(x.report),
       };
     }),
     followups,
