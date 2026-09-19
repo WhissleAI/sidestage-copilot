@@ -205,8 +205,17 @@ export interface ShowReport {
    */
   host: HostSummary | null;
   platform: PlatformSessionSummary | null;
-  /** What was kept to play back: counts, so the page knows whether to offer a timeline. */
-  media: { utterances: number; frames: number; audioChunks: number; audioSeconds: number };
+  /**
+   * What was kept to play back: counts, so the page knows whether to offer a
+   * timeline — and how many signals were LOST, which is a different fact from
+   * a session with no audio and must not render as one.
+   */
+  media: {
+    utterances: number; frames: number; audioChunks: number; audioSeconds: number;
+    /** Transcript writes that failed during the session. Zero is the normal
+     *  case; anything else means the host was heard and not recorded. */
+    lostUtterances: number;
+  };
   /** What the agent concluded. Null when it could not answer; the page says so. */
   conclusion: Conclusion | null;
 }
@@ -333,6 +342,7 @@ export async function buildReport(
     frames: frames.length,
     audioChunks: audio.length,
     audioSeconds: Math.round(audio.reduce((a, c) => a + c.durationMs, 0) / 1000),
+    lostUtterances: sig ? sig.lost(showId) : 0,
   };
   const prd = await prdMetrics(d, showId);
   // A report generated for a session that is somehow still live has no stamped
@@ -427,6 +437,10 @@ export async function buildReport(
       inventory: report.inventory,
       gaps: unanswered.slice(0, 10),
       hostSignals: host,
+      // "The host was not heard" and "the host was heard and the write failed"
+      // are different facts, and the conclusion must not state the first when
+      // the second happened.
+      hostSignalsLost: media.lostUtterances,
       onScreen: every(8, frames).map((f) => ({ offsetMs: f.offsetMs, reading: f.reading })),
       said: every(12, utterances).map((u) => ({
         offsetMs: u.offsetMs, text: u.text,

@@ -25,6 +25,7 @@ import type { RemoteListing } from "../actions/marketplace/port.js";
 import { ResearchService } from "../research/research.js";
 import { enrichLot, needsIdentity } from "../ingest/enrichLot.js";
 import { SessionRecord, buildReport, type ShowReport } from "./sessionRecord.js";
+import { durationMin } from "./metrics.js";
 import { SessionSignals } from "./signals.js";
 import { concludeShow } from "./conclusion.js";
 import { WhissleSessions } from "../llm/sessions.js";
@@ -662,8 +663,6 @@ export class ShowRuntime {
          ON CONFLICT (show_id) DO UPDATE SET report = EXCLUDED.report, generated_at = now()`,
         [this.showId, JSON.stringify(report)],
       );
-      await this.db.query("UPDATE shows SET status = 'ended' WHERE id = $1", [this.showId]);
-      await this.recordCost(report).catch(() => {});
       return report;
     } catch (e) {
       // A report that cannot be built must not stop a session ending — but the
@@ -671,10 +670,20 @@ export class ShowRuntime {
       // so. The failure is loud because the report is the most useful artefact
       // the session produces, and losing one silently is how it stays broken.
       console.error(`  REPORT FAILED for ${this.showId}: ${(e as Error).message}`);
+      return null;
+    } finally {
       await this.db
         .query("UPDATE shows SET status = 'ended' WHERE id = $1", [this.showId])
-        .catch(() => {});
-      return null;
+        .catch((e) => console.warn(`  ${this.showId}: not marked ended — ${(e as Error).message}`));
+      // The money record is NOT downstream of the report. It used to be the
+      // last statement of the success path with its error swallowed, so a
+      // report that threw took the cost row with it and a session that ran for
+      // two hours and made 800 gateway calls was simply absent from Cost — the
+      // page showing fewer shows and a smaller total with nothing saying
+      // anything was missing.
+      await this.recordCost().catch((e) =>
+        console.warn(`  ${this.showId}: cost row not written — ${(e as Error).message}`),
+      );
     }
   }
 
@@ -687,10 +696,28 @@ export class ShowRuntime {
    * app makes the calls — and the dollar figure is a bound, because the wallet
    * is workspace-wide. The row keeps them apart so the caveat survives.
    */
-  private async recordCost(report: ShowReport): Promise<void> {
+  private async recordCost(): Promise<void> {
     const snap = meter.snapshot();
     const mine = snap.byShow[this.showId];
     if (!mine) return;
+
+    // Read from the session's own rows rather than from the report, so a
+    // report that failed to build cannot take the money record with it. Both
+    // answer from the same proposals, so the row says the same thing either
+    // way — `answered` is the report's definition: neither abstained nor
+    // blocked.
+    const row = (
+      await this.db.query<{ started_at: string; ended_at: Date | string | null }>(
+        "SELECT started_at, ended_at FROM shows WHERE id = $1", [this.showId],
+      )
+    ).rows[0];
+    const answered = (
+      await this.db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM reply_proposals
+          WHERE show_id = $1 AND NOT abstained AND verdict <> 'block'`,
+        [this.showId],
+      )
+    ).rows[0]?.n ?? 0;
 
     // The spend window is keyed by show and opened when the session attached.
     // A wallet we could not read leaves this null — which is "unknown", and
@@ -708,14 +735,14 @@ export class ShowRuntime {
          answered = EXCLUDED.answered, account_id = COALESCE(EXCLUDED.account_id, show_costs.account_id)`,
       [
         this.showId,
-        report.startedAt,
-        Math.round(report.durationMin),
+        row?.started_at ?? new Date().toISOString(),
+        row ? durationMin(row.started_at, row.ended_at) : 0,
         mine.calls,
         mine.failures,
         mine.contextChars,
         JSON.stringify(mine.byDoor),
         spent,
-        report.engagement.answered,
+        answered,
         this.ownerAccountId,
       ],
     );

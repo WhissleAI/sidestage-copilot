@@ -98,6 +98,24 @@ function mass(dists: (SignalDistribution | null)[]): { label: string; share: num
 export class SessionSignals {
   constructor(private d: Pool) {}
 
+  /**
+   * Transcript writes that FAILED, per show.
+   *
+   * A lost utterance is not the same fact as an absent one, and until this
+   * existed the two were indistinguishable: `hostSummary` returned null either
+   * way, the report's host section rendered its empty state, and the agent's
+   * conclusion was written from "HOST SIGNALS: none — host audio was not
+   * captured" — a factual claim about a show where the host talked for two
+   * hours and a database write failed. Counted in memory because that is where
+   * the failure is: the place it would be persisted is the thing that broke.
+   */
+  private lostUtterances = new Map<string, number>();
+
+  /** How many of this show's utterances never reached Postgres. */
+  lost(showId: string): number {
+    return this.lostUtterances.get(showId) ?? 0;
+  }
+
   private dir(showId: string, kind: "audio" | "frames"): string {
     const p = join(ROOT, showId, kind);
     mkdirSync(p, { recursive: true });
@@ -125,7 +143,13 @@ export class SessionSignals {
           seg.speechRate, seg.levels ?? null,
         ],
       )
-      .catch(() => {});
+      // Fire-and-forget is right; silent is not — the same rule `recordChat`
+      // and `recordProposal` already follow. A transcript row that quietly
+      // fails is how a report comes to claim the host was never heard.
+      .catch((e) => {
+        this.lostUtterances.set(seg.showId, this.lost(seg.showId) + 1);
+        console.warn(`  signals: utterance for ${seg.showId} not written — ${(e as Error).message}`);
+      });
   }
 
   /** The frame the agent read, kept beside what it read. */

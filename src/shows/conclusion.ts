@@ -59,6 +59,10 @@ export interface ConclusionEvidence {
   inventory: { lotsObserved: number; lotsEnded: number; priceChanges: number; peakViewers: number };
   gaps: { question: string; asked: number; reason: string }[];
   hostSignals: HostSummary | null;
+  /** Utterances the session heard and failed to persist. A null `hostSignals`
+   *  with this above zero is "lost", not "never captured" — two different
+   *  facts about the show, and the agent must not state the wrong one. */
+  hostSignalsLost?: number;
   /** A handful of what the camera showed, oldest first. */
   onScreen: { offsetMs: number; reading: string }[];
   /** A handful of what the host said, oldest first, with the top label. */
@@ -133,6 +137,12 @@ function evidenceText(e: ConclusionEvidence): string {
           }).join("; ") + ".",
       );
     }
+  } else if (e.hostSignalsLost) {
+    lines.push(
+      `HOST SIGNALS: unavailable — ${e.hostSignalsLost} transcript write(s) FAILED during the ` +
+      "session. The host was heard; the record of it was lost. Do not conclude the host was " +
+      "silent or that audio was not captured.",
+    );
   } else lines.push("HOST SIGNALS: none — host audio was not captured.");
   if (e.said.length) {
     lines.push("HOST SAID (sample):");
