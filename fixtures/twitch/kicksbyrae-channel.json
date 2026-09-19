@@ -1,0 +1,40 @@
+{
+  "_note": "One channel's written-down truth, the way an operator would hand it over. The catalog's counterpart for a surface that sells nothing — see src/surfaces/twitch/corpus.ts.",
+  "channel": "kicksbyrae",
+
+  "schedule": [
+    { "when": "Thursdays 7pm PT", "title": "Keyboard build night", "game": "Just Chatting", "note": "Two hours, plus a Q&A at the end." },
+    { "when": "Sunday 11am PT", "title": "Sneaker pickups and grails", "note": "Cancelled the week of a drop." }
+  ],
+
+  "sponsors": [
+    {
+      "sponsor": "Keychron",
+      "product": "Keychron Q1",
+      "runsUntil": "2026-10-31",
+      "mustSay": [
+        "This segment is sponsored by Keychron",
+        "The code RAE takes 10% off at checkout"
+      ],
+      "mustNotClaim": [
+        "waterproof",
+        "lifetime warranty"
+      ],
+      "approvedClaims": [
+        "The Keychron Q1 uses a gasket mount and comes fully assembled.",
+        "The Keychron Q1 is hot-swappable, so switches change without soldering.",
+        "The Keychron Q1 board is machined from a solid block of aluminium."
+      ]
+    }
+  ],
+
+  "rules": [
+    "No backseat gaming.",
+    "Do not post \"link in bio\" or any store link in chat.",
+    "No spoilers for anything released in the last month."
+  ],
+
+  "product": [
+    { "label": "Desk setup", "text": "The desk is a Fully Jarvis, the mic is a Shure SM7B through a GoXLR, and the camera is a Sony ZV-E10." }
+  ]
+}

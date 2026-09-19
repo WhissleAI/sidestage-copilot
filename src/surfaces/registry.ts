@@ -18,6 +18,7 @@ import { dmAdapter } from "./dm/adapter.js";
 import { redditAdapter } from "./reddit/adapter.js";
 import { whatnotAdapter } from "./whatnot/adapter.js";
 import { tiktokLiveAdapter } from "./tiktoklive/adapter.js";
+import { twitchAdapter } from "./twitch/adapter.js";
 
 const adapters = new Map<SurfaceId, SurfaceAdapter>();
 
@@ -79,3 +80,16 @@ register(dmAdapter);
 register(redditAdapter);
 register(whatnotAdapter);
 register(tiktokLiveAdapter);
+// The built-ins, registered at import. All three are pure-local modules — the
+// eBay adapter defers its Playwright work to the watcher it wraps, and Twitch's
+// opens no socket until `open()` — so importing the registry costs nothing a
+// caller did not already pay.
+//
+// Order is the resolution order, and Twitch is LAST because it is the only
+// adapter that accepts a bare word. `parseTarget("demo")` is a valid Twitch
+// login and it is also how an operator asks for the scripted show; putting
+// Twitch after the two adapters with exact patterns is what keeps the narrower
+// claim winning.
+register(ebayLiveAdapter);
+register(simulatedAdapter);
+register(twitchAdapter);

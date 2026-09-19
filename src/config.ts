@@ -70,6 +70,35 @@ export const config = {
     ruName: process.env.NODE_ENV === "test" ? "" : process.env.EBAY_RUNAME || "",
 
   },
+  /**
+   * The Twitch application, and the bot account that speaks for a channel.
+   *
+   * Three values rather than two, because Twitch issues two different tokens
+   * and only one of them can do anything interesting. The app's own id and
+   * secret mint an APP token, which reads public things — who a channel is,
+   * what it is playing. Everything this surface actually does — read chat,
+   * cut a clip, run a poll, say something — acts AS an account, and the only
+   * way to mint that token without a browser in the loop is a refresh token
+   * the bot account granted once.
+   *
+   * Absence is a first-class state, not an outage: the adapter registers,
+   * reports its capabilities, and `open()` refuses by naming the variable
+   * (docs/SURFACES.md).
+   */
+  twitch: {
+    // Blanked under test for the reason the eBay keys above are: a suite that
+    // could reach Twitch would give a developer with a working .env a
+    // different answer from CI, and the adapter's behaviour is tested with an
+    // injected fetcher instead.
+    clientId: process.env.NODE_ENV === "test" ? "" : process.env.TWITCH_CLIENT_ID || "",
+    clientSecret: process.env.NODE_ENV === "test" ? "" : process.env.TWITCH_CLIENT_SECRET || "",
+    botRefreshToken: process.env.NODE_ENV === "test" ? "" : process.env.TWITCH_BOT_REFRESH_TOKEN || "",
+    /** Where Twitch sends the operator back after consent. Registered on the
+     *  application in dev.twitch.tv and matched byte-for-byte at the exchange,
+     *  which is why it is configuration rather than derived from the request. */
+    redirectUri: process.env.NODE_ENV === "test" ? "" : process.env.TWITCH_REDIRECT_URI || "",
+  },
+
   /** eBay's account-deletion notifications: the token we registered, and the
    *  endpoint URL exactly as registered (it is part of the challenge hash). */
   ebayDeletion: {

@@ -1,0 +1,6 @@
+:tmi.twitch.tv 001 sidestagebot :Welcome, GLHF!
+:sidestagebot!sidestagebot@sidestagebot.tmi.twitch.tv JOIN #kicksbyrae
+PING :tmi.twitch.tv
+@badge-info=subscriber/8;badges=subscriber/6;color=#1E90FF;display-name=MelonHusk;emotes=;first-msg=0;flags=;id=9a1f0b2c-6d4e-4a77-b1c3-5d8e7f6a2b40;mod=0;room-id=100;subscriber=1;tmi-sent-ts=1790000042191;turbo=0;user-id=552;user-type= :melonhusk!melonhusk@melonhusk.tmi.twitch.tv PRIVMSG #kicksbyrae :when is the next build stream?
+@badge-info=;badges=;color=;display-name=TinySwitch;emotes=;id=b7c8d9e0-1122-4334-9556-778899aabbcc;reply-parent-msg-id=9a1f0b2c-6d4e-4a77-b1c3-5d8e7f6a2b40;reply-parent-user-login=melonhusk;room-id=100;tmi-sent-ts=1790000141004;user-id=771;user-type= :tinyswitch!tinyswitch@tinyswitch.tmi.twitch.tv PRIVMSG #kicksbyrae :same question, is it the Q1?
+:tmi.twitch.tv NOTICE #kicksbyrae :This channel is in unique-chat mode.
