@@ -33,7 +33,7 @@ import { EbayOAuth } from "../ingest/ebay/oauth.js";
 import { TwitchOAuth } from "../surfaces/twitch/oauth.js";
 import { importSellerListings } from "../ingest/ebay/import.js";
 import { importCatalog, parseCatalogCsv, type CatalogItem } from "../shows/catalogImport.js";
-import { addCatalogQa, applyCatalog, getCatalog, listCatalogs, reloadCatalogs } from "../shows/catalogs.js";
+import { addCatalogQa, applyCatalog, getCatalog, isSafeCatalogId, listCatalogs, reloadCatalogs, type Catalog } from "../shows/catalogs.js";
 import { catalogFit, checkReadiness } from "../shows/readiness.js";
 import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
@@ -1059,7 +1059,47 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       }),
     };
   };
-  const catalogFor = async (req: object, id: string) => (await visibleCatalogs(req)).list.find((c) => c.id === id) ? getCatalog(id) : null;
+  /**
+   * THE door to a catalog. Everything that reads or writes one goes through it.
+   *
+   * Catalogs are the one resource here with no owner column: they are files in
+   * a shared directory, and ownership is inferred from the SHAPE of the file
+   * name (`ebay-<handle>` is an import, `ebay-<16 alphanumerics>` is somebody's
+   * preparation, anything else is a seed). That rule lived in `visibleCatalogs`
+   * and three of the six catalog-touching routes remembered to call it. The
+   * three that did not are ACCESS-02, -04 and -05: a seller could write Q&A
+   * into another seller's grounding corpus by id, overwrite their imported
+   * inventory, or point their own show at a catalog they cannot see and then
+   * read the whole thing back through `/api/listings`.
+   *
+   * So: one function, and it answers `null` for "you may not see this" and for
+   * "that is not an id" alike — a caller cannot tell the two apart and does not
+   * need to. Handlers 404 on null.
+   *
+   * The honest caveat, written here because this is where someone will look:
+   * this is a check a route must still call. The structural fix is an owner
+   * column with a repository that takes an account id in its constructor, the
+   * way `Repo` does for shows. That is a storage move, not a patch, and it is
+   * deferred to its own change.
+   */
+  const catalogFor = async (req: object, id: string): Promise<Catalog | null> => {
+    if (!id || !isSafeCatalogId(id)) return null;
+    const { list } = await visibleCatalogs(req);
+    return list.some((c) => c.id === id) ? getCatalog(id) : null;
+  };
+
+  /** The catalogs this account OWNS: its imports and its preparations, minus
+   *  the seeds everyone can see. The rule was written out three times (here,
+   *  Discover's interests, Home's surfaces) and a rule copied by hand is a rule
+   *  that drifts. */
+  const ownCatalogIds = async (req: object): Promise<Set<string>> => {
+    const a = actorOf(req);
+    if (!a) return new Set();
+    const prepared = await preparer.list(a.id).catch(() => []);
+    const mine = new Set(prepared.map((p) => p.catalogId).filter(Boolean) as string[]);
+    for (const c of listCatalogs()) if (c.id === `ebay-${a.handle}`) mine.add(c.id);
+    return mine;
+  };
 
   app.get("/api/catalogs", async (req) => {
     const { prepared, list } = await visibleCatalogs(req as object);
@@ -1193,7 +1233,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     if (!question || !answer) {
       return reply.code(400).send({ error: "both a question and an answer are required" });
     }
-    const row = addCatalogQa(req.params.id, {
+    // Through the one door, like its two sibling GETs. This route wrote
+    // straight to `<id>.json` on the strength of an id from the URL, and
+    // `GET /api/shows/prepared` is deliberately unscoped — so every other
+    // account's catalog id was published and any of them could be written to.
+    // An answer inserted into someone else's corpus is not vandalism a reader
+    // can spot: their copilot cites it to a real buyer and the audit chain
+    // records THEIR account as the source.
+    const target = await catalogFor(req as object, req.params.id);
+    if (!target) return reply.code(404).send({ error: `no catalog ${req.params.id}` });
+
+    const row = addCatalogQa(target.id, {
       question,
       answer,
       ...(req.body?.tags ? { tags: req.body.tags } : {}),
@@ -1545,6 +1595,23 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     async (req, reply) => {
       const actor = mustWrite(req as object, reply, "import listings");
       if (!actor) return reply;
+      // An import REPLACES a catalog file whole. The id came from the body and
+      // was never checked against what the caller owns, so naming another
+      // seller's catalog silently swapped their inventory for yours — and
+      // their next show grounded every answer in stock they do not have.
+      // Their own account is the default and the only thing they may name.
+      //
+      // Checked BEFORE the eBay connection: what the caller asked for is
+      // wrong whether or not we could have carried it out, and a request
+      // refused for the reason it is actually refused is the one a caller can
+      // act on.
+      const wanted = (req.body?.catalogId || "").trim();
+      const mine = `ebay-${actor.handle}`;
+      if (wanted && wanted !== mine && !(await ownCatalogIds(req as object)).has(wanted)) {
+        return reply.code(400).send({
+          error: `an import can only write your own catalog — "${mine}", or one of your prepared shows`,
+        });
+      }
       const token = await ebayAuth.userToken(actor.id).catch(() => null);
       if (!token) {
         return reply.code(409).send({ error: "connect an eBay account before importing" });
@@ -1553,7 +1620,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         const result = await importSellerListings({
           token,
           env: config.ebay.env as "sandbox" | "production",
-          catalogId: (req.body?.catalogId || `ebay-${actor.handle}`).slice(0, 60),
+          // Not sliced: a truncated id is a DIFFERENT catalog from the one
+          // just checked. The shape and the length are `catalogPath`'s job.
+          catalogId: wanted || mine,
           limit: Math.min(500, Math.max(1, req.body?.limit ?? 200)),
         });
         reloadCatalogs();
@@ -1656,19 +1725,6 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // the terms that put it on screen so the answer can be argued with by editing
   // a chip rather than by trusting a score.
 
-  /** The catalogs this account OWNS — its imports and its preparations, not the
-   *  seeds. The same rule `visibleCatalogs` applies, minus the demos: a
-   *  fixture nobody imported is not evidence of what anybody sells. */
-  const ownCatalogIds = async (req: object): Promise<string[]> => {
-    const a = actorOf(req);
-    if (!a) return [];
-    const prepared = await preparer.list(a.id).catch(() => []);
-    const mine = new Set(prepared.map((p) => p.catalogId).filter(Boolean) as string[]);
-    return listCatalogs()
-      .filter((c) => mine.has(c.id) || c.id === `ebay-${a.handle}`)
-      .map((c) => c.id);
-  };
-
   /**
    * This account's interests: derived from Knowledge, then owned.
    *
@@ -1685,7 +1741,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   const interestsFor = async (req: object): Promise<Interest[]> => {
     const a = actorOf(req);
     if (!a) return [];
-    const items = (await ownCatalogIds(req))
+    const items = [...(await ownCatalogIds(req))]
       .flatMap((id) => getCatalog(id)?.items ?? [])
       .map(itemForDerivation);
     // Never invent an interest. No catalog is no interests, and Discover says
@@ -1700,7 +1756,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       interests: rows,
       // What the chips would be derived FROM, so the empty state can point
       // somewhere real instead of saying "no interests".
-      catalogs: (await ownCatalogIds(req as object)).length,
+      catalogs: (await ownCatalogIds(req as object)).size,
     };
   });
 
@@ -1724,7 +1780,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         actor.id,
         body.map((i) => ({ term: String(i?.term ?? ""), pinned: Boolean(i?.pinned) })),
       );
-      return { interests: rows, catalogs: (await ownCatalogIds(req as object)).length };
+      return { interests: rows, catalogs: (await ownCatalogIds(req as object)).size };
     },
   );
 
@@ -1878,13 +1934,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     // ── surfaces ─────────────────────────────────────────────────────────────
     //
     // The catalogs this account OWNS — its imports and its preparations, not
-    // the two demo fixtures. The same rule `visibleCatalogs` applies, minus the
-    // seeds, and computed off the `prepared` list already in hand rather than
-    // asking for it twice.
-    const mineCatalogs = new Set(prepared.map((p) => p.catalogId).filter(Boolean) as string[]);
-    const own = listCatalogs().filter(
-      (c) => mineCatalogs.has(c.id) || (actor ? c.id === `ebay-${actor.handle}` : false),
-    );
+    // the two demo fixtures. Asked of `ownCatalogIds` rather than spelled out
+    // again: this was the third hand-written copy of the same rule, and the
+    // copy is how a tenancy rule drifts one route at a time.
+    const mineCatalogs = await ownCatalogIds(req as object);
+    const own = listCatalogs().filter((c) => mineCatalogs.has(c.id));
     const liveBySurface: Partial<Record<SurfaceId, number>> = {};
     for (const s of now.live) liveBySurface[s.surface] = (liveBySurface[s.surface] ?? 0) + 1;
     const roomsBySurface: Partial<Record<SurfaceId, number>> = {};
@@ -2446,8 +2500,24 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           eventId: eventId ?? null,
         });
       }
-      const catalogId = (req.body?.catalogId || preparedCatalogId || "").trim();
-      const catalog = catalogId ? getCatalog(catalogId) : null;
+      // A caller-named catalog goes through the one door; a PREPARED one does
+      // not, and the difference is who named it. `req.body.catalogId` is a
+      // string a browser sent, and attaching a show to a catalog the caller
+      // cannot see was a clean read of a competitor's inventory file: the
+      // ownership preHandler validates the SHOW, never the catalog, so
+      // `/api/listings` and `/api/context` then served the whole thing.
+      // `preparedCatalogId` is our own preparer table looked up by the event
+      // being attached — a preparation is a workspace resource by design
+      // (shared Whissle key, shared catalogs directory, `/api/shows/prepared`
+      // deliberately unscoped), and attaching to the event it was built for is
+      // the point of it.
+      const named = (req.body?.catalogId || "").trim();
+      const catalogId = named || (preparedCatalogId || "").trim();
+      const catalog = named
+        ? await catalogFor(req as object, named)
+        : catalogId
+          ? getCatalog(catalogId)
+          : null;
       if (catalogId && !catalog) return reply.code(400).send({ error: `unknown catalog "${catalogId}"` });
 
       try {
@@ -2560,7 +2630,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post<{ Params: { showId: string }; Body: { catalogId?: string } }>(
     "/api/shows/:showId/catalog/apply",
     async (req, reply) => {
-      const catalog = getCatalog((req.body?.catalogId || "").trim());
+      // Own show, own catalog. The preHandler proves the first; `catalogFor`
+      // is the only thing that proves the second, and this route used to skip
+      // it — so swapping in another account's catalog and reading it back
+      // through the show was two requests.
+      const catalog = await catalogFor(req as object, (req.body?.catalogId || "").trim());
       if (!catalog) return reply.code(400).send({ error: "a known catalogId is required" });
       try {
         const target = rt(req, req.params.showId);
