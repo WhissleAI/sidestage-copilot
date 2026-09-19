@@ -1859,11 +1859,52 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     };
   });
 
+  /**
+   * Is anything actually watching this room?
+   *
+   * A row in `surface_rooms` is a choice, not a process. Nothing in this build
+   * turns one into a running watch — there is no supervisor that reads the
+   * list, `shows.attach` is only ever called from the paste box, and the boot
+   * resume is `source = 'ebaylive'` only — so a rooms page that showed the list
+   * and said nothing else let an operator believe their subreddits were being
+   * read. This is the honest half of that gap: the room says whether a session
+   * is open on it right now. Starting one is a feature that does not exist yet
+   * and is written up in docs/SURFACES.md.
+   *
+   * Matching goes through the adapters' own `parseTarget`, so `r/mechmarket`
+   * and the `r/mechmarket` a session carries are compared as the same id
+   * without a second normalisation to get wrong. A room string no adapter
+   * claims is compared as it was typed.
+   */
+  const watchedRooms = async (accountId: string, surface: SurfaceId, list: { room: string }[]) => {
+    if (!list.length) return new Set<string>();
+    const live = (await shows.list(accountId)).filter(
+      (s) => s.status === "live" && s.source === surface && s.externalId,
+    );
+    if (!live.length) return new Set<string>();
+    const open = new Set(live.map((s) => s.externalId!));
+    const on = new Set<string>();
+    for (const r of list) {
+      const parsed = resolveSurface(r.room);
+      const key = parsed?.adapter.id === surface ? parsed.target.externalId : r.room;
+      if (open.has(key)) on.add(r.room);
+    }
+    return on;
+  };
+
   app.get<{ Params: { surface: string } }>("/api/surfaces/:surface/rooms", async (req, reply) => {
     const surface = knownSurface(req.params.surface, reply);
     if (!surface) return reply;
     const a = actorOf(req as object);
-    return { surface, rooms: a ? await rooms.list(a.id, surface) : [] };
+    const list = a ? await rooms.list(a.id, surface) : [];
+    const on = a ? await watchedRooms(a.id, surface, list) : new Set<string>();
+    return {
+      surface,
+      // `watching` is a fact about this process, the way `now.live` is: a room
+      // is being watched when a session is open on it, not when a row says the
+      // operator would like one to be.
+      rooms: list.map((r) => ({ ...r, watching: on.has(r.room) })),
+    };
   });
 
   app.post<{ Params: { surface: string }; Body: { room?: string; posting?: boolean; disclosure?: string | null } }>(
