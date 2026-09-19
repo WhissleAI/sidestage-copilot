@@ -66,6 +66,17 @@ export class TwitchApiError extends Error {
 
 export interface TwitchUser { id: string; login: string; displayName: string }
 export interface TwitchStream { id: string; title: string; gameName: string; startedAt: string }
+/** A stream as the DISCOVERY reads list them — the same row, plus who is
+ *  running it and how many people are there, which `stream()` has no caller
+ *  for and a grid of candidates cannot do without. */
+export interface TwitchLiveStream extends TwitchStream {
+  userId: string;
+  userLogin: string;
+  userName: string;
+  viewerCount: number | null;
+  gameId: string;
+}
+export interface TwitchCategory { id: string; name: string }
 export interface TwitchClip { id: string; editUrl: string; url: string }
 export interface TwitchPoll { id: string; title: string; status: string }
 export interface TwitchSentMessage { messageId: string; isSent: boolean; dropReason: string | null }
@@ -237,6 +248,60 @@ export class TwitchApi {
     return c ? { title: c.title ?? "", gameName: c.game_name ?? "" } : null;
   }
 
+  // ── discovery ─────────────────────────────────────────────────────────────
+  //
+  // Both of these run on the APP token, and that is the whole point. Listing
+  // what is live on Twitch and naming a category need no user, no consent and
+  // no bot account — which is why the claim that this surface had "a discovery
+  // page behind an app review" was wrong, and why Discover could have been
+  // reading Twitch since the day the client id was set.
+
+  /**
+   * Twitch's own name for a thing, so a stream can be found by category rather
+   * than only by whatever the streamer typed in their title.
+   *
+   * `search/categories` is a prefix/substring search over game and category
+   * names: "pokemon" finds "Pokémon Trading Card Game" and "Pokémon Scarlet",
+   * and the ids are what `/streams` filters on.
+   */
+  async searchCategories(query: string, limit = 5): Promise<TwitchCategory[]> {
+    const q = new URLSearchParams({ query, first: String(Math.min(100, Math.max(1, limit))) });
+    const body = await this.call<{ data?: { id: string; name?: string }[] }>(
+      `/search/categories?${q}`,
+      { as: "app" },
+    );
+    return (body.data ?? []).map((c) => ({ id: c.id, name: c.name ?? "" }));
+  }
+
+  /**
+   * Live streams, optionally narrowed to categories.
+   *
+   * With no `gameIds` this is Twitch's front page, ordered by audience, which
+   * is only useful as a haystack to match titles against. With them it is the
+   * live rooms for the things the operator sells.
+   *
+   * Helix takes repeated `game_id` parameters, up to 100 of them, so a handful
+   * of interests costs ONE request rather than one apiece. `viewerCount` is
+   * carried through as null when Twitch omits it rather than as 0 — nobody
+   * measured zero.
+   */
+  async liveStreams(opts: { gameIds?: string[]; limit?: number } = {}): Promise<TwitchLiveStream[]> {
+    const q = new URLSearchParams({ first: String(Math.min(100, Math.max(1, opts.limit ?? 40))) });
+    for (const id of (opts.gameIds ?? []).slice(0, 100)) q.append("game_id", id);
+    const body = await this.call<{ data?: RawLiveStream[] }>(`/streams?${q}`, { as: "app" });
+    return (body.data ?? []).map((s) => ({
+      id: s.id,
+      title: s.title ?? "",
+      gameName: s.game_name ?? "",
+      gameId: s.game_id ?? "",
+      startedAt: s.started_at ?? "",
+      userId: s.user_id ?? "",
+      userLogin: (s.user_login ?? "").toLowerCase(),
+      userName: s.user_name || s.user_login || "",
+      viewerCount: typeof s.viewer_count === "number" ? s.viewer_count : null,
+    }));
+  }
+
   /** The most recent polls, newest first. Used to refuse a second poll rather
    *  than discover from a 400 that one is already running. */
   async polls(broadcasterId: string): Promise<TwitchPoll[]> {
@@ -390,6 +455,9 @@ export class TwitchApi {
 
 interface RawUser { id: string; login?: string; display_name?: string }
 interface RawStream { id: string; title?: string; game_name?: string; started_at?: string }
+interface RawLiveStream extends RawStream {
+  game_id?: string; user_id?: string; user_login?: string; user_name?: string; viewer_count?: number;
+}
 interface RawPoll { id: string; title?: string; status?: string }
 interface RawSent { message_id?: string; is_sent?: boolean; drop_reason?: { code?: string; message?: string } }
 
