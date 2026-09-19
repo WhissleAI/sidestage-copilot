@@ -12,12 +12,34 @@
 // Shipped as JSON under fixtures/catalogs/. A production build would read these
 // from the seller's account; the shape is the same either way.
 
-import { readFileSync, readdirSync, existsSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { config } from "../config.js";
 import type { Repo } from "../domain/repo.js";
 import type { Comp, PolicyClause } from "../domain/types.js";
 import { importCatalog, type CatalogItem, type ImportResult } from "./catalogImport.js";
+
+/**
+ * Write a catalog file so a reader never sees half of one.
+ *
+ * Every write here is a read-modify-write of a whole JSON document, and
+ * `writeFileSync` truncates before it fills: anything reading that path in the
+ * gap gets a partial file and a `JSON.parse` throw, which surfaces three layers
+ * up as a 404 for a catalog that exists. Writing beside it and renaming makes
+ * the swap atomic — a reader sees the old document or the new one. Found when
+ * a fifth test process boot raced two suites into 404s they had nothing to do
+ * with; the deploy rsync writing over a running box is the same shape.
+ */
+export function writeCatalogFile(path: string, body: string): void {
+  // The directory is created here rather than assumed. `CATALOGS_DIR` can name
+  // a path that does not exist yet — a fresh checkout, a new box, a test run
+  // pointed somewhere clean — and the importer used to answer that with a raw
+  // ENOENT from three layers down.
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, body);
+  renameSync(tmp, path);
+}
 
 export interface SellerProfile {
   handle: string;
@@ -123,7 +145,7 @@ export function setCatalogAgent(catalogId: string, agentId: string): void {
   if (!existsSync(path)) return;
   const raw = JSON.parse(readFileSync(path, "utf8")) as Catalog;
   raw.agentId = agentId;
-  writeFileSync(path, JSON.stringify(raw, null, 2) + "\n");
+  writeCatalogFile(path, JSON.stringify(raw, null, 2) + "\n");
   const cached = load().get(catalogId);
   if (cached) cached.agentId = agentId;
 }
@@ -162,7 +184,7 @@ export function addCatalogQa(
   };
   raw.qa = existing ? qa.map((q) => (q.id === existing.id ? row : q)) : [...qa, row];
 
-  writeFileSync(path, JSON.stringify(raw, null, 2) + "\n");
+  writeCatalogFile(path, JSON.stringify(raw, null, 2) + "\n");
   cache = null;
   return row;
 }
@@ -175,7 +197,7 @@ export function addCatalogQa(
  */
 export function addCatalogFile(c: Catalog): string {
   const path = join(config.catalogsDir, `${c.id}.json`);
-  writeFileSync(path, JSON.stringify(c, null, 2) + "\n");
+  writeCatalogFile(path, JSON.stringify(c, null, 2) + "\n");
   cache = null;
   return path;
 }

@@ -11,8 +11,8 @@ import { LADDER } from "../autonomy/ladder.js";
 import { discoverLiveShows, discoverSellerShows, parseEventId } from "../ingest/ebaylive/discovery.js";
 import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid, rememberGrid } from "../sellers/following.js";
 import { SurfaceRooms } from "../surfaces/rooms.js";
-import { all as surfaceAdapters } from "../surfaces/registry.js";
-import { SURFACE_CAPABILITIES, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
+import { all as surfaceAdapters, resolve as resolveSurface } from "../surfaces/registry.js";
+import { SURFACE_CAPABILITIES, SurfaceUnavailable, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
 import {
   FollowUpInbox, buildFollowUps, openDrafter, type FollowUpStatus,
 } from "../surfaces/dm/drafts.js";
@@ -1677,11 +1677,25 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return null;
   };
 
+  /**
+   * Wired, and with something to open.
+   *
+   * The follow-up inbox is the one surface where those come apart: it is built
+   * out of a show that has already ENDED, so its `open()` refuses by design.
+   * Reporting it as attachable would put it in the console's paste box and then
+   * hand the operator a 409 for doing what the box invited.
+   *
+   * One definition, read by BOTH the surfaces listing and the attach route —
+   * a paste box that offers a surface the attach route then refuses is worse
+   * than either answer on its own.
+   */
+  const isAttachable = (id: SurfaceId | string): boolean =>
+    surfaceAdapters().some((a) => a.id === id) && id !== "dm";
+
   /** Every surface this build knows, with what it can do and whether an
    *  adapter is wired for it yet. The console reads this to decide which
    *  columns a session even has. */
   app.get("/api/surfaces", async () => {
-    const wired = new Set(surfaceAdapters().map((a) => a.id));
     return {
       surfaces: (Object.keys(SURFACE_CAPABILITIES) as SurfaceId[]).map((id) => ({
         id,
@@ -1691,7 +1705,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // surface where those come apart: it is built out of a show that has
         // already ENDED, so its `open()` refuses by design. Reporting it as
         // attachable would put it in the paste box and hand the operator a 409.
-        attachable: wired.has(id) && id !== "dm",
+        attachable: isAttachable(id),
       })),
     };
   });
@@ -1850,11 +1864,39 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       const input = (req.body?.eventId || req.body?.url || "").trim();
       if (!input) return reply.code(400).send({ error: "eventId or url is required" });
 
+      // WHICH surface is this? The registry asks every adapter to read the
+      // string and takes the first that recognises it, so a Whatnot link, a
+      // Twitch channel and a subreddit all arrive through the same door an
+      // eBay event id does. A string nobody recognises is a 400 that lists
+      // what we do read, rather than the old message that could only name
+      // eBay because eBay was all there was.
+      const resolved = resolveSurface(input);
+      if (!resolved) {
+        return reply.code(400).send({
+          error: `nothing recognises "${input}"`,
+          accepted: surfaceAdapters()
+            .filter((a) => a.id !== "dm")
+            .map((a) => ({ surface: a.id, label: a.label })),
+        });
+      }
+      const surface = resolved.adapter;
+      if (!isAttachable(surface.id)) {
+        return reply.code(409).send({
+          error: `${surface.label} is not something you attach to — it is built from a finished show`,
+          code: "not-attachable",
+          surface: surface.id,
+        });
+      }
+
       // A show that was PREPARED is the whole reason preparing exists: its
       // catalog and its agent are already built. Attaching used to ignore that
       // and mint a second agent with an empty knowledge base — so the operator
       // did the preparation and then watched the copilot start from nothing.
-      const eventId = parseEventId(input);
+      // Only eBay Live HAS a preparation: it is built from the seller's own
+      // listings through an API no other surface gives us. Demanding one on
+      // Twitch would be demanding a door that does not exist.
+      const preparable = surface.id === "ebaylive";
+      const eventId = preparable ? parseEventId(input) : null;
       let prepared = eventId ? await preparer.get(eventId).catch(() => null) : null;
       // The live grid we already read knows this show's real title and host;
       // the player page's own <title> is generic. Without this a show attached
@@ -1877,7 +1919,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       // attach without it minted an agent with an empty knowledge base and the
       // copilot started from nothing — so preparation is the door now, unless
       // the caller brings a catalog of its own or says it knows what it is doing.
-      if (!prepared && !req.body?.catalogId && !req.body?.allowUnprepared) {
+      if (preparable && !prepared && !req.body?.catalogId && !req.body?.allowUnprepared) {
         return reply.code(409).send({
           error: "prepare the agent for this show first — that is where its catalog and knowledge base are built",
           code: "prepare-first",
@@ -1895,7 +1937,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         const sellerHandle = (prepared?.sellerHandle || seen?.sellerHandle || req.body?.host || "").replace(/^@/, "").toLowerCase();
         const connection = await ebayAuth.connection(actor.id).catch(() => null);
         const own = Boolean(sellerHandle && connection?.ebayUsername && connection.ebayUsername.toLowerCase() === sellerHandle);
-        const target = await shows.attachEbayLive(input, {
+        const target = await shows.attach(input, {
           ownerAccountId: actor.id,
           readOnly: !own,
           title: req.body?.title || prepared?.title || seen?.title,
@@ -1976,6 +2018,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
           catalog: applied, snapshot: await target.snapshot(),
         };
       } catch (e) {
+        // A surface whose keys are not set is not a broken gateway, and 502 was
+        // the wrong thing to tell an operator who simply has not connected
+        // Twitch yet. Name the variable that is missing: it is the one piece of
+        // information that turns "it did not work" into something they can act
+        // on without reading our source.
+        if (e instanceof SurfaceUnavailable) {
+          return reply.code(409).send({
+            error: e.message,
+            code: "surface-unavailable",
+            surface: e.surface,
+            missing: e.missing ?? null,
+          });
+        }
         return reply.code(502).send({ error: (e as Error).message });
       }
     },

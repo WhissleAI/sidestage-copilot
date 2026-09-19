@@ -1,0 +1,25 @@
+{
+  "id": "probe3",
+  "name": "Imported from eBay sandbox — 9/18/2026",
+  "seller": {
+    "handle": "probe3",
+    "name": "probe3",
+    "about": "Imported from the seller's eBay inventory.",
+    "voice": "Answer the actual question first, then at most one detail."
+  },
+  "policies": [],
+  "items": [
+    {
+      "sku": "AJ1-CHI",
+      "title": "Air Jordan 1 Retro High OG Chicago",
+      "priceCents": 41200,
+      "floorPriceCents": 41200,
+      "qty": 2,
+      "state": "live",
+      "condition": "DS",
+      "brand": "Jordan",
+      "colorway": "Red/White",
+      "size": "10"
+    }
+  ]
+}
