@@ -18,6 +18,7 @@
 import type { Pool } from "../db/pg.js";
 import type { ShowReport } from "./sessionRecord.js";
 import { AUTO_REPLY_INTENTS } from "../autonomy/ladder.js";
+import { answerableShare, answeredRate, blockRate, share } from "./metrics.js";
 
 export interface AnalyticsOverview {
   window: { days: number; from: string; to: string };
@@ -32,8 +33,14 @@ export interface AnalyticsOverview {
     questionsAsked: number;
     answered: number;
     sent: number;
-    /** answered ÷ questions asked, across the window. */
-    answeredRate: number;
+    /**
+     * Sent ÷ questions asked, across the window — the SAME figure, from the
+     * same function, that each session's own report carries. It used to be
+     * `answered ÷ questions` here and `sent ÷ questions` in the report, so this
+     * headline and the per-show row for one session disagreed on the same page.
+     * Pooled over summed counts, never averaged over per-session rates.
+     */
+    answeredRate: number | null;
     /** Median of each show's median — a shape, not a median. */
     medianOfMediansMs: number;
     /** The worst p95 any show recorded. One bad show should not hide. */
@@ -47,8 +54,9 @@ export interface AnalyticsOverview {
     /** What the operator marked wrong after sending. A floor, not a total. */
     flaggedWrong: number;
     byGuard: Record<string, number>;
-    /** blocked ÷ (answered + blocked): how often a guard had to stop a draft. */
-    blockRate: number;
+    /** Blocked ÷ drafts that reached a verdict (src/shows/metrics.ts) — the
+     *  definition each report's PRD block now uses too. */
+    blockRate: number | null;
     /** Shows whose audit chain verified intact, over shows with a report. */
     chainsIntact: number;
   };
@@ -76,10 +84,12 @@ export interface AnalyticsOverview {
   byIntent: {
     intent: string;
     asked: number;
-    answeredRate: number;
-    abstainedRate: number;
+    /** A different figure from the headline, deliberately: the share of
+     *  proposals on this topic the copilot could stand behind. */
+    answeredRate: number | null;
+    abstainedRate: number | null;
     blocked: number;
-    editedRate: number;
+    editedRate: number | null;
     /** Whether the ladder would let this topic auto-send at L3. */
     autoReply: "allow-listed" | "never";
   }[];
@@ -87,13 +97,17 @@ export interface AnalyticsOverview {
     showId: string;
     title: string;
     startedAt: string;
-    durationMin: number;
-    answeredRate: number;
-    p95LatencyMs: number;
-    blocked: number;
-    flaggedWrong: number;
+    durationMin: number | null;
+    answeredRate: number | null;
+    p95LatencyMs: number | null;
+    blocked: number | null;
+    flaggedWrong: number | null;
     gmvCents: number | null;
-    chainOk: boolean;
+    chainOk: boolean | null;
+    /** Whether this row has a report at all. Inferred from a rounded duration
+     *  before this existed, so a real report for a 20-second session was
+     *  labelled "no report" beside its own numbers. */
+    hasReport: boolean;
   }[];
 }
 
@@ -151,16 +165,17 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
     return {
       intent,
       asked: r.asked,
-      answeredRate: r.asked ? r.answered / r.asked : 0,
-      abstainedRate: r.asked ? r.abstained / r.asked : 0,
+      answeredRate: answerableShare({ answered: r.answered, proposals: r.asked }),
+      abstainedRate: share(r.abstained, r.asked),
       blocked: r.blocked,
-      editedRate: r.sent ? r.edited / r.sent : 0,
+      editedRate: share(r.edited, r.sent),
       autoReply: (AUTO_REPLY_INTENTS as Set<string>).has(intent) ? "allow-listed" : "never",
     };
   });
 
   const questions = sum(reported, (r) => r.report.engagement.questionsAsked);
   const answered = sum(reported, (r) => r.report.engagement.answered);
+  const sent = sum(reported, (r) => r.report.engagement.sent);
   const blocked = sum(reported, (r) => r.report.safety.blocked);
   const withGmv = reported.filter((r) => r.report.prd?.gmv);
   const decision = reported
@@ -181,8 +196,8 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       commentsSeen: sum(reported, (r) => r.report.engagement.commentsSeen),
       questionsAsked: questions,
       answered,
-      sent: sum(reported, (r) => r.report.engagement.sent),
-      answeredRate: questions ? answered / questions : 0,
+      sent,
+      answeredRate: answeredRate({ sent, questionsAsked: questions }),
       // A show that drafted nothing has no median, not a median of zero; four
       // such shows next to one real one used to read as "0ms" here.
       medianOfMediansMs: median(
@@ -199,7 +214,7 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       abstained: sum(reported, (r) => r.report.safety.abstained),
       flaggedWrong: sum(reported, (r) => r.report.safety.flaggedWrong ?? 0),
       byGuard,
-      blockRate: answered + blocked ? blocked / (answered + blocked) : 0,
+      blockRate: blockRate({ blocked, answered }),
       chainsIntact: reported.filter((r) => (r.report.safety?.auditChain?.ok ?? false)).length,
     },
     actions: {
@@ -222,13 +237,17 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       showId: r.id,
       title: r.title,
       startedAt: r.started_at,
-      durationMin: r.report?.durationMin ?? 0,
-      answeredRate: r.report?.engagement.answeredRate ?? 0,
-      p95LatencyMs: r.report?.engagement.p95LatencyMs ?? 0,
-      blocked: r.report?.safety.blocked ?? 0,
-      flaggedWrong: r.report?.safety.flaggedWrong ?? 0,
+      // Null, not zero, on a session with no report: nobody made these
+      // measurements, and a row of zeroes under a target reads as a failing
+      // grade for a session that was never graded. `hasReport` says which.
+      durationMin: r.report?.durationMin ?? null,
+      answeredRate: r.report?.engagement.answeredRate ?? null,
+      p95LatencyMs: r.report?.engagement.p95LatencyMs ?? null,
+      blocked: r.report?.safety.blocked ?? null,
+      flaggedWrong: r.report?.safety.flaggedWrong ?? null,
       gmvCents: r.report?.prd?.gmv.grossCents ?? null,
-      chainOk: r.report?.safety.auditChain.ok ?? false,
+      chainOk: r.report?.safety.auditChain.ok ?? null,
+      hasReport: r.report != null,
     })),
   };
 }

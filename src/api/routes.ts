@@ -1799,17 +1799,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // something went wrong in it. It is a row with a badge on it now, the
         // way `/api/reports` has always shown them.
         //
-        // The end time is the awkward part and the query is where it is
-        // honest: nothing writes the moment a session stopped, so a report-less
-        // row falls back to the last message it recorded (one lateral read over
-        // six rows) and then to when it started. `hasReport` says which.
+        // The end time is `shows.ended_at` since migration 024 — stamped when
+        // the session stopped, which is what "behind you" is ordered by. The
+        // fallbacks below it are for rows written before the column existed:
+        // the report's own end, then when the report was written, then the last
+        // message the session recorded, then when it started. `hasReport` says
+        // which of those a client is holding.
         pgPool()
           .query<{
             show_id: string; title: string; surface: string | null; source: string;
             generated_at: Date | null; report: ShowReport | null;
-            started_at: string; last_seen_at: string | null;
+            started_at: string; ended_at: Date | null; last_seen_at: string | null;
           }>(
-            `SELECT s.id AS show_id, s.title, s.surface, s.source, s.started_at,
+            `SELECT s.id AS show_id, s.title, s.surface, s.source, s.started_at, s.ended_at,
                     r.generated_at, r.report, m.last_seen_at
                FROM shows s
                LEFT JOIN show_reports r ON r.show_id = s.id
@@ -1819,7 +1821,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
               WHERE (s.owner_account_id IS NULL OR s.owner_account_id = $1)
                 -- Finished, or finished enough to have left a report behind.
                 AND (s.status = 'ended' OR r.show_id IS NOT NULL)
-              ORDER BY COALESCE(r.generated_at, m.last_seen_at::timestamptz, s.started_at::timestamptz) DESC
+              ORDER BY COALESCE(s.ended_at, r.generated_at, m.last_seen_at::timestamptz, s.started_at::timestamptz) DESC
               LIMIT 6`,
             [accountId],
           )
@@ -1836,7 +1838,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       reportRows.map((x) => ({
         showId: x.show_id, title: x.title, surface: x.surface, source: x.source,
         generatedAt: x.generated_at, report: x.report,
-        startedAt: x.started_at, lastSeenAt: x.last_seen_at,
+        startedAt: x.started_at, endedAt: x.ended_at, lastSeenAt: x.last_seen_at,
       })),
       inbox,
     );

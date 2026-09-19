@@ -71,11 +71,11 @@ export interface FinishedSession {
   /**
    * When it finished, as well as this database can say.
    *
-   * The report's own `endedAt` when there is a report. When there is not, the
-   * schema has no end time to read — `shows` records `started_at` and a status,
-   * and nothing writes the moment a session stopped — so this is the last
-   * message the session recorded, falling back to when it started. `hasReport`
-   * is how a client knows which of the two it is holding.
+   * `shows.ended_at` since migration 024: stamped when the session stopped,
+   * whether or not a report came out of it. The chain below it is for rows
+   * written before the column existed — the report's own `endedAt`, then when
+   * the report was written, then the last message the session recorded, then
+   * when it started. `hasReport` is how a client knows what it is holding.
    */
   endedAt: string;
   /** Null, never zero, on a session with no report: nobody counted these. */
@@ -109,6 +109,9 @@ export interface ReportRow {
   /** Null on a session whose report never generated. */
   generatedAt: Date | string | null;
   report: ShowReport | null;
+  /** When the session stopped. Null on rows older than migration 024, and on
+   *  a session that has not stopped. */
+  endedAt?: Date | string | null;
   /** Both optional: they are only ever read when there is no report, and the
    *  fallbacks below degrade in order rather than demanding either. */
   startedAt?: Date | string | null;
@@ -191,11 +194,12 @@ export function behindBand(
         // them was eBay Live or the scripted show — which is what `source` says.
         surface: (x.surface || x.source || "ebaylive") as SurfaceId,
         title: x.report?.title ?? x.title,
-        // The report's own time, then the moment the report was written, then
-        // the last thing the session heard, then when it started. Each step
-        // down is a worse answer and the last two only happen when there is no
-        // report at all — which `hasReport` says out loud.
+        // The stamped end, then the report's own time, then the moment the
+        // report was written, then the last thing the session heard, then when
+        // it started. Each step down is a worse answer, and every step below
+        // the first exists only for rows older than migration 024.
         endedAt:
+          iso(x.endedAt) ??
           x.report?.endedAt ??
           iso(x.generatedAt) ??
           iso(x.lastSeenAt) ??

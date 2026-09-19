@@ -308,7 +308,7 @@ export class ShowRuntime {
       // said LIVE, and a restart never resumed the show because it was
       // "ended".
       await this.db.query(
-        "UPDATE shows SET status = 'live', started_at = $2 WHERE id = $1 AND status = 'ended'",
+        "UPDATE shows SET status = 'live', started_at = $2, ended_at = NULL WHERE id = $1 AND status = 'ended'",
         [this.showId, new Date().toISOString()],
       );
     } catch {
@@ -627,6 +627,13 @@ export class ShowRuntime {
    * persisted at all.
    */
   async finishSession(): Promise<ShowReport | null> {
+    // Stamped FIRST, and before the report is built, because it is the report's
+    // own denominator: `durationMin` and the PRD's gross-per-hour are measured
+    // from it (migration 024). COALESCE so a second finish — a detach racing
+    // the silence watchdog — cannot move the moment a session stopped.
+    await this.db
+      .query("UPDATE shows SET ended_at = COALESCE(ended_at, now()) WHERE id = $1", [this.showId])
+      .catch((e) => console.warn(`  ${this.showId}: end time not stamped — ${(e as Error).message}`));
     try {
       const chain = await this.audit.verify();
       const listen = (

@@ -258,7 +258,9 @@ export interface Metrics {
   guardBlocks: Record<GuardName, number>;
   latency: { p50: number; p95: number; p99: number; budgetMs: number; breaches: number };
   cacheHitRate: number;
-  answeredRate: number;
+  /** Sent ÷ admitted questions (src/shows/metrics.ts). Null before anyone has
+   *  asked anything — not 0%, which is a grade. */
+  answeredRate: number | null;
   actionsCommitted: number;
   actionsRolledBack: number;
 }

@@ -13,6 +13,7 @@
 // One metric is deliberately absent rather than faked: see UNMEASURABLE below.
 
 import type { Pool } from "../db/pg.js";
+import { answeredRate, blockRate, durationHours, share } from "./metrics.js";
 
 export interface PrdMetrics {
   gmv: {
@@ -24,11 +25,13 @@ export interface PrdMetrics {
      *  anything — a rate extrapolated from four minutes is noise wearing a
      *  decimal point. */
     perShowHourCents: number | null;
-    answeredQuestionRate: number;
+    /** Sent ÷ admitted questions. The report's `engagement.answeredRate` is
+     *  the same figure from the same function; they cannot disagree. */
+    answeredQuestionRate: number | null;
     timeToAnswerP95Ms: number;
     /** Share of sold lots that had at least one answered buyer question.
      *  The PRD's "isolates the effect from general show variance" metric. */
-    sellThroughWithAnswer: { withAnswer: number; total: number; rate: number };
+    sellThroughWithAnswer: { withAnswer: number; total: number; rate: number | null };
   };
   operatorLoad: {
     /** Times the seller touched a proposal: sent, edited or dismissed. */
@@ -38,9 +41,11 @@ export interface PrdMetrics {
     operationalEdits: number;
   };
   trust: {
-    blockRate: number;
-    editRate: number;
-    rollbackRate: number;
+    /** Blocked ÷ drafts that reached a verdict. One definition, shared with
+     *  Analytics' "Can I trust it" headline (src/shows/metrics.ts). */
+    blockRate: number | null;
+    editRate: number | null;
+    rollbackRate: number | null;
     /** Replies sent whose grounding was contradicted by a LATER state change —
      *  the closest honest proxy for "a wrong reply reached a buyer". */
     sentThenContradicted: number;
@@ -70,14 +75,18 @@ const UNMEASURABLE = [
 const pct = (sorted: number[], p: number): number =>
   sorted.length ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!) : 0;
 
-const rate = (n: number, d: number): number => (d ? Number((n / d).toFixed(3)) : 0);
-
 export async function prdMetrics(d: Pool, showId: string): Promise<PrdMetrics> {
   const show = (
-    await d.query<{ started_at: string }>("SELECT started_at FROM shows WHERE id = $1", [showId])
+    await d.query<{ started_at: string; ended_at: Date | string | null }>(
+      "SELECT started_at, ended_at FROM shows WHERE id = $1", [showId],
+    )
   ).rows[0];
-  const startedMs = show ? new Date(show.started_at).getTime() : Date.now();
-  const hours = Math.max(0, (Date.now() - startedMs) / 3_600_000);
+  // Measured to when the session STOPPED (migration 024). This is the
+  // denominator of the PRD's headline, and it used to be `Date.now()` — so the
+  // same show's gross-per-hour differed depending on how long after it ended
+  // the report was generated, and on whether anyone asked `GET /api/show/prd`
+  // about it afterwards.
+  const hours = show ? durationHours(show.started_at, show.ended_at) : 0;
 
   const sales = (
     await d.query<{ listing_id: string; price_cents: number; qty: number }>(
@@ -157,12 +166,12 @@ export async function prdMetrics(d: Pool, showId: string): Promise<PrdMetrics> {
       lotsSold: sales.length,
       hours: Number(hours.toFixed(2)),
       perShowHourCents: hours >= MIN_HOURS_FOR_RATE ? Math.round(grossCents / hours) : null,
-      answeredQuestionRate: rate(sent.length, admitted),
+      answeredQuestionRate: answeredRate({ sent: sent.length, questionsAsked: admitted }),
       timeToAnswerP95Ms: pct(lat, 0.95),
       sellThroughWithAnswer: {
         withAnswer: soldWithAnswer,
         total: soldLots.size,
-        rate: rate(soldWithAnswer, soldLots.size),
+        rate: share(soldWithAnswer, soldLots.size),
       },
     },
     operatorLoad: {
@@ -171,9 +180,12 @@ export async function prdMetrics(d: Pool, showId: string): Promise<PrdMetrics> {
       operationalEdits: committed,
     },
     trust: {
-      blockRate: rate(props.filter((p) => p.verdict === "block").length, props.length),
-      editRate: rate(sent.filter((p) => p.edited).length, sent.length),
-      rollbackRate: rate(actN("rolled_back"), committed),
+      blockRate: blockRate({
+        blocked: props.filter((p) => p.verdict === "block").length,
+        answered: answered.length,
+      }),
+      editRate: share(sent.filter((p) => p.edited).length, sent.length),
+      rollbackRate: share(actN("rolled_back"), committed),
       sentThenContradicted: contradicted,
     },
     notMeasured: UNMEASURABLE,
