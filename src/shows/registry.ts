@@ -21,6 +21,7 @@ import type { Persona } from "../persona/store.js";
 import type { Fact } from "../retrieval/facts.js";
 import { ShowRuntime } from "./runtime.js";
 import { describeFrames } from "./frameDescriber.js";
+import { generateSessionFollowUps, type DrafterOpener } from "./sessionFollowups.js";
 import type { ShowReport } from "./sessionRecord.js";
 import { resolve as resolveSurface } from "../surfaces/registry.js";
 import { isWaiting } from "../api/drafts.js";
@@ -213,6 +214,34 @@ export class ShowRegistry {
     return this.attach(input, meta);
   }
 
+  /**
+   * How a finished session gets a drafter for its follow-ups.
+   *
+   * The same seam as `policyFor` and `personaFor`: the default is the real
+   * thing — a replay runtime over the session's own catalog, voice and guards —
+   * and it is replaceable so the rest of the session-end path can be exercised
+   * without a gateway.
+   */
+  drafterFor: DrafterOpener | undefined;
+
+  /**
+   * Background work a detach started but does not wait for.
+   *
+   * Kept so a shutdown can let it finish rather than killing a report's frame
+   * descriptions or a seller's follow-ups halfway through.
+   */
+  private background = new Set<Promise<unknown>>();
+
+  private inBackground(p: Promise<unknown>): void {
+    this.background.add(p);
+    void p.finally(() => this.background.delete(p));
+  }
+
+  /** Wait for everything a detach left running. */
+  async settle(): Promise<void> {
+    while (this.background.size) await Promise.allSettled([...this.background]);
+  }
+
   async detach(showId: string): Promise<ShowReport | null> {
     const rt = this.runtimes.get(showId);
     if (!rt) return null;
@@ -222,12 +251,37 @@ export class ShowRegistry {
     const report = await rt.finishSession();
     // The timeline's fuller frame readings, in the background, with the
     // show's own agent while it still exists. Never delays the detach.
-    void describeFrames(showId, rt.signals, rt.llm)
-      .then((r) => { if (r.described) console.log(`  ${showId}: described ${r.described} frames for the timeline`); })
-      .catch((e) => console.warn(`  ${showId}: frame descriptions failed — ${(e as Error).message}`));
+    this.inBackground(
+      describeFrames(showId, rt.signals, rt.llm)
+        .then((r) => { if (r.described) console.log(`  ${showId}: described ${r.described} frames for the timeline`); })
+        .catch((e) => console.warn(`  ${showId}: frame descriptions failed — ${(e as Error).message}`)),
+    );
     this.runtimes.delete(showId);
     if (this.activeShowId === showId) this.activeShowId = null;
     await rt.close().catch(() => {});
+    // The people who asked and did not buy. Same contract as the frame
+    // descriptions — background, never delaying the detach — and started after
+    // the runtime is out of the map so the drafter is a replay over the
+    // finished session rather than a pipeline that is being torn down.
+    //
+    // Until now nothing called `buildFollowUps` at all: its only caller was a
+    // route no client ever hit, so the inbox was permanently empty while the
+    // home page promised it held one written reply per person who asked.
+    this.inBackground(
+      generateSessionFollowUps(db(), showId, this.drafterFor ? { open: this.drafterFor } : {})
+        .then((r) => {
+          if (!r) return console.log(`  ${showId}: no owner, so no inbox to file follow-ups into`);
+          console.log(
+            `  ${showId}: ${r.drafted} follow-up(s) from ${r.selected} buyer(s)` +
+            `${r.unreached ? ` — ${r.unreached} NOT reached, past this job's bound` : ""}` +
+            `${r.guardedOut ? `, ${r.guardedOut} blocked by a guard` : ""}` +
+            `${r.abstained ? `, ${r.abstained} with nothing to say` : ""}`,
+          );
+        })
+        // Loud, and named as the thing it is. A follow-up that silently does
+        // not exist is exactly the failure this path was added to fix.
+        .catch((e) => console.warn(`  ${showId}: FOLLOW-UPS FAILED — ${(e as Error).message}`)),
+    );
     this.hub.emit("shows", await this.list());
     return report;
   }
@@ -330,6 +384,9 @@ export class ShowRegistry {
   async stopAll(): Promise<void> {
     await Promise.all([...this.runtimes.values()].map((rt) => rt.close().catch(() => {})));
     this.runtimes.clear();
+    // A shutdown that killed a half-written inbox would leave a seller with
+    // some of their follow-ups, which is worse than none: they cannot tell.
+    await this.settle();
   }
 }
 
