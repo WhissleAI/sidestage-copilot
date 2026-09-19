@@ -163,7 +163,7 @@ describe("what each surface still needs", () => {
     assert.equal(row(facts({ env: partial }), "reddit").missing, "REDDIT_USERNAME");
   });
 
-  test("Reddit counts its rooms, and the rules step follows them", () => {
+  test("Reddit counts its rooms, and the rules step follows the RULES", () => {
     const env = {
       REDDIT_CLIENT_ID: "a", REDDIT_CLIENT_SECRET: "b", REDDIT_USERNAME: "c",
       REDDIT_PASSWORD: "d", REDDIT_USER_AGENT: "sidestage/1.0 by kicksbyrae",
@@ -174,10 +174,33 @@ describe("what each surface still needs", () => {
     assert.equal(none.before[1]!.done, false, "no subreddits chosen");
     assert.equal(none.before[2]!.done, false, "so no room's rules are in force");
 
-    const watched = row(facts({ env, roomsBySurface: { reddit: 3 } }), "reddit");
-    assert.equal(watched.rooms, 3);
-    assert.equal(watched.before[1]!.done, true);
-    assert.equal(watched.before[2]!.done, true);
+    // Three rows in `surface_rooms` and nothing reading them. The rooms step
+    // follows the rows, because choosing is what it describes; the RULES step
+    // must not — it used to put a green tick against a protection that was not
+    // running, which is the one kind of tick worth nothing.
+    const chosen = row(facts({ env, roomsBySurface: { reddit: 3 } }), "reddit");
+    assert.equal(chosen.rooms, 3);
+    assert.equal(chosen.before[1]!.done, true);
+    assert.equal(chosen.before[2]!.done, false, "a row is a choice, not a fetch");
+
+    // A session open, and its rules not in hand: said out loud, because a draft
+    // written now is unchecked against them.
+    const opened = row(
+      facts({ env, roomsBySurface: { reddit: 3 }, liveBySurface: { reddit: 1 } }),
+      "reddit",
+    );
+    assert.equal(opened.before[2]!.done, false);
+    assert.match(opened.before[2]!.label, /have not loaded/);
+
+    const loaded = row(
+      facts({
+        env, roomsBySurface: { reddit: 3 },
+        liveBySurface: { reddit: 1 }, roomRulesBySurface: { reddit: 1 },
+      }),
+      "reddit",
+    );
+    assert.equal(loaded.before[2]!.done, true);
+    assert.match(loaded.before[2]!.label, /in force/);
   });
 
   test("the follow-up inbox is connected, async, and not attachable", () => {

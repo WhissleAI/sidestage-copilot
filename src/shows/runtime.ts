@@ -290,6 +290,15 @@ export class ShowRuntime {
     }
   }
 
+  /**
+   * The rules in force on the room this session is watching, as the guards see
+   * them. Empty on a surface with no rooms, and on one whose rules have not
+   * loaded — which readiness reports as the difference it is.
+   */
+  get roomRules(): Fact[] {
+    return this.roomConstraints(null);
+  }
+
   /** Lot titles for the context engine, refreshed with the retriever's index. */
   private lots: { id: string; title: string }[] = [];
   /** Lots already sent for naming, so a re-observation does not re-ask. */
