@@ -597,8 +597,29 @@ export class ShowRuntime {
         // Straight into the same pipeline the simulated source feeds. eBay's own
         // per-comment UUID becomes the message id, so a re-attach cannot replay
         // a comment that was already answered.
+        //
+        // Six fields in, six fields on. `SurfaceEvents.onMessage` has declared
+        // `threadId`, `parentId` and `meta` since surfaces existed, and this
+        // forwarded three of them — which is why the thread engine had no
+        // production caller, why a draft answered one comment in isolation, and
+        // why the permalink the poller hands us came out of the queue as null.
         if (!this.started) return;
-        void this.underOwnerPolicy(() => this.pipeline.ingest({ author: c.author, text: c.text, externalId: c.id }));
+        // `meta` is a surface's own vocabulary and stays that way here: this
+        // layer reads the two keys every async surface agrees on and does not
+        // learn what a subreddit is.
+        const meta = (c.meta ?? {}) as { room?: unknown; permalink?: unknown };
+        void this.underOwnerPolicy(() =>
+          this.pipeline.ingest({
+            author: c.author,
+            text: c.text,
+            externalId: c.id,
+            at: c.at,
+            threadId: c.threadId,
+            parentId: c.parentId,
+            room: typeof meta.room === "string" ? meta.room : undefined,
+            url: typeof meta.permalink === "string" ? meta.permalink : undefined,
+          }),
+        );
       },
 
       onEnded: (why) => {

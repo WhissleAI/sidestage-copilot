@@ -153,7 +153,16 @@ export class Pipeline {
       id: incoming.externalId || `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       author: incoming.author,
       text: incoming.text,
-      at: new Date().toISOString(),
+      // The platform's own timestamp when it sent one. A comment written four
+      // minutes ago is four minutes old in the queue, not new — on a live show
+      // the two are the same number and this reads exactly as it did.
+      at: incoming.at || new Date().toISOString(),
+      // Carried, not interpreted. Everything that makes this message part of a
+      // CONVERSATION rather than a line in a firehose (src/ingest/sources.ts).
+      ...(incoming.threadId ? { threadId: incoming.threadId } : {}),
+      ...(incoming.parentId ? { parentId: incoming.parentId } : {}),
+      ...(incoming.room ? { room: incoming.room } : {}),
+      ...(incoming.url ? { url: incoming.url } : {}),
       intent,
       speechAct,
       admitted: decision.admitted,

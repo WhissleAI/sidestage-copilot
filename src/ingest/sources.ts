@@ -18,6 +18,25 @@ export interface IncomingMessage {
   text: string;
   /** Platform-native id when the source has one, so replays de-duplicate. */
   externalId?: string;
+  /**
+   * What an ASYNCHRONOUS conversation knows that a live one does not.
+   *
+   * A live show's comment has no neighbour but the comment before it, so these
+   * are absent on every eBay Live message and always will be. A Reddit comment
+   * sits under an opening post and a branch of replies, in a room whose rules
+   * constrain the answer, at a URL a person can open — and `SurfaceEvents`
+   * has declared all four since surfaces existed. Only the first three fields
+   * above used to make it past `ShowRuntime.onMessage`.
+   */
+  at?: string;
+  /** The conversation this belongs to — Reddit's `t3_…` for a post or comment. */
+  threadId?: string;
+  /** The thing directly above it. Absent on a post. */
+  parentId?: string;
+  /** The room it was written in: `r/mechmarket`, `#channel`. */
+  room?: string;
+  /** Where a person can open it. */
+  url?: string;
 }
 
 export interface ChatSource {

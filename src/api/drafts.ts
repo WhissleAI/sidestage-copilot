@@ -215,11 +215,10 @@ export function draftsFromSession(s: ShowSummary, proposals: ReplyProposal[]): S
         author: p.message.author,
         text: p.message.text,
         at: p.message.at,
-        // The poller has the permalink and the runtime drops it on the way into
-        // the pipeline (`onMessage` keeps id, author and text). Null is the
-        // honest answer until that is carried through; a link we guessed at
-        // would open the wrong comment.
-        url: null,
+        // The permalink the poller sent, carried through `onMessage` and the
+        // pipeline. Null when the surface gave us none — never a link we
+        // assembled ourselves, which would open the wrong comment.
+        url: p.message.url ?? null,
       },
       draft: p.sentText ?? p.draft,
       createdAt: p.createdAt,

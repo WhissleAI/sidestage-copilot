@@ -19,7 +19,7 @@ import { config } from "../../config.js";
 import type { SurfaceConnection, SurfaceEvents } from "../types.js";
 import { RedditError, type RedditClient } from "./api.js";
 import {
-  messagesFromListing, parseCommentTree,
+  messagesFromListing, parseCommentTree, permalinkUrl,
   type RedditListing, type RedditMessage,
 } from "./thread.js";
 
@@ -140,7 +140,9 @@ export class RedditPoller implements SurfaceConnection {
         // vocabulary to translate between.
         threadId: m.threadId,
         parentId: m.parentId,
-        meta: { room: m.room, permalink: m.permalink },
+        // Absolute, because a permalink that reaches the drafts queue is a
+        // link an operator clicks. Reddit sends a path.
+        meta: { room: m.room, permalink: permalinkUrl(m.permalink) },
       });
     }
     return fresh;

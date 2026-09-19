@@ -198,3 +198,80 @@ describe("whose session is this", () => {
     assert.equal(first.showId, again.showId, "a re-attach must not fork a second watch");
   });
 });
+
+/**
+ * What the poller emits is what the pipeline receives.
+ *
+ * `SurfaceEvents.onMessage` declares six fields and `ShowRuntime.onMessage`
+ * forwarded three: `threadId`, `parentId` and `meta.permalink` were dropped at
+ * the boundary. Downstream, that is why `SurfaceDraft.question.url` was
+ * hard-coded null, why `chat_messages.thread_id` was a column nothing wrote,
+ * and why the thread engine had no production caller to build a branch for.
+ */
+describe("what the poller emits reaches the queue", () => {
+  test("a comment arrives with its thread, its parent, its room and its permalink", async () => {
+    const { ShowRuntime } = await import("../src/shows/runtime.js");
+    const { draftsFromSession } = await import("../src/api/drafts.js");
+    const emitted: { event: string; data: Record<string, unknown> }[] = [];
+    const showId = `reddit_t3_seam_${Math.random().toString(36).slice(2, 8)}`;
+    created.push(showId);
+
+    const rt = new ShowRuntime({
+      showId,
+      title: "r/mechmarket",
+      sellerHandle: "r/mechmarket",
+      source: "reddit",
+      externalId: "t3_1n4k2qp",
+      target: redditAdapter.parseTarget("https://www.reddit.com/r/mechmarket/comments/1n4k2qp/x/"),
+      events: { emit: (_id, event, data) => { emitted.push({ event, data: data as Record<string, unknown> }); } },
+    });
+    wired.length = 0;
+    await rt.init();
+    await rt.start();
+    try {
+      const ev = wired.at(-1)!;
+      ev.onMessage!({
+        id: "t1_m9c3c3c",
+        author: "kbd_curious",
+        text: "which lube for budget linears?",
+        at: "2026-09-18T10:00:00.000Z",
+        threadId: "t3_1n4k2qp",
+        parentId: "t1_m9b2b2b",
+        meta: { room: "r/mechmarket", permalink: "https://www.reddit.com/r/mechmarket/comments/1n4k2qp/x/m9c3c3c/" },
+      });
+      // `ingest` is fire-and-forget off the watcher callback.
+      await new Promise((r) => setTimeout(r, 50));
+
+      const chat = emitted.find((e) => e.event === "chat")!;
+      assert.equal(chat.data.threadId, "t3_1n4k2qp");
+      assert.equal(chat.data.parentId, "t1_m9b2b2b");
+      assert.equal(chat.data.room, "r/mechmarket");
+      assert.equal(chat.data.at, "2026-09-18T10:00:00.000Z", "a comment keeps the time it was written");
+
+      // And out the other end, on the card the operator reads.
+      const summary = { showId, source: "reddit" as const, sellerHandle: "r/mechmarket", title: "r/mechmarket", externalId: "t3_1n4k2qp" };
+      const drafts = draftsFromSession(
+        summary as unknown as Parameters<typeof draftsFromSession>[0],
+        rt.pipeline.list(),
+      );
+      assert.equal(drafts.length, 1);
+      assert.equal(
+        drafts[0]!.question.url,
+        "https://www.reddit.com/r/mechmarket/comments/1n4k2qp/x/m9c3c3c/",
+        "the open link on the question",
+      );
+
+      // Persisted as a conversation, not as a flat list of remarks.
+      const row = (
+        await db().query<{ thread_id: string | null; parent_id: string | null }>(
+          "SELECT thread_id, parent_id FROM chat_messages WHERE show_id = $1 AND id = $2",
+          [showId, "t1_m9c3c3c"],
+        )
+      ).rows[0];
+      assert.equal(row?.thread_id, "t3_1n4k2qp");
+      assert.equal(row?.parent_id, "t1_m9b2b2b");
+    } finally {
+      await rt.close();
+    }
+  });
+});

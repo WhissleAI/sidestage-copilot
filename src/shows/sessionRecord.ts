@@ -42,12 +42,18 @@ export class SessionRecord {
   recordChat(m: ChatMessage): void {
     void this.d
       .query(
-        `INSERT INTO chat_messages (show_id, id, author, text, at, intent, speech_act, admitted, drop_reason)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        // `thread_id` and `parent_id` have been columns since migration 018 and
+        // nothing wrote them: the runtime dropped both on the way in, so an
+        // asynchronous conversation was persisted as a flat list of remarks.
+        `INSERT INTO chat_messages (show_id, id, author, text, at, intent, speech_act, admitted, drop_reason,
+           thread_id, parent_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
          ON CONFLICT (show_id, id) DO UPDATE SET
-           admitted = EXCLUDED.admitted, drop_reason = EXCLUDED.drop_reason`,
+           admitted = EXCLUDED.admitted, drop_reason = EXCLUDED.drop_reason,
+           thread_id = COALESCE(EXCLUDED.thread_id, chat_messages.thread_id),
+           parent_id = COALESCE(EXCLUDED.parent_id, chat_messages.parent_id)`,
         [this.showId, m.id, m.author, m.text, m.at, m.intent, m.speechAct ?? null,
-         m.admitted, m.dropReason ?? null],
+         m.admitted, m.dropReason ?? null, m.threadId ?? null, m.parentId ?? null],
       )
       .catch((e) => console.warn(`  record: chat ${m.id} not written — ${(e as Error).message}`));
   }

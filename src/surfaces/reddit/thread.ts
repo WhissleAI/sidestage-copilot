@@ -76,6 +76,18 @@ export interface RedditMessage {
 
 const at = (createdUtc: number): string => new Date(Math.round(createdUtc * 1000)).toISOString();
 
+/**
+ * Reddit's permalinks are paths — `/r/mechmarket/comments/…`. A path is not
+ * something an operator can open, and the queue shows this as the "open" link
+ * on the question a draft answers, so it is made absolute HERE, once, in the
+ * module that knows it is Reddit. The alternative was every consumer prefixing
+ * a host, which is the same knowledge in four places.
+ */
+export function permalinkUrl(p: string | undefined | null): string | undefined {
+  if (!p) return undefined;
+  return /^https?:\/\//i.test(p) ? p : `https://www.reddit.com${p.startsWith("/") ? "" : "/"}${p}`;
+}
+
 /** Reddit's tombstones. A deleted body is not content to answer and not an
  *  author to address, but it is still a rung in the branch — dropping it would
  *  silently reparent everything below it. */

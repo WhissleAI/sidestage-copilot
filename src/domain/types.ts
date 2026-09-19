@@ -118,6 +118,19 @@ export interface ChatMessage {
   admitted: boolean;
   dropReason?: string;
   proposalId?: string;
+  /**
+   * Where this sits in an asynchronous conversation. Absent on a live show,
+   * where the message before it is the only neighbour it has.
+   *
+   * `threadId` groups, `parentId` is the rung above (what the branch is
+   * rebuilt by), `room` is the place whose rules constrain a reply to it, and
+   * `url` is the permalink — the "open" link on a draft's question, which was
+   * hard-coded null for as long as the runtime dropped these.
+   */
+  threadId?: string;
+  parentId?: string;
+  room?: string;
+  url?: string;
 }
 
 export type EvidenceSource =
