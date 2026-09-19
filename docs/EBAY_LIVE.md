@@ -217,10 +217,18 @@ watching the show.
 4. **Writes are impossible on a stream you do not own.** By design, enforced at preflight.
    A stream is yours when the eBay username behind your consent matches its seller
    handle; that is the only thing that clears `read_only` at attach.
-5. **The watcher does not know when a show ends.** It keeps polling until the seller
-   detaches the show (which writes the report and, a day later, retires the agent).
-6. **Replies are not delivered.** There is no chat-post API; a "sent" reply is recorded
-   and audited, and the seller pastes it into the show's chat.
+5. **The show's end is inferred from silence, not from eBay.** Sellers reuse event ids and
+   an "ended" page is live again the following week, so the page is not trusted to say so.
+   Fifteen minutes with no comment, no viewer movement and no lot opening
+   (`END_SILENCE_MS`, `src/ingest/ebaylive/watcher.ts`) fires `onEnded`, and the registry
+   finishes the session the way a detach would — report written, slot freed. A seller can
+   still end it by hand at any time. The cost of inferring is the fifteen minutes: a show
+   that ends cleanly is not reported until they elapse.
+6. **Replies are not delivered — and not only here.** `Pipeline.send()` marks the proposal
+   `sent`, appends a `reply_sent` audit entry and returns; there is no platform call on any
+   path, on any surface. eBay's own absence of a chat-post API is why this surface was built
+   that way, but no other surface has a send path either. A reply is composed, guarded,
+   recorded and audited; a human posts it.
 7. **Terms of service.** Automated access to eBay is restricted. This is fine for a
    prototype you run yourself; anything beyond that needs a partner or official route.
 
