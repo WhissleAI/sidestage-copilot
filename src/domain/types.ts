@@ -217,6 +217,16 @@ export interface ReplyProposal {
   createdAt: string;
   sentText?: string;
   /**
+   * When it went out — auto-sent by the copilot, or marked sent by the person
+   * who pasted it somewhere themselves.
+   *
+   * Stamped once and never moved: the follow-up inbox's row has said
+   * `sent_at = COALESCE(sent_at, now())` since it was written, and a session
+   * draft had no such field at all, so the Sent list showed a time for one half
+   * of the same queue and a blank for the other.
+   */
+  sentAt?: string;
+  /**
    * The branch above the comment this answers, on an asynchronous surface.
    *
    * Absent on a live show, where the last ninety seconds are the context and a

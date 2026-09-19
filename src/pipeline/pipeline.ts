@@ -578,7 +578,7 @@ export class Pipeline {
     const { answer, ...rest } = r;
     const proposal: ReplyProposal = {
       ...base, ...rest, draft: answer, status,
-      ...(status === "auto_sent" ? { sentText: answer } : {}),
+      ...(status === "auto_sent" ? { sentText: answer, sentAt: new Date().toISOString() } : {}),
     };
 
     for (const g of r.guards) {
@@ -620,6 +620,14 @@ export class Pipeline {
   async send(id: string, text?: string, actor = "seller"): Promise<ReplyProposal> {
     const p = this.proposals.get(id);
     if (!p) throw new Error(`proposal ${id} not found`);
+    // Already gone. A double-clicked button, a retried request or a second
+    // operator hands back what was sent rather than sending it again: the
+    // audit is a hash-chained record of what this copilot and this seller
+    // actually did, and a duplicate `reply_sent` in it is a second thing that
+    // never happened. `FollowUpInbox.markSent` has been idempotent since it was
+    // written (`sent_at = COALESCE(sent_at, now())`); this is the other half of
+    // the same queue behaving the same way.
+    if (p.status === "sent" || p.status === "auto_sent") return p;
     if (p.status === "blocked" || p.verdict === "block") {
       const why = p.guards.filter((g) => g.verdict === "block").map((g) => `${g.guard}: ${g.reason ?? "blocked"}`).join("; ");
       throw new SendRefused(`this reply was blocked and cannot be sent — ${why || "a guard blocked it"}`);
@@ -657,7 +665,9 @@ export class Pipeline {
       guards = chain.guards;
       verdict = chain.verdict;
     }
-    const next: ReplyProposal = { ...p, status: "sent", sentText, guards, verdict };
+    const next: ReplyProposal = {
+      ...p, status: "sent", sentText, guards, verdict, sentAt: new Date().toISOString(),
+    };
     this.proposals.set(id, next);
     this.counters.sent++;
     this.d.audit.append("reply_sent", actor, `sent to ${p.message.author}`, {

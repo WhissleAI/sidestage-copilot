@@ -238,7 +238,10 @@ export function draftsFromSession(s: ShowSummary, proposals: ReplyProposal[]): S
       createdAt: p.createdAt,
       ...(p.thread ? { thread: p.thread } : {}),
       status,
-      sentAt: null,
+      // When it actually went. Hard-coded null until `Pipeline.send` stamped
+      // one, which is why the Sent list showed a time for a follow-up and a
+      // blank beside a Reddit draft in the same list.
+      sentAt: p.sentAt ?? null,
       evidence: p.evidence,
       guards: p.guards,
       verdict: p.verdict,

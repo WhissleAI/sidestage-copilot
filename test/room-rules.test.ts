@@ -279,3 +279,40 @@ describe("a draft answers the conversation, not the comment", () => {
     assert.equal(asked.filter((u) => u.includes("/comments/")).length, before);
   });
 });
+
+/**
+ * Marking a draft sent, twice.
+ *
+ * `FollowUpInbox.markSent` has been idempotent since it was written — one
+ * statement, `sent_at = COALESCE(sent_at, now())`. `Pipeline.send` had no such
+ * guard: a second call on an already-sent proposal re-wrote the row, counted
+ * another send on the live metrics, and appended a SECOND `reply_sent` entry to
+ * the hash-chained audit log — the ledger that exists to answer "what did this
+ * copilot and this seller actually do". `POST /api/drafts/:id/sent` routes
+ * straight to it with no prior-state check, so a double click was enough.
+ */
+describe("marking a session draft sent", () => {
+  test("a retry hands back what was sent and writes nothing twice", async () => {
+    // A deferral cites nothing and is allowed to: see `claimGroundingGuard`.
+    reply = JSON.stringify({ answer: "Let me check on that and come back to you.", claims: [] });
+    const p = await draftFor("do you ship to canada?");
+    assert.notEqual(p.status, "blocked", JSON.stringify(p.guards));
+
+    const first = await rt.pipeline.send(p.id, undefined, "seller");
+    assert.equal(first.status, "sent");
+    assert.ok(first.sentAt, "the Sent list has a time to show");
+
+    const again = await rt.pipeline.send(p.id, undefined, "seller");
+    assert.equal(again.sentAt, first.sentAt, "the moment it went does not move");
+    assert.equal(again.sentText, first.sentText);
+
+    // The audit write is fire-and-forget off the send path.
+    await new Promise((r) => setTimeout(r, 100));
+    const sent = (await rt.audit.list(200)).filter(
+      (e) => e.kind === "reply_sent" && e.detail?.proposalId === p.id,
+    );
+    assert.equal(sent.length, 1, "one thing happened, so there is one entry for it");
+    // And the chain is still a chain.
+    assert.equal((await rt.audit.verify()).ok, true);
+  });
+});
