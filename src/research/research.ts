@@ -94,7 +94,7 @@ export class ResearchService {
 
     const evidence: Evidence[] = [
       {
-        factId: `listing:${listing.id}#price`, source: "listing", label: "Listing · price",
+        factId: `listing:${listing.id}#price`, source: "listing", corpus: "listing", label: "Listing · price",
         text: `${listing.title} size ${listing.size} is listed at ${formatMoney(listing.priceCents)}.`,
         score: 1, listingVersion: listing.version,
       },
@@ -106,6 +106,7 @@ export class ResearchService {
       evidence.push({
         factId: `market:${listing.sku}#median`,
         source: "market",
+        corpus: "listing",
         label: basis === "asking" ? "Market · asking now" : "Market · comps",
         text:
           basis === "asking"

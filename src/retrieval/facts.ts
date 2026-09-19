@@ -11,6 +11,7 @@
 //   • the operator UI can show provenance chips a human can actually verify.
 
 import type { EvidenceSource } from "../domain/types.js";
+import { DEFAULT_CORPUS, type CorpusKind } from "./corpus.js";
 import type { Repo, ListingWithDescription } from "../domain/repo.js";
 import { formatMoney } from "../domain/money.js";
 import { ngramVector, terms, type SparseVec } from "./text.js";
@@ -22,6 +23,11 @@ export type FactField =
 export interface Fact {
   factId: string;
   source: EvidenceSource;
+  /** WHICH ground truth this came out of. `source` says which producer made
+   *  the fact; `corpus` says what kind of truth it is, which is the axis a
+   *  guard reasons about — a `community` fact is a constraint on the reply,
+   *  never an answer in it. */
+  corpus: CorpusKind;
   label: string;
   text: string;
   field: FactField;
@@ -39,9 +45,13 @@ export interface Fact {
   vector: SparseVec;
 }
 
-function mk(f: Omit<Fact, "tokens" | "vector">): Fact {
+function mk(f: Omit<Fact, "tokens" | "vector" | "corpus"> & { corpus?: CorpusKind }): Fact {
   const indexable = `${f.label} ${f.text}`;
-  return { ...f, tokens: terms(indexable), vector: ngramVector(indexable) };
+  // Everything this function built before surfaces existed came out of the
+  // catalog or the seller's policy corpus, both of which live commerce
+  // declares. The default keeps every one of those facts exactly as
+  // guard-checkable as it was.
+  return { corpus: DEFAULT_CORPUS, ...f, tokens: terms(indexable), vector: ngramVector(indexable) };
 }
 
 /**

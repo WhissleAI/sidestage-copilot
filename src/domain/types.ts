@@ -6,6 +6,7 @@
 // The cycle is erased at compile time and there is no runtime import either
 // way, because neither file emits a value the other needs.
 import type { SurfaceId } from "../surfaces/types.js";
+import type { CorpusKind } from "../retrieval/corpus.js";
 
 export type AutonomyLevel =
   | "L0_OBSERVE" | "L1_SUGGEST" | "L2_ONE_TAP" | "L3_AUTO_REPLY" | "L4_AUTO_ACT";
@@ -105,6 +106,10 @@ export interface Evidence {
   /** Stable, addressable id: `listing:lst_aj1_10#price`, `policy:shipping#intl`, … */
   factId: string;
   source: EvidenceSource;
+  /** WHICH ground truth this came out of. The console renders a community rule
+   *  differently from a price, because one is a constraint on the reply and the
+   *  other is an answer in it. */
+  corpus: CorpusKind;
   label: string;
   text: string;
   score: number;
