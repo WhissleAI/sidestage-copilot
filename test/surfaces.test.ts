@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { all, get, register, resolve } from "../src/surfaces/registry.js";
 import { capabilitiesOf, hasCorpus, SurfaceUnavailable, type SurfaceAdapter } from "../src/surfaces/types.js";
 import { parseEventId } from "../src/ingest/ebaylive/discovery.js";
+import { preflight, type PreflightContext } from "../src/actions/preflight.js";
+import type { ListingWithDescription } from "../src/domain/repo.js";
 
 // One box, any surface. The console's paste field used to hand its contents
 // straight to `parseEventId`, so the only two outcomes were "an eBay Live show"
@@ -105,5 +107,70 @@ describe("what a surface can do", () => {
     // how guards treat those rows.
     assert.deepEqual(capabilitiesOf(null), capabilitiesOf("ebaylive"));
     assert.deepEqual(capabilitiesOf("something-we-removed"), capabilitiesOf("ebaylive"));
+  });
+});
+
+describe("preflight asks the surface first", () => {
+  // Every other check in preflight is an argument about DEGREE — is this
+  // markdown too deep, is this restock plausible. Those arguments are nonsense
+  // when the action does not exist on this surface at all.
+  const ctx = (surface: string, posting?: { room: string; enabled: boolean }): PreflightContext => ({
+    surface: capabilitiesOf(surface),
+    posting,
+    committedThisShow: 0,
+    actionBudget: 10,
+    committedLastMinute: 0,
+    ratePerMinute: 6,
+  });
+
+  const LOT = {
+    id: "lst_x", title: "A lot", priceCents: 10_000, floorPriceCents: 5_000, costCents: 2_000,
+    qty: 3, state: "live", pinned: false, version: 1,
+  } as unknown as ListingWithDescription;
+
+  test("an action the surface does not declare is refused, and says so plainly", () => {
+    const r = preflight("run_poll", LOT, {}, ctx("ebaylive"));
+    assert.equal(r.ok, false);
+    assert.equal(r.checks.length, 1, "one refusal, not a floor-price check on a poll");
+    assert.equal(r.checks[0]!.detail, "this surface cannot run_poll");
+  });
+
+  test("the same action on the surface that has it gets the ordinary checks", () => {
+    const r = preflight("markdown_price", LOT, { newPriceCents: 9_000 }, ctx("ebaylive"));
+    assert.equal(r.ok, true);
+    assert.ok(r.checks.some((c) => c.name === "above floor price"));
+  });
+
+  test("a draft-only surface never posts, whatever the room says", () => {
+    // reddit is draft-only in code. A room switched on cannot open a door the
+    // surface does not have.
+    const r = preflight("post_reply", null, {}, ctx("reddit", { room: "r/mechmarket", enabled: true }));
+    assert.equal(r.ok, false);
+    assert.match(r.checks[0]!.detail, /draft-only/);
+  });
+
+  test("posting is off until a human turns it on, and the refusal names the room", () => {
+    const off = preflight("post_reply", null, {}, ctx("twitch", { room: "#kicksbyrae", enabled: false }));
+    assert.equal(off.ok, false);
+    assert.equal(off.checks[0]!.detail, "posting is off for #kicksbyrae — the draft is yours to send");
+
+    // Absent is the same as off. A missing row must never read as consent.
+    const unknown = preflight("post_reply", null, {}, ctx("twitch"));
+    assert.equal(unknown.ok, false);
+    assert.match(unknown.checks[0]!.detail, /posting is off/);
+  });
+
+  test("with the room switched on, a reply reaches the ordinary checks", () => {
+    const r = preflight("post_reply", null, {}, ctx("twitch", { room: "#kicksbyrae", enabled: true }));
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.before, {}, "a reply has no listing state to roll back to");
+  });
+
+  test("an action with no listing is not refused for having no listing", () => {
+    // `flag_for_human` targets a conversation. Requiring a catalog row would
+    // refuse it for the wrong reason.
+    assert.equal(preflight("flag_for_human", null, {}, ctx("reddit")).ok, true);
+    // A listing write with no listing still is.
+    assert.equal(preflight("markdown_price", null, { newPriceCents: 1 }, ctx("ebaylive")).ok, false);
   });
 });
