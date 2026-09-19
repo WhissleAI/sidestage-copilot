@@ -1,4 +1,4 @@
-// Guardrail evaluation — 44 labelled cases over the real catalog.
+// Guardrail evaluation — 46 labelled cases over the real catalog.
 //
 // Every case is a (catalog state, buyer question, drafted reply) triple with the
 // verdict a careful seller would give. Roughly half are drafts that SHOULD pass:
