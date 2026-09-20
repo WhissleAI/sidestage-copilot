@@ -239,8 +239,20 @@ describe("what the poller emits reaches the queue", () => {
         parentId: "t1_m9b2b2b",
         meta: { room: "r/mechmarket", permalink: "https://www.reddit.com/r/mechmarket/comments/1n4k2qp/x/m9c3c3c/" },
       });
-      // `ingest` is fire-and-forget off the watcher callback.
-      await new Promise((r) => setTimeout(r, 50));
+      // `ingest` is fire-and-forget off the watcher callback, so this has to
+      // wait on the CONDITION, not on a guess. It was a flat 50 ms sleep, which
+      // passed until the pipeline grew two more hops on this path — the room's
+      // rules and the thread above the comment — and then asserted on a
+      // proposal still being written.
+      const settled = async () => {
+        for (let i = 0; i < 200; i++) {
+          const p = rt.pipeline.list()[0];
+          if (p && p.status !== "drafting") return;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        assert.fail("the proposal never left `drafting`");
+      };
+      await settled();
 
       const chat = emitted.find((e) => e.event === "chat")!;
       assert.equal(chat.data.threadId, "t3_1n4k2qp");

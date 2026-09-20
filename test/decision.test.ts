@@ -311,13 +311,18 @@ describe("editing a draft and sending it", () => {
 
   test("a rewritten condition sentence sends, as does a plain 'yes'", async () => {
     const h = await harness();
-    h.llm.drafts = [say("It is in good shape.",
-      [{ text: "light creasing", factId: "listing:lst_sb_dunk_9#condition" }])];
-    const p = await h.ask("how much creasing on the chunky dunkys");
+    // A fresh proposal per edit on purpose. `send` is idempotent — a second
+    // call on a sent proposal hands back what went out rather than sending
+    // again, because a duplicate entry in a hash-chained audit is a second
+    // thing that never happened. Reusing one proposal here would be testing
+    // that idempotency, not the edit path.
     for (const edit of [
       "It's in great shape overall and the stitching is clean, just light creasing on the toe box.",
       "yes",
     ]) {
+      h.llm.drafts = [say("It is in good shape.",
+        [{ text: "light creasing", factId: "listing:lst_sb_dunk_9#condition" }])];
+      const p = await h.ask("how much creasing on the chunky dunkys");
       const sent = await h.pipeline.send(p.id, edit);
       assert.equal(sent.sentText, edit);
     }

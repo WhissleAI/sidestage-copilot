@@ -571,6 +571,7 @@ export class Pipeline {
       console.warn(`[pipeline] thread unavailable for ${msg.id}: ${(e as Error).message}`);
       return null;
     }
+  }
 
   /**
    * What accepting a reply on this show actually DOES.
@@ -726,10 +727,6 @@ export class Pipeline {
     // written (`sent_at = COALESCE(sent_at, now())`); this is the other half of
     // the same queue behaving the same way.
     if (p.status === "sent" || p.status === "auto_sent") return p;
-    if (p.status === "blocked" || p.verdict === "block") {
-      const why = p.guards.filter((g) => g.verdict === "block").map((g) => `${g.guard}: ${g.reason ?? "blocked"}`).join("; ");
-      throw new SendRefused(`this reply was blocked and cannot be sent — ${why || "a guard blocked it"}`);
-    }
     const sentText = (text ?? p.draft).trim();
     const edited = text !== undefined && sentText !== p.draft.trim();
     const wasBlocked = p.status === "blocked" || p.verdict === "block";
