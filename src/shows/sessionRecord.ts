@@ -29,6 +29,7 @@
 import type { Pool } from "../db/pg.js";
 import type { ChatMessage, ReplyProposal } from "../domain/types.js";
 import { prdMetrics, type PrdMetrics } from "./prdMetrics.js";
+import { answeredRate, durationMin, share } from "./metrics.js";
 import type { HostSummary, SessionSignals } from "./signals.js";
 import type { Conclusion, ConclusionEvidence } from "./conclusion.js";
 import type { PlatformSessionSummary } from "../llm/sessions.js";
@@ -158,7 +159,9 @@ export interface ShowReport {
     questionsAsked: number;
     answered: number;
     sent: number;
-    answeredRate: number;
+    /** Sent ÷ admitted questions (src/shows/metrics.ts). Null when nobody
+     *  asked — a rate with no denominator is not zero. */
+    answeredRate: number | null;
     medianLatencyMs: number;
     p95LatencyMs: number;
     cacheHitRate: number;
@@ -218,8 +221,17 @@ export interface ShowReport {
    */
   host: HostSummary | null;
   platform: PlatformSessionSummary | null;
-  /** What was kept to play back: counts, so the page knows whether to offer a timeline. */
-  media: { utterances: number; frames: number; audioChunks: number; audioSeconds: number };
+  /**
+   * What was kept to play back: counts, so the page knows whether to offer a
+   * timeline — and how many signals were LOST, which is a different fact from
+   * a session with no audio and must not render as one.
+   */
+  media: {
+    utterances: number; frames: number; audioChunks: number; audioSeconds: number;
+    /** Transcript writes that failed during the session. Zero is the normal
+     *  case; anything else means the host was heard and not recorded. */
+    lostUtterances: number;
+  };
   /** What the agent concluded. Null when it could not answer; the page says so. */
   conclusion: Conclusion | null;
 }
@@ -239,9 +251,12 @@ export async function buildReport(
 ): Promise<ShowReport> {
   const show = (
     await d.query<{
-      title: string; source: string; started_at: string; viewers: number; catalog_id: string | null;
-      seller_handle: string | null;
-    }>("SELECT title, source, started_at, viewers, catalog_id, seller_handle FROM shows WHERE id = $1", [showId])
+      title: string; source: string; started_at: string; ended_at: Date | string | null;
+      viewers: number; catalog_id: string | null; seller_handle: string | null;
+    }>(
+      "SELECT title, source, started_at, ended_at, viewers, catalog_id, seller_handle FROM shows WHERE id = $1",
+      [showId],
+    )
   ).rows[0];
   if (!show) throw new Error(`no show ${showId}`);
 
@@ -325,7 +340,6 @@ export async function buildReport(
   ).rows;
   const actCount = (s: string) => acts.find((a) => a.status === s)?.n ?? 0;
 
-  const started = new Date(show.started_at).getTime();
   const sent = props.filter((p) => p.status === "sent" || p.status === "auto_sent").length;
   const questions = chat.filter((c) => c.admitted).length;
 
@@ -344,8 +358,12 @@ export async function buildReport(
     frames: frames.length,
     audioChunks: audio.length,
     audioSeconds: Math.round(audio.reduce((a, c) => a + c.durationMs, 0) / 1000),
+    lostUtterances: sig ? sig.lost(showId) : 0,
   };
   const prd = await prdMetrics(d, showId);
+  // A report generated for a session that is somehow still live has no stamped
+  // end; `now` is the honest stand-in and the duration says the same thing.
+  const endedAtIso = show.ended_at ? new Date(show.ended_at).toISOString() : new Date().toISOString();
 
   const report: ShowReport = {
     showId,
@@ -355,19 +373,22 @@ export async function buildReport(
     // an answer back to. Absent on reports generated before this existed.
     catalogId: show.catalog_id,
     startedAt: show.started_at,
-    endedAt: new Date().toISOString(),
-    durationMin: Math.max(0, Math.round((Date.now() - started) / 60_000)),
+    // When the session STOPPED, not when somebody asked for a report. A
+    // console left attached, or a silence timeout finishing a session forty
+    // minutes after the last word, used to be counted as time on air — and the
+    // PRD's gross-per-hour was divided by it (migration 024).
+    endedAt: endedAtIso,
+    durationMin: durationMin(show.started_at, show.ended_at),
     engagement: {
       commentsSeen: chat.length,
       questionsAsked: questions,
       answered: props.filter((p) => !p.abstained && p.verdict !== "block").length,
       sent,
-      answeredRate: questions ? Number((sent / questions).toFixed(3)) : 0,
+      // One definition, shared with the console, the PRD block and Analytics.
+      answeredRate: answeredRate({ sent, questionsAsked: questions }),
       medianLatencyMs: pick(0.5),
       p95LatencyMs: pick(0.95),
-      cacheHitRate: props.length
-        ? Number((props.filter((p) => p.cache_hit).length / props.length).toFixed(3))
-        : 0,
+      cacheHitRate: share(props.filter((p) => p.cache_hit).length, props.length) ?? 0,
     },
     safety: {
       blocked: props.filter((p) => p.verdict === "block").length,
@@ -432,6 +453,10 @@ export async function buildReport(
       inventory: report.inventory,
       gaps: unanswered.slice(0, 10),
       hostSignals: host,
+      // "The host was not heard" and "the host was heard and the write failed"
+      // are different facts, and the conclusion must not state the first when
+      // the second happened.
+      hostSignalsLost: media.lostUtterances,
       onScreen: every(8, frames).map((f) => ({ offsetMs: f.offsetMs, reading: f.reading })),
       said: every(12, utterances).map((u) => ({
         offsetMs: u.offsetMs, text: u.text,

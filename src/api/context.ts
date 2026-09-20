@@ -6,6 +6,7 @@ import { config, hasWhissleCreds } from "../config.js";
 import { WhissleClient } from "../llm/whissle.js";
 import { EventHub } from "./hub.js";
 import { ShowRegistry, DEMO_SHOW_ID } from "../shows/registry.js";
+import { finishStranded, planResume } from "../shows/resume.js";
 import { KbSync } from "../llm/kbSync.js";
 import { db as pgPool, migrate, closeDb } from "../db/pg.js";
 import { applyCatalog, getCatalog } from "../shows/catalogs.js";
@@ -102,6 +103,14 @@ export async function buildContext(): Promise<AppContext> {
       // on a show the backend had forgotten, and every listing stopped updating
       // with no error anywhere.
       //
+      // The sweep used to read `WHERE status = 'live' AND source = 'ebaylive'`,
+      // so it reconciled one surface out of seven and every other surface's
+      // session stayed `live` for ever — invisible in both home bands, never
+      // counted by Analytics, no report, no cost row, and holding its agent
+      // against the cap the collector exists to keep. It now reads every live
+      // row and asks `planResume` what to do with it: reopen what this build
+      // can reopen from the id the session recorded, and FINISH the rest
+      // properly rather than merely flipping a status column.
       // Shows older than this are not resumed: an eBay Live show is a couple of
       // hours, and re-opening a browser page for one that ended last week costs
       // a page and finds nothing. They are marked `ended` instead, so the
@@ -130,19 +139,27 @@ export async function buildContext(): Promise<AppContext> {
       let activatedResume = false;
       try {
         const rows = await pool.query<{
-          id: string; external_id: string | null; started_at: string;
-          catalog_id: string | null; agent_id: string | null; owner_account_id: string | null;
+          id: string; source: string; external_id: string | null; started_at: string;
+          created_at: Date | null; catalog_id: string | null; agent_id: string | null;
+          owner_account_id: string | null;
         }>(
-          "SELECT id, external_id, started_at, catalog_id, agent_id, owner_account_id FROM shows WHERE status = 'live' AND source = 'ebaylive'",
+          `SELECT id, source, external_id, started_at, created_at, catalog_id, agent_id, owner_account_id
+             FROM shows WHERE status = 'live'`,
         );
         for (const row of rows.rows) {
-          const age = Date.now() - new Date(row.started_at).getTime();
-          if (!row.external_id || age > RESUME_WINDOW_MS) {
-            await pool.query("UPDATE shows SET status = 'ended' WHERE id = $1", [row.id]);
+          // A row this process is already watching is not stranded — the demo
+          // show is created immediately above this sweep.
+          if (shows.has(row.id)) continue;
+          const plan = planResume(row);
+          if (plan.action === "leave") continue;
+          if (plan.action === "finish") {
+            // An end time, a report — or the recorded reason there is none —
+            // and a cost row. The same things a clean detach leaves behind.
+            await finishStranded(pool, row.id, plan.why);
             continue;
           }
           try {
-            const rt = await shows.attachEbayLive(row.external_id, { ownerAccountId: row.owner_account_id ?? null });
+            const rt = await shows.attachEbayLive(plan.externalId, { ownerAccountId: row.owner_account_id ?? null });
             // Back onto the agent this show OWNS, with its own corpus. Falling
             // back to the shared one would put a resumed show's lots into a
             // knowledge base other shows read.
@@ -159,16 +176,18 @@ export async function buildContext(): Promise<AppContext> {
                 await rt.retriever.rebuild();
               }
             }
-            console.log(`  resumed eBay Live ${row.external_id} as ${rt.showId}`);
+            console.log(`  resumed ${row.source} ${plan.externalId} as ${rt.showId}`);
             if (!activatedResume) {
               shows.activate(rt.showId);
               activatedResume = true;
             }
           } catch (e) {
-            // The show is probably over. Say so in the row rather than leaving
-            // it `live` for the next boot to retry forever.
-            await pool.query("UPDATE shows SET status = 'ended' WHERE id = $1", [row.id]);
-            console.warn(`  could not resume ${row.external_id}: ${(e as Error).message}`);
+            // The show is probably over, or the surface has no credentials in
+            // this environment. Either way it finishes here rather than staying
+            // `live` for the next boot to retry for ever — and it finishes with
+            // a report, not just a status change.
+            console.warn(`  could not resume ${plan.externalId}: ${(e as Error).message}`);
+            await finishStranded(pool, row.id, `could not be reopened: ${(e as Error).message}`);
           }
         }
       } catch (e) {

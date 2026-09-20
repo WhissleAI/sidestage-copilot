@@ -23,10 +23,8 @@
 
 import { db as pgPool, type Pool } from "../../db/pg.js";
 import type { Evidence, GuardResult, Verdict } from "../../domain/types.js";
-import { getCatalog } from "../../shows/catalogs.js";
-import { ShowRuntime } from "../../shows/runtime.js";
+import { openReplayRuntime } from "../../shows/replay.js";
 import type { ShowRecord } from "../../shows/record.js";
-import type { SurfaceId } from "../types.js";
 import { selectFollowUps, type FollowUp } from "./followups.js";
 
 /** What `Pipeline.dryRun` answers. Declared structurally so a test can drive
@@ -209,6 +207,17 @@ export interface BuildResult {
   showId: string;
   /** Buyers the selection rule picked out of the show record. */
   selected: number;
+  /**
+   * Buyers this call did NOT reach, beyond the cap.
+   *
+   * Named rather than silently dropped. The cap used to strand every buyer past
+   * the fiftieth permanently: `selected.slice(0, MAX_PER_BUILD)` takes the same
+   * first fifty every time, so calling again never reached the fifty-first, and
+   * on the biggest show in this database that is 137 people who asked something
+   * answerable and were never going to be followed up. A caller that wants all
+   * of them pages with `offset` until this is zero.
+   */
+  remaining: number;
   /** Follow-ups now in the inbox for this show (including ones from before). */
   followups: FollowUpRow[];
   /** Drafted, then dropped by the guard chain — never stored. The reason is the
@@ -226,26 +235,34 @@ export interface BuildResult {
  * minutes of LLM calls; the selection is ordered by worth, so the ones that
  * survive the cap are the ones most likely to close.
  */
-const MAX_PER_BUILD = 50;
+export const MAX_PER_BUILD = 50;
 /** Below the gateway's shared 8-wide LLM semaphore, same reasoning as the
  *  reply path's `REPLY_CONCURRENCY`. Nothing is waiting on these. */
 const CONCURRENCY = 4;
 
 export async function buildFollowUps(
   d: Pool,
-  o: { showId: string; accountId: string; record: ShowRecord; drafter: Drafter },
+  o: {
+    showId: string; accountId: string; record: ShowRecord; drafter: Drafter;
+    /** Where in the selection to start. The selection is deterministic — worth
+     *  first, then when they asked — so paging over it reaches every buyer
+     *  exactly once. Default 0, which is one page and the old behaviour. */
+    offset?: number;
+  },
 ): Promise<BuildResult> {
   const inbox = new FollowUpInbox(d);
   const selected = selectFollowUps(o.record);
+  const offset = Math.max(0, o.offset ?? 0);
+  const queue = selected.slice(offset, offset + MAX_PER_BUILD);
   const result: BuildResult = {
     showId: o.showId,
     selected: selected.length,
+    remaining: Math.max(0, selected.length - (offset + queue.length)),
     followups: [],
     guardedOut: [],
     abstained: [],
   };
 
-  const queue = selected.slice(0, MAX_PER_BUILD);
   // A buyer the seller already sent to or dismissed does not get re-drafted:
   // the gateway call would be spent producing a draft `save` is contracted not
   // to overwrite.
@@ -360,11 +377,11 @@ function hash(s: string): string {
  * The pipeline that would have answered this show, for a show that has ended.
  *
  * A finished show's `ShowRuntime` is gone — the registry drops it on detach —
- * and its catalog, its seller voice and its guard policy went with it. Rather
- * than assemble a second, subtly different composition of the same eight
- * objects, this rebuilds the real runtime in REPLAY mode: no watcher, no
- * clock reset, no status change, nothing emitted. Its listings are the show's
- * own rows, which is what makes the staleness guards mean something here.
+ * and its catalog, its seller voice and its guard policy went with it.
+ * `openReplayRuntime` rebuilds the real one in REPLAY mode (src/shows/replay.ts):
+ * no watcher, no clock reset, no status change, nothing emitted. Its listings
+ * are the show's own rows, which is what makes the staleness guards mean
+ * something here.
  *
  * A show still being watched hands back its live pipeline instead. That is the
  * rare case — follow-ups are built after a show ends — but a second Repo and a
@@ -375,47 +392,6 @@ export async function openDrafter(
   showId: string,
 ): Promise<{ drafter: Drafter; close(): Promise<void> }> {
   if (shows.has(showId)) return { drafter: shows.get(showId).pipeline, close: async () => {} };
-
-  const d = pgPool();
-  const row = (
-    await d.query<{
-      title: string; seller_handle: string; source: string; external_id: string | null;
-      owner_account_id: string | null; catalog_id: string | null; agent_id: string | null;
-    }>(
-      "SELECT title, seller_handle, source, external_id, owner_account_id, catalog_id, agent_id FROM shows WHERE id = $1",
-      [showId],
-    )
-  ).rows[0];
-  if (!row) throw new Error(`no show ${showId}`);
-
-  const rt = new ShowRuntime({
-    showId,
-    title: row.title,
-    sellerHandle: row.seller_handle,
-    source: row.source as SurfaceId,
-    externalId: row.external_id,
-    ownerAccountId: row.owner_account_id,
-    replay: true,
-    events: { emit: () => {} },
-  });
-  await rt.init();
-
-  // The voice. The listings came back with the show row; the seller's identity
-  // lives in the catalog file, and without it the follow-up is written by a
-  // generic assistant rather than by the person whose account will send it.
-  const catalog = row.catalog_id ? getCatalog(row.catalog_id) : null;
-  if (catalog) {
-    rt.seller = catalog.seller;
-    rt.catalogId = catalog.id;
-  }
-  // The agent that actually answered this show, preferred over the catalog
-  // file's: the show row is what survives a catalog being re-imported, and it
-  // is the same column `POST /:showId/timeline/describe` reads for the same
-  // reason. Agent GC retires it a day after the report, which is the real
-  // deadline on a follow-up — a fact worth saying out loud rather than
-  // discovering as a 400 on a show from last week.
-  const agentId = row.agent_id || catalog?.agentId;
-  if (agentId) rt.useAgent(agentId);
-
+  const rt = await openReplayRuntime(showId);
   return { drafter: rt.pipeline, close: () => rt.close() };
 }

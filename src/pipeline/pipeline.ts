@@ -50,6 +50,7 @@ import { ActionExecutor } from "../actions/executor.js";
 import { ActionProposer } from "../actions/proposer.js";
 import type { AuditLog } from "../actions/audit.js";
 import { isOverBudget } from "../llm/budget.js";
+import { answeredRate } from "../shows/metrics.js";
 
 export interface PipelineEvents {
   onChat(m: ChatMessage): void;
@@ -999,7 +1000,12 @@ export class Pipeline {
       // every surface in this build the `sent` here is `handedOff`. Reading it
       // as "replies buyers received" is the misreading `delivered` exists to
       // make impossible.
-      answeredRate: c.admitted ? Number((c.sent / c.admitted).toFixed(3)) : 0,
+      //
+      // The console's live figure and the report's stored one are the same
+      // function over the same counts (src/shows/metrics.ts), so the header a
+      // seller watches during the show cannot disagree with the report they
+      // read after it.
+      answeredRate: answeredRate({ sent: c.sent, questionsAsked: c.admitted }),
       actionsCommitted: recent.filter((a) => a.status === "committed").length,
       actionsRolledBack: recent.filter((a) => a.status === "rolled_back").length,
     };

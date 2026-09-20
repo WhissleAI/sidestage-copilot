@@ -41,6 +41,7 @@ import { catalogFit, checkReadiness } from "../shows/readiness.js";
 import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
 import type { ShowReport } from "../shows/sessionRecord.js";
 import { prdMetrics } from "../shows/prdMetrics.js";
+import { openReplayRuntime } from "../shows/replay.js";
 import { promotionReadiness } from "../autonomy/promotion.js";
 import { audioBridgeHtml, bridgeCsp } from "./audioBridge.js";
 import { normalizeDistribution } from "../ingest/signals.js";
@@ -1076,13 +1077,98 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }),
   );
 
-  /** The report a finished session left behind. */
+  /** The report a finished session left behind — or why it has none. */
   app.get<{ Params: { showId: string } }>("/api/shows/:showId/report", async (req, reply) => {
+    const showId = req.params.showId;
     const r = await pgPool().query<{ report: unknown; generated_at: Date }>(
-      "SELECT report, generated_at FROM show_reports WHERE show_id = $1", [req.params.showId],
+      "SELECT report, generated_at FROM show_reports WHERE show_id = $1", [showId],
     );
-    if (!r.rows[0]) return reply.code(404).send({ error: "no report for this show yet" });
-    return { ...(r.rows[0].report as object), generatedAt: r.rows[0].generated_at };
+    if (r.rows[0]) return { ...(r.rows[0].report as object), generatedAt: r.rows[0].generated_at };
+
+    // No report. The interesting case is the one where generation was ATTEMPTED
+    // and failed: the reason used to exist only on the container's stdout, so
+    // the page said "the report may never have generated" and the seller had
+    // nothing to act on. It is persisted now (migration 025) and the rows the
+    // report is built from are all still here, so the answer says what went
+    // wrong and that asking again is a thing that can be done.
+    const s = (
+      await pgPool().query<{ status: string; report_error: string | null; report_failed_at: Date | null }>(
+        "SELECT status, report_error, report_failed_at FROM shows WHERE id = $1", [showId],
+      )
+    ).rows[0];
+    if (!s) return reply.code(404).send({ error: `no show ${showId}` });
+    return reply.code(404).send({
+      error: s.report_error
+        ? "this session's report failed to generate"
+        : "no report for this show yet",
+      showId,
+      status: s.status,
+      /** Null when nothing was attempted — a session still live, or one from
+       *  before the cause was recorded. Never a stand-in reason. */
+      reportError: s.report_error,
+      reportFailedAt: s.report_failed_at,
+      /** Whether asking again is worth the button. */
+      canRegenerate: s.status === "ended",
+    });
+  });
+
+  /**
+   * Generate this session's report again.
+   *
+   * Everything a report is built from — chat, proposals, actions, listings,
+   * sales, the audit chain, the signals — is still in Postgres, so a report
+   * that failed on a gateway timeout or an unreadable chain is recoverable by
+   * asking once more. It runs the SAME path the session close runs
+   * (`finishSession` over a replay runtime), so a regenerated report cannot be
+   * a second, subtly different kind of report.
+   *
+   * Ownership is the `:showId` preHandler every show route gets: a stranger is
+   * told there is no such show. The session must have ENDED — regenerating a
+   * report for a show still on air would freeze a statement about something
+   * that is still happening, and the live console is where that question is
+   * answered.
+   */
+  app.post<{ Params: { showId: string } }>("/api/shows/:showId/report", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "generate a report");
+    if (!actor) return reply;
+    const showId = req.params.showId;
+    const row = (
+      await pgPool().query<{ status: string }>("SELECT status FROM shows WHERE id = $1", [showId])
+    ).rows[0];
+    if (!row) return reply.code(404).send({ error: `no show ${showId}` });
+    if (row.status !== "ended") {
+      return reply.code(409).send({
+        error: "this session is still on air — its report is written when it ends",
+        code: "still-live",
+      });
+    }
+
+    let rt;
+    try {
+      rt = await openReplayRuntime(showId);
+    } catch (e) {
+      return reply.code(500).send({ error: (e as Error).message });
+    }
+    try {
+      const report = await rt.finishSession();
+      if (!report) {
+        const why = (
+          await pgPool().query<{ report_error: string | null }>(
+            "SELECT report_error FROM shows WHERE id = $1", [showId],
+          )
+        ).rows[0]?.report_error;
+        // It failed again, and the caller gets the same reason the badge does
+        // rather than a bare 500.
+        return reply.code(502).send({
+          error: "the report failed to generate again",
+          reportError: why ?? null,
+          showId,
+        });
+      }
+      return { showId, report, regenerated: true };
+    } finally {
+      await rt.close().catch(() => {});
+    }
   });
 
   /**
@@ -1225,6 +1311,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
             )`,
       ),
     ]);
+    // The running sessions this account owns, by id. Asked of the registry
+    // rather than inferred from the cost rows: a session that has not finished
+    // has no cost row yet, which is exactly the case this block exists for.
+    const mineNow = new Set(
+      (await ctx.shows.list()).filter((s) => s.ownerAccountId === actor.id).map((s) => s.showId),
+    );
+
     const learnedUsd = Number(learned.rows[0]?.usd ?? 0);
     const learnedCalls = Number(learned.rows[0]?.calls ?? 0);
     /** Measured 2026-09-15: $0.52 over 80 calls on a nine-minute show. */
@@ -1288,14 +1381,24 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         usdPerCall: Math.round(usdPerCall * 100000) / 100000,
       },
       byDoor,
-      /** What is running right now, for this seller, which the rows cannot know
-       *  yet. The filter used to read `s ? true : shows.length === 0 ? false :
-       *  true` — which is `true` for every show in the process as soon as the
-       *  caller had one row of their own, so this page leaked the same
-       *  cross-tenant meter the audit found on /api/billing. `snapshot.meter`
-       *  is already cut to the caller's shows; this keeps the ones that are
-       *  live NOW as well. */
-      live: snapshot.meter.byShow,
+      /**
+       * What is running right now, for THIS seller, which the rows cannot know
+       * yet.
+       *
+       * `snapshot.meter.byShow` is the process-wide meter — one instance, every
+       * show every account has attached to this deployment. The filter used to
+       * read `s ? true : shows.length === 0 ? false : true`, which returns true
+       * in every branch but one, so any seller with a single finished session
+       * was handed every other seller's live show id, call count, failure count
+       * and context characters under a label that says the block is theirs.
+       *
+       * The registry knows who owns a running show, so that is what this asks.
+       * A show with no owner at all belongs to nobody and is not offered to
+       * anybody as "yours" — this is the money page.
+       */
+      live: Object.fromEntries(
+        Object.entries(snapshot.meter.byShow).filter(([id]) => mineNow.has(id)),
+      ),
       attribution: snapshot.attribution,
     };
   });
@@ -2155,18 +2258,21 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // something went wrong in it. It is a row with a badge on it now, the
         // way `/api/reports` has always shown them.
         //
-        // The end time is the awkward part and the query is where it is
-        // honest: nothing writes the moment a session stopped, so a report-less
-        // row falls back to the last message it recorded (one lateral read over
-        // six rows) and then to when it started. `hasReport` says which.
+        // The end time is `shows.ended_at` since migration 024 — stamped when
+        // the session stopped, which is what "behind you" is ordered by. The
+        // fallbacks below it are for rows written before the column existed:
+        // the report's own end, then when the report was written, then the last
+        // message the session recorded, then when it started. `hasReport` says
+        // which of those a client is holding.
         pgPool()
           .query<{
             show_id: string; title: string; surface: string | null; source: string;
             generated_at: Date | null; report: ShowReport | null;
-            started_at: string; last_seen_at: string | null;
+            started_at: string; ended_at: Date | null; last_seen_at: string | null;
+            report_error: string | null;
           }>(
-            `SELECT s.id AS show_id, s.title, s.surface, s.source, s.started_at,
-                    r.generated_at, r.report, m.last_seen_at
+            `SELECT s.id AS show_id, s.title, s.surface, s.source, s.started_at, s.ended_at,
+                    s.report_error, r.generated_at, r.report, m.last_seen_at
                FROM shows s
                LEFT JOIN show_reports r ON r.show_id = s.id
                LEFT JOIN LATERAL (
@@ -2175,7 +2281,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
               WHERE (s.owner_account_id IS NULL OR s.owner_account_id = $1)
                 -- Finished, or finished enough to have left a report behind.
                 AND (s.status = 'ended' OR r.show_id IS NOT NULL)
-              ORDER BY COALESCE(r.generated_at, m.last_seen_at::timestamptz, s.started_at::timestamptz) DESC
+              ORDER BY COALESCE(s.ended_at, r.generated_at, m.last_seen_at::timestamptz, s.started_at::timestamptz) DESC
               LIMIT 6`,
             [accountId],
           )
@@ -2200,7 +2306,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       reportRows.map((x) => ({
         showId: x.show_id, title: x.title, surface: x.surface, source: x.source,
         generatedAt: x.generated_at, report: x.report,
-        startedAt: x.started_at, lastSeenAt: x.last_seen_at,
+        startedAt: x.started_at, endedAt: x.ended_at, lastSeenAt: x.last_seen_at,
+        reportError: x.report_error,
       })),
       inbox,
     );

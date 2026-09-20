@@ -1,0 +1,25 @@
+-- Why a report never generated.
+--
+-- The only record of a failed report was a line on stdout:
+--
+--     console.error(`  REPORT FAILED for ${showId}: ${e.message}`)
+--
+-- and then the session was marked ended. The home page rendered a warn badge
+-- titled "The session ended but its report never generated" with nothing to
+-- click, and `/reports/<id>` answered "No report for this session… if the
+-- session ended badly the report may never have generated". The reason — a
+-- gateway timeout, a pool error, an unreadable audit chain — reached nobody
+-- outside the container's logs, and there was no way to ask for the report
+-- again from rows that are all still sitting in Postgres.
+--
+-- These two columns live on `shows` rather than on `show_reports` on purpose.
+-- A failure is a property of the SESSION, not a report that does not exist, and
+-- putting a row with a null report into `show_reports` would have made every
+-- reader of that table — analytics, the home band, promotion readiness, the
+-- catalog's carried gaps, the agent collector — have to learn that "a report
+-- row" and "a report" are different things.
+--
+-- Both are cleared when a report does generate, so a session that failed once
+-- and was regenerated does not keep explaining an error it recovered from.
+ALTER TABLE shows ADD COLUMN IF NOT EXISTS report_error TEXT;
+ALTER TABLE shows ADD COLUMN IF NOT EXISTS report_failed_at TIMESTAMPTZ;

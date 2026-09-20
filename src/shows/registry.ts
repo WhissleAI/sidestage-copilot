@@ -14,13 +14,14 @@
 // that nothing is being watched.
 
 import { config } from "../config.js";
-import { db } from "../db/pg.js";
+import { db, type Pool } from "../db/pg.js";
 import type { EventHub, EventName } from "../api/hub.js";
 import type { SellerGuardrailPolicy } from "../guardrails/policy.js";
 import type { Persona } from "../persona/store.js";
 import type { Fact } from "../retrieval/facts.js";
 import { ShowRuntime } from "./runtime.js";
 import { describeFrames } from "./frameDescriber.js";
+import { generateSessionFollowUps, type DrafterOpener } from "./sessionFollowups.js";
 import type { ShowReport } from "./sessionRecord.js";
 import { resolve as resolveSurface } from "../surfaces/registry.js";
 import { isWaiting } from "../api/drafts.js";
@@ -165,9 +166,11 @@ export class ShowRegistry {
     const owner = meta.ownerAccountId ?? null;
     // One event can be attached more than once over its life; each attach is
     // its own session with its own report. A live runtime for the event is
-    // returned as-is; a finished session that already has a report is left
-    // alone and the new one takes the next id. Re-attaching used to reuse the
-    // row, reset its clock and overwrite the report.
+    // returned as-is; a session that ENDED is left alone, report or no report,
+    // and the new one takes the next id (`sessionIdFor`). The lookup is keyed
+    // on SURFACE and OWNER as well as the external id: two surfaces share a
+    // handle, so matching on the id alone handed you somebody else's running
+    // session and then replaced their agent.
     const live = [...this.runtimes.values()].find(
       (r) => r.surface === adapter.id && r.externalId === externalId && r.ownerAccountId === owner,
     );
@@ -246,6 +249,34 @@ export class ShowRegistry {
     return this.attach(input, meta);
   }
 
+  /**
+   * How a finished session gets a drafter for its follow-ups.
+   *
+   * The same seam as `policyFor` and `personaFor`: the default is the real
+   * thing — a replay runtime over the session's own catalog, voice and guards —
+   * and it is replaceable so the rest of the session-end path can be exercised
+   * without a gateway.
+   */
+  drafterFor: DrafterOpener | undefined;
+
+  /**
+   * Background work a detach started but does not wait for.
+   *
+   * Kept so a shutdown can let it finish rather than killing a report's frame
+   * descriptions or a seller's follow-ups halfway through.
+   */
+  private background = new Set<Promise<unknown>>();
+
+  private inBackground(p: Promise<unknown>): void {
+    this.background.add(p);
+    void p.finally(() => this.background.delete(p));
+  }
+
+  /** Wait for everything a detach left running. */
+  async settle(): Promise<void> {
+    while (this.background.size) await Promise.allSettled([...this.background]);
+  }
+
   async detach(showId: string): Promise<ShowReport | null> {
     const rt = this.runtimes.get(showId);
     if (!rt) return null;
@@ -255,12 +286,37 @@ export class ShowRegistry {
     const report = await rt.finishSession();
     // The timeline's fuller frame readings, in the background, with the
     // show's own agent while it still exists. Never delays the detach.
-    void describeFrames(showId, rt.signals, rt.llm)
-      .then((r) => { if (r.described) console.log(`  ${showId}: described ${r.described} frames for the timeline`); })
-      .catch((e) => console.warn(`  ${showId}: frame descriptions failed — ${(e as Error).message}`));
+    this.inBackground(
+      describeFrames(showId, rt.signals, rt.llm)
+        .then((r) => { if (r.described) console.log(`  ${showId}: described ${r.described} frames for the timeline`); })
+        .catch((e) => console.warn(`  ${showId}: frame descriptions failed — ${(e as Error).message}`)),
+    );
     this.runtimes.delete(showId);
     if (this.activeShowId === showId) this.activeShowId = null;
     await rt.close().catch(() => {});
+    // The people who asked and did not buy. Same contract as the frame
+    // descriptions — background, never delaying the detach — and started after
+    // the runtime is out of the map so the drafter is a replay over the
+    // finished session rather than a pipeline that is being torn down.
+    //
+    // Until now nothing called `buildFollowUps` at all: its only caller was a
+    // route no client ever hit, so the inbox was permanently empty while the
+    // home page promised it held one written reply per person who asked.
+    this.inBackground(
+      generateSessionFollowUps(db(), showId, this.drafterFor ? { open: this.drafterFor } : {})
+        .then((r) => {
+          if (!r) return console.log(`  ${showId}: no owner, so no inbox to file follow-ups into`);
+          console.log(
+            `  ${showId}: ${r.drafted} follow-up(s) from ${r.selected} buyer(s)` +
+            `${r.unreached ? ` — ${r.unreached} NOT reached, past this job's bound` : ""}` +
+            `${r.guardedOut ? `, ${r.guardedOut} blocked by a guard` : ""}` +
+            `${r.abstained ? `, ${r.abstained} with nothing to say` : ""}`,
+          );
+        })
+        // Loud, and named as the thing it is. A follow-up that silently does
+        // not exist is exactly the failure this path was added to fix.
+        .catch((e) => console.warn(`  ${showId}: FOLLOW-UPS FAILED — ${(e as Error).message}`)),
+    );
     this.hub.emit("shows", await this.list());
     return report;
   }
@@ -314,42 +370,14 @@ export class ShowRegistry {
     return this.runtimes.has(showId);
   }
 
-  /**
-   * The id for a new session of this event: the base id if unused or reusable
-   * (ended, no report), else base-2, base-3, …
-   *
-   * Reusable means the same SURFACE and the same ACCOUNT, for the reason the
-   * live-runtime lookup above says: two surfaces share a handle, and picking up
-   * somebody else's ended row would resume their session under our attach — the
-   * durable half of the same takeover. Ids that are merely TAKEN are counted
-   * across every row on the id, whoever owns it, because the id is a primary
-   * key and a collision there is an insert that fails.
-   */
+  /** The id for a new session of this event. See `sessionIdFor`. */
   private async nextSessionId(
     base: string,
     eventId: string,
     surface: SurfaceId,
     owner: string | null,
   ): Promise<string> {
-    type Row = { id: string; status: string; has_report: boolean; surface: string; owner_account_id: string | null };
-    const rows = await db()
-      .query<Row>(
-        `SELECT s.id, s.status, (r.show_id IS NOT NULL) AS has_report,
-                COALESCE(s.surface, s.source) AS surface, s.owner_account_id
-           FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
-          WHERE s.external_id = $1 ORDER BY s.started_at DESC`,
-        [eventId],
-      )
-      .then((r) => r.rows)
-      .catch(() => [] as Row[]);
-    if (!rows.length) return base;
-    const reusable = rows.find(
-      (r) => !r.has_report && r.surface === surface && (r.owner_account_id ?? null) === owner,
-    );
-    if (reusable) return reusable.id;
-    const taken = new Set(rows.map((r) => r.id));
-    if (!taken.has(base)) return base;
-    for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+    return nextSessionId(db(), base, eventId, surface, owner);
   }
 
   /**
@@ -422,5 +450,88 @@ export class ShowRegistry {
   async stopAll(): Promise<void> {
     await Promise.all([...this.runtimes.values()].map((rt) => rt.close().catch(() => {})));
     this.runtimes.clear();
+    // A shutdown that killed a half-written inbox would leave a seller with
+    // some of their follow-ups, which is worse than none: they cannot tell.
+    await this.settle();
   }
+}
+
+/**
+ * Which id a new session of this event takes.
+ *
+ * A row is reused only when it is still LIVE, which is the one case that is not
+ * a new session at all: a resume after a restart, reconnecting to a show that
+ * never stopped. Everything else gets the next id — `base-2`, `base-3`, …
+ *
+ * It used to reuse any row with no REPORT, and that is a different question
+ * with a much worse answer. `show_id` is overloaded: it is both "this event"
+ * and "this session of this event", and making report generation the thing that
+ * tells them apart made a downstream artefact load-bearing for identity. A
+ * report that failed to build — a gateway timeout, a schema drift — therefore
+ * handed the dead session's id to the NEXT attach of the same event, and
+ * everything keyed on `show_id` merged: chat, proposals, the audit chain, the
+ * signals, the sales. The "ended, no report" row an operator had just been told
+ * to go and look at silently went back on air, the eventual report counted the
+ * previous session's comments and blocks as its own, and the old utterances and
+ * frames landed at negative offsets on the new session's timeline.
+ *
+ * Cross-account it was worse: `ShowRuntime.init` puts a reused row back to
+ * `live` and resets its clock but never rewrites `owner_account_id`, so a
+ * second account re-attaching an event kept the first account's ownership —
+ * B's session answered 404 to B's own report route and the finished report
+ * belonged to A, while `show_costs.account_id` was written as B.
+ *
+ * Exported as a rule over rows, separately from the read, so it can be argued
+ * with in a test without a database, a browser or an event that exists.
+ */
+export function sessionIdFor(
+  base: string,
+  rows: { id: string; status: string; surface?: string | null; owner_account_id?: string | null }[],
+  surface?: SurfaceId,
+  owner?: string | null,
+): string {
+  if (!rows.length) return base;
+  // A resume, not a new session. Two conditions, from two different defects.
+  //
+  // LIVE, because a session that ended is never reused: reuse used to key on
+  // "has no report", so a session whose report FAILED had its row picked up by
+  // the next attach and two sessions' chat, proposals and audit merged.
+  //
+  // Same SURFACE and same OWNER, because two surfaces share a handle and
+  // picking up somebody else's ended row resumes their session under our
+  // attach — the durable half of the live takeover the lookup above prevents.
+  //
+  // Ids that are merely TAKEN are still counted across every row on the id,
+  // whoever owns it: the id is a primary key and a collision is a failed insert.
+  const live = rows.find(
+    (r) =>
+      r.status === "live" &&
+      (surface === undefined || (r.surface ?? null) === surface) &&
+      (owner === undefined || (r.owner_account_id ?? null) === (owner ?? null)),
+  );
+  if (live) return live.id;
+  const taken = new Set(rows.map((r) => r.id));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+}
+
+/** `sessionIdFor` over the rows this event already has. A read that fails
+ *  yields the base id rather than blocking the attach. */
+export async function nextSessionId(
+  d: Pool,
+  base: string,
+  eventId: string,
+  surface?: SurfaceId,
+  owner?: string | null,
+): Promise<string> {
+  type Row = { id: string; status: string; surface: string | null; owner_account_id: string | null };
+  const rows = await d
+    .query<Row>(
+      `SELECT id, status, COALESCE(surface, source) AS surface, owner_account_id
+         FROM shows WHERE external_id = $1 ORDER BY started_at DESC`,
+      [eventId],
+    )
+    .then((r) => r.rows)
+    .catch(() => [] as Row[]);
+  return sessionIdFor(base, rows, surface, owner);
 }
