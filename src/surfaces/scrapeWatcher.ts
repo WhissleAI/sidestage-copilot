@@ -112,6 +112,9 @@ export class ScrapedPageWatcher {
   private lastActivityAt = Date.now();
   private reloads = 0;
   private ended = false;
+  /** Said once. A watcher that has stopped trying says so on the way out, not
+   *  once a second for the rest of the show. */
+  private gaveUp = false;
   /** What wall we are behind, when we are behind one. Held so the status line
    *  is emitted on the way in and on the way out, not once a second. */
   private blocked: string | null = null;
@@ -303,7 +306,29 @@ export class ScrapedPageWatcher {
     // (EBAY_DISCOVERY_PROXY), and that is a human decision, not a retry.
     if (this.blocked) return;
     if (quietMs < COMMENT_SILENCE_MS || activeMs > ACTIVITY_WINDOW_MS) return;
-    if (this.reloads >= MAX_RELOADS) return;
+    if (this.reloads >= MAX_RELOADS) {
+      // This used to be a bare `return`, and it is the sharpest thing in the
+      // product that could happen without leaving a trace. Twenty reloads have
+      // failed to bring chat back; the loop will now never try again. The room
+      // keeps rendering, `shows.status` keeps saying `live`, the console keeps
+      // drawing a connected show — and the copilot is permanently mute. There
+      // was no log, no status line and no row, anywhere, ever, that said so.
+      // Say it once, loudly, and say it where an incident can be read from.
+      if (!this.gaveUp) {
+        this.gaveUp = true;
+        const detail =
+          `chat has not recovered after ${MAX_RELOADS} reloads — this watcher has stopped trying. ` +
+          `The room is still open; replies will not resume until it is re-attached.`;
+        this.ev.onStatus?.({ connected: false, detail });
+        this.ev.onGaveUp?.({
+          reason: "reload-limit",
+          detail,
+          reloads: this.reloads,
+          quietMs,
+        });
+      }
+      return;
+    }
 
     this.reloads++;
     this.ev.onStatus?.({

@@ -52,6 +52,9 @@ export interface WatcherEvents {
   onStatus?: (s: { connected: boolean; detail: string }) => void;
   /** The show has gone quiet for long enough that it is over. Fired once. */
   onEnded?: (why: string) => void;
+  /** We stopped trying and the show did NOT end. Fired once. See
+   *  `SurfaceEvents.onGaveUp` for why this is not `onEnded`. */
+  onGaveUp?: (g: { reason: string; detail: string; reloads?: number; quietMs?: number }) => void;
 }
 
 export interface WatcherOpts extends WatcherEvents {
@@ -146,6 +149,8 @@ export class EbayLiveWatcher {
   private lastCommentAt = Date.now();
   private lastActivityAt = Date.now();
   private reloads = 0;
+  /** Said once; see the give-up branch in `watchdog`. */
+  private gaveUp = false;
 
   constructor(private o: WatcherOpts) {
     this.pollMs = o.pollMs ?? 1000;
@@ -314,7 +319,21 @@ export class EbayLiveWatcher {
       return;
     }
     if (quietMs < COMMENT_SILENCE_MS || activeMs > ACTIVITY_WINDOW_MS) return;
-    if (this.reloads >= MAX_RELOADS) return;
+    if (this.reloads >= MAX_RELOADS) {
+      // Twenty reloads have failed and this loop will never try again. Until
+      // now that was a bare `return`: the show sat looking connected and
+      // permanently mute, with no log, no status line and no row anywhere that
+      // it had given up. Said once, on the way out.
+      if (!this.gaveUp) {
+        this.gaveUp = true;
+        const detail =
+          `chat has not recovered after ${MAX_RELOADS} reloads — this watcher has stopped trying. ` +
+          `The show is still open; replies will not resume until it is re-attached.`;
+        this.o.onStatus?.({ connected: false, detail });
+        this.o.onGaveUp?.({ reason: "reload-limit", detail, reloads: this.reloads, quietMs });
+      }
+      return;
+    }
 
     this.reloads++;
     this.o.onStatus?.({

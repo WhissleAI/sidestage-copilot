@@ -145,6 +145,17 @@ export interface SurfaceEvents {
   }): void;
   onViewers?(n: number): void;
   onEnded?(why: string): void;
+  /**
+   * The watcher has stopped trying, and the room did not end.
+   *
+   * Distinct from `onEnded` on purpose, and the distinction is the whole
+   * point: `onEnded` means the show is over and the session should be
+   * finished; this means WE gave up while the show is very probably still
+   * running. Conflating them would write a report for a show that is still on
+   * air. Keeping them apart is what lets "it stopped answering mid-show"
+   * become a row rather than a conversation with the seller.
+   */
+  onGaveUp?(g: { reason: string; detail: string; reloads?: number; quietMs?: number }): void;
 }
 
 export interface SurfaceConnection { stop(): Promise<void>; }

@@ -41,6 +41,8 @@ import type { SurfaceConnection, SurfaceId, SurfaceTarget } from "../surfaces/ty
 import { SurfaceRooms } from "../surfaces/rooms.js";
 import { get as surfaceAdapter } from "../surfaces/registry.js";
 import { SimulatedShowSource, ScriptedHostAudio, type ChatSource } from "../ingest/sources.js";
+import { recordEvent } from "../obs/events.js";
+import { logSwallowed, errText } from "../obs/log.js";
 
 export interface RuntimeEvents {
   emit(showId: string, event: string, data: unknown): void;
@@ -664,6 +666,33 @@ export class ShowRuntime {
    * thread link became a watch on `r/t3_1abc2d`, a room that 404s on the first
    * poll and ends the session.
    */
+  /** The last connection state recorded, so a flapping tick is one row, not
+   *  one a second. `null` until the surface has said anything at all. */
+  private lastSurfaceUp: boolean | null = null;
+
+  /**
+   * Record a surface status when it MEANS something.
+   *
+   * "Meaning something" is a change of connection state. A detail that
+   * changes while the state does not — a different DOM error on each failing
+   * tick — is the same fact told differently, and it goes to the log (which is
+   * cheap and rolls) but not to the table (which is a permanent record of what
+   * happened to this session).
+   */
+  private noteSurfaceStatus(surface: SurfaceId, s: { connected: boolean; detail: string }): void {
+    const changed = this.lastSurfaceUp === null || this.lastSurfaceUp !== s.connected;
+    this.lastSurfaceUp = s.connected;
+    if (!changed) return;
+    void recordEvent({
+      showId: this.showId,
+      kind: s.connected ? "surface.connected" : "surface.disconnected",
+      level: s.connected ? "info" : "warn",
+      // `detail` is the watcher's own operator-facing sentence: a reason, a
+      // count and a selector, never a buyer's words.
+      detail: { surface, why: s.detail.slice(0, 200) },
+    });
+  }
+
   private async openSurface(surface: SurfaceId, target: SurfaceTarget): Promise<void> {
     const emit = (event: string, data: unknown) => this.o.events.emit(this.showId, event, data);
     const adapter = surfaceAdapter(surface);
@@ -671,7 +700,32 @@ export class ShowRuntime {
     const eventId = target.externalId;
 
     this.watcher = await adapter.open(target, {
-      onStatus: (s) => emit("source", { source: surface, eventId, ...s }),
+      // The tee. Every surface's status used to terminate at the SSE hub, so
+      // the whole vocabulary of "why did this stop" existed only inside a
+      // browser tab that may not have been open. It still goes to the console
+      // — that is the live view and it is good — and now it also goes to
+      // stdout and, when the connection state actually CHANGES, to a row.
+      //
+      // Only on change, deliberately. A failing tick emits a status once a
+      // second, and an observability layer that turns one outage into 3,600
+      // rows is one that gets switched off.
+      onStatus: (s) => {
+        emit("source", { source: surface, eventId, ...s });
+        this.noteSurfaceStatus(surface, s);
+      },
+
+      // The watcher stopped trying and the room did not end. This is the
+      // failure the product exists to prevent, and before this line it was the
+      // one that left no trace at all.
+      onGaveUp: (g) => {
+        emit("source", { source: surface, eventId, connected: false, detail: g.detail });
+        void recordEvent({
+          showId: this.showId,
+          kind: "watcher.gave_up",
+          level: "error",
+          detail: { surface, reason: g.reason, reloads: g.reloads, quietMs: g.quietMs },
+        });
+      },
 
       onTitle: (title) => {
         // Attaching by id alone gives the show a placeholder name; the page knows
