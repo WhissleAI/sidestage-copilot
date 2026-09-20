@@ -106,6 +106,26 @@ export async function buildContext(): Promise<AppContext> {
       // hours, and re-opening a browser page for one that ended last week costs
       // a page and finds nothing. They are marked `ended` instead, so the
       // database stops claiming something that is not true.
+      // A row nothing in this build can resume must not keep claiming to be
+      // live.
+      //
+      // The resume below is `source = 'ebaylive'` only, deliberately: there is
+      // no supervisor for a standing watch yet (docs/SURFACES.md). So a Reddit
+      // room stayed `status = 'live'` after every restart with no runtime
+      // behind it — a session in neither "now" nor "behind you", whose drafts
+      // the queue could not find. The drafts survive (they are rows in
+      // `reply_proposals`, and `/api/drafts` reads them back); the claim that
+      // somebody is still watching the room does not.
+      await pool
+        .query(
+          `UPDATE shows SET status = 'ended'
+            WHERE status = 'live' AND COALESCE(surface, source) NOT IN ('ebaylive', 'simulated')`,
+        )
+        .then((r) => {
+          if (r.rowCount) console.log(`  ${r.rowCount} watch(es) did not survive the restart — marked ended`);
+        })
+        .catch((e) => console.warn(`  could not settle stale watches: ${(e as Error).message}`));
+
       const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
       let activatedResume = false;
       try {

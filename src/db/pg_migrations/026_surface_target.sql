@@ -1,0 +1,20 @@
+-- What, exactly, this session is watching.
+--
+-- `shows.external_id` has carried this since the first migration, when the only
+-- answer it ever had to give was an eBay Live event id — one opaque string that
+-- the eBay adapter could turn back into a watch without help. Every async
+-- surface knows more than that string: a Reddit target is a KIND (a subreddit,
+-- a profile, one thread), plus the room whose rules constrain the reply, plus
+-- the comment a draft is actually answering. All of it was parsed at attach and
+-- then thrown away, because the registry stored `target.externalId` and the
+-- runtime rebuilt `{ externalId }` to hand back to the adapter — so a thread
+-- link degraded into a watch on a subreddit named `t3_1abc2d`, which is a room
+-- that does not exist.
+--
+-- The whole `SurfaceTarget` is stored here instead, as the adapter parsed it,
+-- so the thing a restart reopens is the thing the operator pasted.
+--
+-- JSONB and nullable: a row written before this column, and every eBay Live row
+-- ever, is answered by `external_id` exactly as it was. Nothing reads this
+-- without falling back to it.
+ALTER TABLE shows ADD COLUMN IF NOT EXISTS surface_target JSONB;

@@ -36,10 +36,11 @@
 // adding one to Reddit would have to get past the adapter's `delivery`
 // constant, the missing `post_reply` in its action list, and preflight.
 
-import { capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
+import { capabilitiesOf, SURFACE_CAPABILITIES, type SurfaceId } from "../surfaces/types.js";
+import type { Queryable } from "../db/pg.js";
 import { queueCounts, type DraftQueues } from "./home.js";
 import type {
-  Evidence, GuardResult, ProposalStatus, ReplyProposal, Verdict,
+  Evidence, GuardResult, ProposalStatus, ReplyProposal, ThreadView, Verdict,
 } from "../domain/types.js";
 import type { ShowSummary } from "../shows/registry.js";
 import type { FollowUpRow } from "../surfaces/dm/drafts.js";
@@ -111,6 +112,15 @@ export interface SurfaceDraft {
   /** The session this draft belongs to: a live watch, or the show a follow-up
    *  came out of. Present on both so a client never has to guess. */
   sessionId: string;
+  /**
+   * The conversation this answers: the opening post, then the branch down to
+   * the comment, and the rules of the room.
+   *
+   * Absent on a follow-up, which is one buyer's question out of a show that
+   * ended and has no branch above it, and on a post, which opens its own
+   * thread. The card draws what it is given.
+   */
+  thread?: ThreadView;
   question: { author: string; text: string; at: string; url: string | null };
   draft: string;
   createdAt: string;
@@ -188,7 +198,12 @@ export function originOfSession(s: ShowSummary): DraftOrigin {
 export function rulesOf(p: ReplyProposal): AppliedRule[] {
   const held = p.guards.find((g) => g.guard === "community_rule" && g.verdict === "block");
   const heldId = held?.detail?.expected ?? null;
-  return p.evidence
+  // The rules the guard chain was actually handed, which since the per-room
+  // constraint input is where they live (`ReplyProposal.rules`). Evidence is
+  // the fallback: a surface that grounds in a community corpus puts them there,
+  // and so did every proposal written before rules had a field of their own.
+  const rules = p.rules?.length ? p.rules : p.evidence;
+  return rules
     .filter((e) => e.corpus === "community")
     .map((e) => ({
       factId: e.factId,
@@ -217,16 +232,19 @@ export function draftsFromSession(s: ShowSummary, proposals: ReplyProposal[]): S
         author: p.message.author,
         text: p.message.text,
         at: p.message.at,
-        // The poller has the permalink and the runtime drops it on the way into
-        // the pipeline (`onMessage` keeps id, author and text). Null is the
-        // honest answer until that is carried through; a link we guessed at
-        // would open the wrong comment.
-        url: null,
+        // The permalink the poller sent, carried through `onMessage` and the
+        // pipeline. Null when the surface gave us none — never a link we
+        // assembled ourselves, which would open the wrong comment.
+        url: p.message.url ?? null,
       },
       draft: p.sentText ?? p.draft,
       createdAt: p.createdAt,
+      ...(p.thread ? { thread: p.thread } : {}),
       status,
-      sentAt: null,
+      // When it actually went. Hard-coded null until `Pipeline.send` stamped
+      // one, which is why the Sent list showed a time for a follow-up and a
+      // blank beside a Reddit draft in the same list.
+      sentAt: p.sentAt ?? null,
       evidence: p.evidence,
       guards: p.guards,
       verdict: p.verdict,
@@ -266,9 +284,191 @@ export function draftFromFollowUp(row: FollowUpRow, sessionTitle: string | null)
   };
 }
 
+// ── the durable half ────────────────────────────────────────────────────────
+
+/**
+ * Every async draft this account has, read from the table rather than from a
+ * runtime.
+ *
+ * The queue used to be built from live in-memory pipelines only, so a deploy, a
+ * detach, or a subreddit going private emptied the Drafts page of every reply
+ * written for that room — while the rows sat in `reply_proposals` the whole
+ * time, written by `SessionRecord.recordProposal`. A draft is work waiting for
+ * a person; it does not stop being that because the process that wrote it
+ * restarted.
+ *
+ * Tenancy is in the statement: the account's own sessions, plus the rows that
+ * predate the ownership column and belong to nobody — the same rule
+ * `ShowRegistry.list` applies, so the two halves of the queue cannot disagree
+ * about what an operator may see.
+ *
+ * `drafting` rows never reach here (`recordProposal` does not write them) and
+ * the cap is a page of the newest, because a queue is a thing a person works
+ * through rather than an archive.
+ */
+export async function persistedAsyncDrafts(
+  q: Queryable,
+  accountId: string,
+  limit = 200,
+): Promise<SurfaceDraft[]> {
+  const asyncSurfaces = ASYNC_SURFACES();
+  if (!asyncSurfaces.length) return [];
+  const { rows } = await q.query<PersistedRow>(
+    `${STORED_SELECT}
+      WHERE (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+        AND COALESCE(s.surface, s.source) = ANY($2)
+      ORDER BY p.at DESC
+      LIMIT $3`,
+    [accountId, asyncSurfaces, limit],
+  );
+  return rows.flatMap((r) => {
+    const d = toStoredDraft(r);
+    return d ? [d] : [];
+  });
+}
+
+/** One row of `reply_proposals`, as the card the queue renders. Null for a
+ *  status that is not a draft yet — `drafting` is never written, but a row is
+ *  data from a database and this is the one place that decides. */
+function toStoredDraft(r: PersistedRow): SurfaceDraft | null {
+  const status = STATUS[r.status as ProposalStatus];
+  if (!status) return null;
+  const origin = originOfSession({
+    showId: r.show_id, source: r.surface as SurfaceId, sellerHandle: r.seller_handle,
+    title: r.title, externalId: r.external_id,
+  } as ShowSummary);
+  // The room this DRAFT was written in, when the session spans several.
+  const room = r.room?.trim() || origin.label;
+  const rules = rulesOf({
+    guards: r.guards ?? [], evidence: r.evidence ?? [], rules: r.rules ?? undefined,
+  } as ReplyProposal);
+  return {
+    id: r.id,
+    surface: r.surface as SurfaceId,
+    origin: { ...origin, label: room },
+    room,
+    sessionId: r.show_id,
+    question: { author: r.author, text: r.question, at: r.at, url: r.url ?? null },
+    draft: r.sent_text ?? r.draft,
+    createdAt: r.at,
+    status,
+    sentAt: r.sent_at ?? null,
+    ...(r.thread ? { thread: r.thread } : {}),
+    evidence: r.evidence ?? [],
+    guards: r.guards ?? [],
+    verdict: r.verdict as Verdict,
+    confidence: r.confidence,
+    ...(rules.length ? { rules } : {}),
+  };
+}
+
+/** One stored draft, by the id the queue gave it. Scoped in the statement: a
+ *  stranger's draft is not found rather than refused, which is the answer that
+ *  does not confirm it exists. */
+export async function storedDraft(
+  q: Queryable,
+  accountId: string,
+  id: string,
+): Promise<SurfaceDraft | null> {
+  const { rows } = await q.query<PersistedRow>(
+  `${STORED_SELECT}
+    WHERE (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND COALESCE(s.surface, s.source) = ANY($2)
+      AND p.id = $3
+    LIMIT 1`,
+  [accountId, ASYNC_SURFACES(), id],
+  );
+  return rows[0] ? toStoredDraft(rows[0]) : null;
+}
+
+/** The async surfaces a session can be open on. `dm` is the follow-up inbox,
+ *  which is its own table and its own half of the queue. */
+const ASYNC_SURFACES = (): SurfaceId[] =>
+  (Object.keys(SURFACE_CAPABILITIES) as SurfaceId[]).filter(
+  (id) => id !== "dm" && capabilitiesOf(id).tempo === "async",
+  );
+
+const STORED_SELECT = `SELECT p.show_id, p.id, p.author, p.question, p.draft, p.sent_text, p.status,
+          p.verdict, p.confidence, p.guards, p.evidence, p.rules, p.thread,
+          p.at, p.sent_at, p.url, p.room,
+          s.title, s.seller_handle, s.external_id,
+          COALESCE(s.surface, s.source) AS surface
+     FROM reply_proposals p
+     JOIN shows s ON s.id = p.show_id`;
+
+/**
+ * The operator pasted a RESTORED draft in themselves.
+ *
+ * The same claim `Pipeline.send` records, for a draft whose runtime is gone —
+ * and the same two refusals, because they are properties of the draft rather
+ * than of the process that happens to be holding it: a blocked reply cannot be
+ * sent, and a moment that has already been stamped does not move. Nothing here
+ * delivers anything; there is no path from this module to any surface.
+ */
+export async function markStoredSent(
+  q: Queryable,
+  accountId: string,
+  id: string,
+): Promise<{ draft: SurfaceDraft | null; refused?: "blocked" | "dismissed"; already?: boolean }> {
+  const existing = await storedDraft(q, accountId, id);
+  if (!existing) return { draft: null };
+  // Already gone: hand back what was sent. The same answer `Pipeline.send`
+  // gives, and for the same reason — a retried click must not write a second
+  // entry into a ledger of things that happened.
+  if (existing.status === "sent") return { draft: existing, already: true };
+  if (existing.status === "blocked") return { draft: existing, refused: "blocked" };
+  if (existing.status === "dismissed") return { draft: existing, refused: "dismissed" };
+  await q.query(
+  `UPDATE reply_proposals p
+      SET status = 'sent',
+          sent_text = COALESCE(p.sent_text, p.draft),
+          sent_at = COALESCE(p.sent_at, $3),
+          decided_at = COALESCE(p.decided_at, $3)
+     FROM shows s
+    WHERE s.id = p.show_id AND p.id = $2
+      AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND p.status NOT IN ('blocked', 'dismissed')`,
+  [accountId, id, new Date().toISOString()],
+  );
+  return { draft: await storedDraft(q, accountId, id) };
+}
+
+/** Dismiss a restored draft. Idempotent, and it never un-sends one. */
+export async function dismissStored(
+  q: Queryable,
+  accountId: string,
+  id: string,
+): Promise<SurfaceDraft | null> {
+  const existing = await storedDraft(q, accountId, id);
+  if (!existing) return null;
+  if (existing.status === "sent") return existing;
+  await q.query(
+  `UPDATE reply_proposals p
+      SET status = 'dismissed', decided_at = COALESCE(p.decided_at, $3)
+     FROM shows s
+    WHERE s.id = p.show_id AND p.id = $2
+      AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND p.status NOT IN ('sent', 'auto_sent')`,
+  [accountId, id, new Date().toISOString()],
+  );
+  return storedDraft(q, accountId, id);
+}
+
+interface PersistedRow {
+  show_id: string; id: string; author: string; question: string; draft: string;
+  sent_text: string | null; status: string; verdict: string; confidence: number;
+  guards: GuardResult[] | null; evidence: Evidence[] | null; rules: Evidence[] | null;
+  thread: ThreadView | null; at: string; sent_at: string | null;
+  url: string | null; room: string | null;
+  title: string; seller_handle: string; external_id: string | null; surface: string;
+}
+
 export interface QueueInput {
   /** Sessions on air, in registry order. Filtered to async surfaces here. */
   sessions: { summary: ShowSummary; proposals: ReplyProposal[] }[];
+  /** Async drafts read from `reply_proposals` — every room this account has
+   *  written for, whether or not a runtime is holding it (`persistedAsyncDrafts`). */
+  persisted?: SurfaceDraft[];
   /** The account's inbox, with the title of the session each row came out of. */
   followups: { row: FollowUpRow; sessionTitle: string | null }[];
 }
@@ -290,6 +490,12 @@ export function draftQueue(i: QueueInput): DraftsQueue {
     surface: s.summary.source,
     drafts: draftsFromSession(s.summary, s.proposals),
   }));
+  // A draft held by a live runtime is the fresher copy of the same row, so the
+  // durable half is everything the runtimes are not already holding — by
+  // proposal id, not by session, because a re-attached room keeps the drafts
+  // its previous session wrote.
+  const inMemory = new Set(bySession.flatMap((s) => s.drafts).map((d) => d.id));
+  const stored = (i.persisted ?? []).filter((d) => !inMemory.has(d.id));
   const inbox = i.followups.map((f) => draftFromFollowUp(f.row, f.sessionTitle));
 
   const entries = [
@@ -297,12 +503,24 @@ export function draftQueue(i: QueueInput): DraftsQueue {
       surface: s.surface,
       count: s.drafts.filter((d) => d.status === "open").length,
     })),
+    ...storedEntries(stored),
     { surface: "dm" as SurfaceId, count: inbox.filter((d) => d.status === "open").length },
   ];
 
-  const drafts = [...bySession.flatMap((s) => s.drafts), ...inbox].sort(
+  const drafts = [...bySession.flatMap((s) => s.drafts), ...stored, ...inbox].sort(
     (a, b) => +new Date(b.createdAt) - +new Date(a.createdAt),
   );
 
   return { waiting: queueCounts(entries), drafts };
+}
+
+/**
+ * The per-surface counts of the durable half, in first-appearance order.
+ *
+ * `/api/home` and `/api/drafts` both hand these to `queueCounts`, which is what
+ * keeps `now.drafts` deep-equal to `waiting` — the same function over the same
+ * entries in the same order, rather than the same arithmetic done twice.
+ */
+export function storedEntries(stored: SurfaceDraft[]): { surface: SurfaceId; count: number }[] {
+  return stored.map((d) => ({ surface: d.surface, count: d.status === "open" ? 1 : 0 }));
 }

@@ -39,6 +39,7 @@ import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
 import { admit, classify, classifySpeechAct, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
+import type { ThreadContext } from "../ingest/threadContext.js";
 import { hostFacts } from "../retrieval/hostFacts.js";
 import { toEvidence, type RetrievalResult } from "../retrieval/retriever.js";
 import type { Fact } from "../retrieval/facts.js";
@@ -78,6 +79,32 @@ export interface PipelineDeps {
   executor: ActionExecutor;
   proposer: ActionProposer;
   showContext: ShowContextEngine;
+  /**
+   * The RULES OF THE ROOM this message was written in, as constraints.
+   *
+   * A second input beside the retriever, and deliberately not part of it.
+   * `GuardInput.community` used to be `retrieved.facts.filter(community)`, and
+   * the retriever's index is the seller's listings and policies — so no
+   * producer of a community fact (a subreddit's rules, a sponsor's "do not
+   * claim") had any route to the guard chain at all, and `communityRuleGuard`
+   * returned n/a on every real watch. A rule is not grounding to be ranked
+   * against a question: it is in force whether or not it resembles what was
+   * asked. The surface adapter answers this from what it has already fetched
+   * (src/surfaces/types.ts, `constraintsFor`); absent on a surface with no
+   * rooms, which is every live-commerce surface.
+   */
+  constraints?: (m: ChatMessage) => Fact[];
+  /**
+   * The branch above the message being answered, on an asynchronous surface.
+   *
+   * `ShowContextEngine` answers "what is happening right now", which is exactly
+   * right for a live show and empty in a subreddit. This is its counterpart:
+   * the opening post and the path down to the comment. Supplied by the surface
+   * (`SurfaceAdapter.threadFor`), absent where a conversation is not a tree,
+   * and never a reason to lose a reply — a thread that cannot be read is a
+   * draft composed without it, not an error.
+   */
+  thread?: (m: ChatMessage, rules: Fact[]) => Promise<ThreadContext | null>;
   audit: AuditLog;
   events: PipelineEvents;
   /**
@@ -97,6 +124,39 @@ export interface PipelineDeps {
    * every reply is recorded as delivered by a human, because it is.
    */
   deliver?: ReplyDeliverer;
+}
+
+/**
+ * The constraints in force on this reply, from both doors.
+ *
+ * The per-room input is the one that matters and is checked first; anything
+ * with `corpus: "community"` that also came back from retrieval is kept, so a
+ * surface that does ground in a community corpus (Twitch's sponsor
+ * prohibitions, once they are indexed) is not silently dropped. Deduped by
+ * `factId`, because a rule enforced twice reads as two rules.
+ */
+/** The thread as a client sees it: the same branch, with the rules rendered
+ *  the way every other cited thing reaches the console and nothing an index
+ *  needs. */
+function threadView(t: ThreadContext): ReplyProposal["thread"] {
+  return {
+    threadId: t.threadId,
+    ancestors: t.ancestors,
+    room: t.room,
+    rules: t.rules.map((f) => toEvidence(f, 0)),
+    summary: t.summary,
+  };
+}
+
+function constraintsOf(fromRoom: Fact[], retrieved: Fact[]): Fact[] {
+  const out: Fact[] = [];
+  const seen = new Set<string>();
+  for (const f of [...fromRoom, ...retrieved]) {
+    if (f.corpus !== "community" || seen.has(f.factId)) continue;
+    seen.add(f.factId);
+    out.push(f);
+  }
+  return out;
 }
 
 /** @see PipelineDeps.deliver */
@@ -178,7 +238,16 @@ export class Pipeline {
       id: incoming.externalId || `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       author: incoming.author,
       text: incoming.text,
-      at: new Date().toISOString(),
+      // The platform's own timestamp when it sent one. A comment written four
+      // minutes ago is four minutes old in the queue, not new — on a live show
+      // the two are the same number and this reads exactly as it did.
+      at: incoming.at || new Date().toISOString(),
+      // Carried, not interpreted. Everything that makes this message part of a
+      // CONVERSATION rather than a line in a firehose (src/ingest/sources.ts).
+      ...(incoming.threadId ? { threadId: incoming.threadId } : {}),
+      ...(incoming.parentId ? { parentId: incoming.parentId } : {}),
+      ...(incoming.room ? { room: incoming.room } : {}),
+      ...(incoming.url ? { url: incoming.url } : {}),
       intent,
       speechAct,
       admitted: decision.admitted,
@@ -336,17 +405,41 @@ export class Pipeline {
     }
     timer.mark("retrieve");
 
+    // The rules of the room, from the surface rather than from retrieval.
+    // Read ONCE per draft and used for the guard chain, the cache key and the
+    // card, so the three cannot disagree about what was in force.
+    const roomRules = constraintsOf(this.d.constraints?.(msg) ?? [], r.facts);
+
     // 2. cache, keyed on the versions of every listing the grounding touched.
     //    A regenerate deliberately skips it: the seller is asking for something
     //    OTHER than the answer we already have.
-    const key = cacheKey({ question: msg.text, facts: r.evidence });
-    const hit = previous ? null : this.cache.get(key);
+    //
+    //    The rules are part of the key. A cached verdict is a statement about a
+    //    draft in a ROOM — a profile watch answers in several — and a rule
+    //    edited by a moderator makes every answer written under the old one
+    //    unreachable rather than merely stale.
+    const key = cacheKey({ question: msg.text, facts: [...r.evidence, ...roomRules] });
+    // A message in a THREAD is never answered from the cache.
+    //
+    // The cache exists for a live firehose, where "how much" is the same
+    // question the twentieth time somebody types it. In a tree it is not: the
+    // same words under two different branches are two different questions, and
+    // reusing an answer composed for one of them would hand a buyer a reply
+    // written about a conversation they are not in. A subreddit is polled once
+    // a minute, so what this costs is nothing.
+    const threaded = Boolean(msg.threadId);
+    const hit = previous || threaded ? null : this.cache.get(key);
     if (hit) {
       proposal = await this.finish(proposal, {
         ...hit, spans: timer.result(config.latencyBudgetMs, true),
       }, msg);
       return;
     }
+
+    // The conversation this answers. Fetched before the composer is called and
+    // never allowed to fail the draft: a branch we could not read costs the
+    // reply its context, which is a worse answer, not no answer.
+    const thread = await this.threadOf(msg, roomRules);
 
     try {
       // 3. compose
@@ -374,6 +467,7 @@ export class Pipeline {
           show,
           pinned: show.pinnedListingId ? await this.d.repo.listing(show.pinnedListingId) : null,
           context: this.d.showContext.current(),
+          thread,
           seller: this.d.seller?.() ?? null,
           persona: p?.persona ?? null,
           styleRef: p ? styleRef(msg.text, p.voice) : null,
@@ -406,7 +500,7 @@ export class Pipeline {
           slots: r.slots,
           policies,
           surface: capabilitiesOf(show.source),
-          community: r.facts.filter((f) => f.corpus === "community"),
+          community: roomRules,
         };
       };
       this.grounding.set(proposal.id, { facts: r.facts, slots: r.slots, evidenceQuality: r.evidence[0]?.score ?? 0 });
@@ -432,12 +526,16 @@ export class Pipeline {
         // was asked to write them in.
         ...(draft.styleRef ? { styleRef: draft.styleRef } : {}),
         evidence: r.evidence,
+        // The rules that were in force, beside the evidence rather than among
+        // it: a constraint is not a citation, and `abstained` counts evidence.
+        ...(roomRules.length ? { rules: roomRules.map((f) => toEvidence(f, 0)) } : {}),
+        ...(thread ? { thread: threadView(thread) } : {}),
         guards: chain.guards,
         verdict: chain.verdict,
         confidence: chain.confidence,
         repaired,
       };
-      this.cache.set(key, result);
+      if (!threaded) this.cache.set(key, result);
       this.finish(proposal, { ...result, spans: timer.result(config.latencyBudgetMs, false) }, msg);
       this.evict();
     } catch (e) {
@@ -462,6 +560,17 @@ export class Pipeline {
       void this.emitMetrics();
     }
   }
+
+  /** The branch above this message, or null. Never throws: see `thread` on
+   *  `PipelineDeps`. */
+  private async threadOf(msg: ChatMessage, rules: Fact[]): Promise<ThreadContext | null> {
+    if (!this.d.thread) return null;
+    try {
+      return await this.d.thread(msg, rules);
+    } catch (e) {
+      console.warn(`[pipeline] thread unavailable for ${msg.id}: ${(e as Error).message}`);
+      return null;
+    }
 
   /**
    * What accepting a reply on this show actually DOES.
@@ -503,6 +612,8 @@ export class Pipeline {
       guards: ReplyProposal["guards"]; verdict: ReplyProposal["verdict"];
       confidence: number; repaired: boolean; spans: ReplyProposal["spans"];
       styleRef?: StyleRef;
+      rules?: Evidence[];
+      thread?: ReplyProposal["thread"];
     },
     msg: ChatMessage,
   ): Promise<ReplyProposal> {
@@ -539,8 +650,8 @@ export class Pipeline {
     // how the console ended up rendering empty cards.
     const { answer, ...rest } = r;
     const proposal: ReplyProposal = {
-      ...base, ...rest, draft: answer, status, delivery,
-      ...(status === "auto_sent" ? { sentText: answer } : {}),
+...base, ...rest, draft: answer, status, delivery,
+      ...(status === "auto_sent" ? { sentText: answer, sentAt: new Date().toISOString() } : {}),
     };
 
     for (const g of r.guards) {
@@ -607,6 +718,18 @@ export class Pipeline {
   async send(id: string, text?: string, actor = "seller"): Promise<ReplyProposal> {
     const p = this.proposals.get(id);
     if (!p) throw new Error(`proposal ${id} not found`);
+    // Already gone. A double-clicked button, a retried request or a second
+    // operator hands back what was sent rather than sending it again: the
+    // audit is a hash-chained record of what this copilot and this seller
+    // actually did, and a duplicate `reply_sent` in it is a second thing that
+    // never happened. `FollowUpInbox.markSent` has been idempotent since it was
+    // written (`sent_at = COALESCE(sent_at, now())`); this is the other half of
+    // the same queue behaving the same way.
+    if (p.status === "sent" || p.status === "auto_sent") return p;
+    if (p.status === "blocked" || p.verdict === "block") {
+      const why = p.guards.filter((g) => g.verdict === "block").map((g) => `${g.guard}: ${g.reason ?? "blocked"}`).join("; ");
+      throw new SendRefused(`this reply was blocked and cannot be sent — ${why || "a guard blocked it"}`);
+    }
     const sentText = (text ?? p.draft).trim();
     const edited = text !== undefined && sentText !== p.draft.trim();
     const wasBlocked = p.status === "blocked" || p.verdict === "block";
@@ -636,7 +759,10 @@ export class Pipeline {
           slots: g?.slots ?? ({} as GuardInput["slots"]),
           policies,
           surface: capabilitiesOf(show.source),
-          community: (g?.facts ?? []).filter((f) => f.corpus === "community"),
+          // An EDIT is checked against the room's rules too. The operator
+          // rewriting a draft is the likeliest moment for a rule to be broken,
+          // because the guards have already passed once.
+          community: constraintsOf(this.d.constraints?.(p.message) ?? [], g?.facts ?? []),
         },
         { evidenceQuality: g?.evidenceQuality ?? 0, authoredBy: "human" },
       );
@@ -657,7 +783,10 @@ export class Pipeline {
         .catch((e: Error) => { throw new SendRefused(`not delivered — ${e.message}`); });
     }
 
-    const next: ReplyProposal = { ...p, status: "sent", sentText, guards, verdict, delivery };
+    const next: ReplyProposal = {
+      ...p, status: "sent", sentText, guards, verdict, delivery,
+      sentAt: new Date().toISOString(),
+    };
     this.proposals.set(id, next);
     this.counters.sent++;
     if (delivery === "api") this.counters.delivered++;

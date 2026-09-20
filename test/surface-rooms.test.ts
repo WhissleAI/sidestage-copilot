@@ -86,6 +86,32 @@ describe("the rooms an operator watches", () => {
     assert.match((r.json() as { error: string }).error, /draft-only/);
   });
 
+  test("a thread or a profile is not a room, and the box says which it is", async () => {
+    // The box took any non-empty string, so a thread id typed into it was
+    // stored as a room and then rendered as "watched" against an open thread
+    // session — the wrong identifier in the rooms table, arriving by the one
+    // door that was not checking.
+    for (const [room, says] of [
+      ["https://www.reddit.com/r/mechmarket/comments/1n4k2qp/x/", /thread, not a room/],
+      ["t3_1n4k2qp", /thread, not a room/],
+      ["u/linear_fan", /person, not a room/],
+    ] as const) {
+      const r = await app.inject({
+        method: "POST", url: "/api/surfaces/reddit/rooms", headers: A.headers,
+        payload: { room },
+      });
+      assert.equal(r.statusCode, 400, room);
+      assert.match((r.json() as { error: string }).error, says, room);
+      assert.equal((r.json() as { code: string }).code, "not-a-room");
+    }
+    // And a subreddit still is one.
+    const ok = await app.inject({
+      method: "POST", url: "/api/surfaces/reddit/rooms", headers: A.headers,
+      payload: { room: "r/buildapcsales" },
+    });
+    assert.equal(ok.statusCode, 200, ok.body);
+  });
+
   test("a configured room says whether anything is actually watching it", async () => {
     // The gap this makes visible: nothing in this build turns a row in
     // `surface_rooms` into a running watch. There is no supervisor reading the

@@ -267,6 +267,36 @@ describe("drafting a follow-up", () => {
     assert.equal(stored.id, followUpId(r.showId, "grounded"));
   });
 
+  test("two handles that differ only in punctuation are two follow-ups, not a 500", async () => {
+    // `rae_kicks` and `rae.kicks` are two people. The id slugified both to
+    // `rae-kicks`, so the second insert raised a primary-key violation that the
+    // `ON CONFLICT (show_id, buyer)` clause does not cover — the rejection
+    // escaped the worker into `Promise.all` and the route answered 500, so a
+    // show with two such buyers built NO follow-ups, not even for the people
+    // whose handles were fine. eBay handles permit `_ . -`.
+    const acct = `${account}_punct`;
+    assert.notEqual(followUpId("show", "rae_kicks"), followUpId("show", "rae.kicks"));
+    const out = await buildFollowUps(r.d, {
+      showId: r.showId,
+      accountId: acct,
+      record: record([
+        prop({ author: "rae_kicks", question: "how much for the chicagos", intent: "price_question" }),
+        prop({ author: "rae.kicks", question: "how much for the chicagos", intent: "price_question" }),
+        prop({ author: "third_buyer", question: "how much for the chicagos", intent: "price_question" }),
+      ]),
+      drafter: stubbedModel(r, {
+        "how much for the chicagos": "The Chicago Reimagined in a size 10 is $412.00 right now.",
+      }),
+    });
+    assert.equal(out.selected, 3);
+    assert.deepEqual(
+      out.followups.map((f) => f.buyer).sort(),
+      ["rae.kicks", "rae_kicks", "third_buyer"],
+      JSON.stringify(out.guardedOut),
+    );
+    await pgPool().query("DELETE FROM followups WHERE account_id = $1", [acct]);
+  });
+
   test("an answer the catalog can no longer support is not a message", async () => {
     const out = await buildFollowUps(r.d, {
       showId: r.showId,

@@ -17,9 +17,12 @@
 // subreddit's rules in as constraints on whatever gets drafted.
 
 import { capabilitiesOf, type SurfaceAdapter, type SurfaceCapabilities, type SurfaceConnection, type SurfaceEvents, type SurfaceTarget } from "../types.js";
+import type { Fact } from "../../retrieval/facts.js";
 import { RedditClient, requireCreds } from "./api.js";
 import { RedditPoller, type RedditWatch } from "./poll.js";
 import { CommunityRules } from "./rules.js";
+import { fetchThread, threadContextFor } from "./thread.js";
+import type { ThreadContext } from "../../ingest/threadContext.js";
 
 /**
  * Not a field on a config object, not a column, not an environment variable: a
@@ -188,7 +191,90 @@ export const redditAdapter: SurfaceAdapter = {
     await poller.start();
     return poller;
   },
+
+  /** The rules in force where this reply will land, from the cache the attach
+   *  filled. One line, over the process-wide store; the behaviour is
+   *  `constraintsFrom` below, which is where it is documented and tested. */
+  constraintsFor(t: SurfaceTarget, room?: string | null): Fact[] {
+    return constraintsFrom(rules(), t, room);
+  },
+
+  /**
+   * The branch above a comment, rebuilt from the thread it lives in.
+   *
+   * One GET, bounded by `fetchThread`. `parseCommentTree` and
+   * `threadContextFor` do the rest, and they are the same functions the suite
+   * exercises against a recorded tree — this is the caller they never had,
+   * which is why a Reddit draft used to answer one comment in isolation while
+   * the Drafts page rendered a thread section it could never be sent.
+   */
+  threadFor(
+    t: SurfaceTarget,
+    m: { id: string; threadId?: string; parentId?: string; room?: string },
+    ruleFacts: Fact[],
+  ): Promise<ThreadContext | null> {
+    return threadFrom(redditClient(), t, m, ruleFacts);
+  },
 };
+
+/**
+ * The branch above a comment, rebuilt from the thread it lives in.
+ *
+ * One GET, bounded by `fetchThread`; `parseCommentTree` and `threadContextFor`
+ * do the rest, and they are the same functions the suite exercises against a
+ * recorded tree. This is the caller they never had — which is why a Reddit
+ * draft answered one comment in isolation while the Drafts page rendered a
+ * thread section that could never be sent to it.
+ *
+ * Takes its client for the same reason `constraintsFrom` takes its store: the
+ * suite drives Reddit with recorded payloads and no key, and the adapter method
+ * passes the process-wide instance.
+ */
+export async function threadFrom(
+  client: RedditClient,
+  t: SurfaceTarget,
+  m: { id: string; threadId?: string; parentId?: string; room?: string },
+  ruleFacts: Fact[],
+): Promise<ThreadContext | null> {
+  const threadId = m.threadId || (t.meta?.kind === "thread" ? t.meta.threadId : undefined);
+  if (!threadId) return null;
+  // A post IS its own thread: there is nothing above it, and fetching the tree
+  // to discover that spends a request to learn nothing.
+  if (m.id === threadId) return null;
+  const subreddit = (m.room || t.meta?.subreddit || "").replace(/^\/?r\//i, "") || undefined;
+  const thread = await fetchThread(client, { subreddit, threadId });
+  return threadContextFor(thread, m.id, ruleFacts);
+}
+
+/**
+ * The rules in force where a reply will land.
+ *
+ * Answered from cache, never fetched here: this is called while a draft is
+ * being guarded, and a reply path that waited on a rules fetch would either
+ * block on a network call or compose without them. A room we have not read yet
+ * is warmed in the background and checked from the next draft on — which is the
+ * case a watch on a PROFILE creates, where comments arrive from rooms nobody
+ * attached and each one's own rules are the ones that bind the answer.
+ *
+ * These go to `GuardInput.community`, never to the retriever. A rule is a
+ * constraint on the reply; ranking it against the question would mean a draft
+ * is checked only against the rules that happen to sound like what was asked.
+ *
+ * Takes its store as an argument so the suite can drive it with Reddit's own
+ * recorded `/about/rules` payload and no key — the adapter method above passes
+ * the process-wide one, which is the only difference between them.
+ */
+export function constraintsFrom(
+  store: CommunityRules,
+  t: SurfaceTarget,
+  room?: string | null,
+): Fact[] {
+  const sub = (room || t.meta?.subreddit || "").replace(/^\/?r\//i, "").trim();
+  if (!sub) return [];
+  const cached = store.cached(sub);
+  if (!cached.length) store.warm(sub);
+  return cached;
+}
 
 /**
  * ONE Reddit client for this process, and therefore one rate-limit budget.

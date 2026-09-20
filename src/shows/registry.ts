@@ -148,18 +148,35 @@ export class ShowRegistry {
     const { adapter, target } = resolved;
     const externalId = target.externalId;
 
+    // WHOSE session, on WHICH surface, watching WHICH id. All three, because
+    // an external id is not an identity.
+    //
+    // `kicksbyrae` is a Twitch login and a Whatnot handle and a TikTok handle,
+    // and matching on the id alone handed the second operator to paste one the
+    // first operator's RUNNING session — whereupon the attach route minted an
+    // agent onto it and applied a catalog to somebody else's live show. That is
+    // a cross-tenant takeover of a session in flight, not a stale read, and the
+    // fix is structural: a runtime is identified by the surface plus the id
+    // plus the account, so a match across either boundary is not expressible.
+    //
+    // A row from before ownership belongs to nobody (`null`) and still matches
+    // an attach that names no owner, which is what the resume path and the
+    // `WATCH_EBAY` boot list do.
+    const owner = meta.ownerAccountId ?? null;
     // One event can be attached more than once over its life; each attach is
     // its own session with its own report. A live runtime for the event is
     // returned as-is; a finished session that already has a report is left
     // alone and the new one takes the next id. Re-attaching used to reuse the
     // row, reset its clock and overwrite the report.
-    const live = [...this.runtimes.values()].find((r) => r.externalId === externalId);
+    const live = [...this.runtimes.values()].find(
+      (r) => r.surface === adapter.id && r.externalId === externalId && r.ownerAccountId === owner,
+    );
     if (live) return live;
     // `ebay_` is history, not a convention: every eBay Live show id in
     // production carries it, and `nextSessionId` matches sessions by it. A
     // second surface gets its own prefix rather than renaming those rows.
     const base = adapter.id === "ebaylive" ? `ebay_${externalId}` : `${adapter.id}_${externalId}`;
-    const showId = await this.nextSessionId(base, externalId);
+    const showId = await this.nextSessionId(base, externalId, adapter.id, owner);
     const inFlight = this.attaching.get(showId);
     if (inFlight) return inFlight;
 
@@ -174,6 +191,12 @@ export class ShowRegistry {
         sellerHandle: meta.host || target.handle || "eBay Live seller",
         source: adapter.id,
         externalId,
+        // The WHOLE target, not the one string of it that an eBay Live event
+        // happens to be. Everything an async surface knows — which thread,
+        // whose profile, which room's rules are in force — is in `meta`, and
+        // this layer used to drop it on the floor between `parseTarget` and
+        // `adapter.open`.
+        target,
         // Read-only unless the caller proved the show is theirs (routes match
         // the connected eBay username to the show's seller handle).
         readOnly: meta.readOnly ?? true,
@@ -291,22 +314,41 @@ export class ShowRegistry {
     return this.runtimes.has(showId);
   }
 
-  /** The id for a new session of this event: the base id if unused or reusable
-   *  (ended, no report), else base-2, base-3, … */
-  private async nextSessionId(base: string, eventId: string): Promise<string> {
+  /**
+   * The id for a new session of this event: the base id if unused or reusable
+   * (ended, no report), else base-2, base-3, …
+   *
+   * Reusable means the same SURFACE and the same ACCOUNT, for the reason the
+   * live-runtime lookup above says: two surfaces share a handle, and picking up
+   * somebody else's ended row would resume their session under our attach — the
+   * durable half of the same takeover. Ids that are merely TAKEN are counted
+   * across every row on the id, whoever owns it, because the id is a primary
+   * key and a collision there is an insert that fails.
+   */
+  private async nextSessionId(
+    base: string,
+    eventId: string,
+    surface: SurfaceId,
+    owner: string | null,
+  ): Promise<string> {
+    type Row = { id: string; status: string; has_report: boolean; surface: string; owner_account_id: string | null };
     const rows = await db()
-      .query<{ id: string; status: string; has_report: boolean }>(
-        `SELECT s.id, s.status, (r.show_id IS NOT NULL) AS has_report
+      .query<Row>(
+        `SELECT s.id, s.status, (r.show_id IS NOT NULL) AS has_report,
+                COALESCE(s.surface, s.source) AS surface, s.owner_account_id
            FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
           WHERE s.external_id = $1 ORDER BY s.started_at DESC`,
         [eventId],
       )
       .then((r) => r.rows)
-      .catch(() => [] as { id: string; status: string; has_report: boolean }[]);
+      .catch(() => [] as Row[]);
     if (!rows.length) return base;
-    const reusable = rows.find((r) => !r.has_report);
+    const reusable = rows.find(
+      (r) => !r.has_report && r.surface === surface && (r.owner_account_id ?? null) === owner,
+    );
     if (reusable) return reusable.id;
     const taken = new Set(rows.map((r) => r.id));
+    if (!taken.has(base)) return base;
     for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
   }
 

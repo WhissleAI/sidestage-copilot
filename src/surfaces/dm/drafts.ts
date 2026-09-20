@@ -303,15 +303,25 @@ async function draftOne(
     return;
   }
 
-  await inbox.save({
-    id: followUpId(o.showId, f.buyer),
-    showId: o.showId,
-    accountId: o.accountId,
-    buyer: f.buyer,
-    question: f.question,
-    messageId: f.messageId,
-    draft: run.answer.trim(),
-  });
+  try {
+    await inbox.save({
+      id: followUpId(o.showId, f.buyer),
+      showId: o.showId,
+      accountId: o.accountId,
+      buyer: f.buyer,
+      question: f.question,
+      messageId: f.messageId,
+      draft: run.answer.trim(),
+    });
+  } catch (e) {
+    // The write is the last thing that can fail, and it used to fail the whole
+    // BUILD: the rejection escaped `worker` into `Promise.all` and the route
+    // answered 500, so one bad row cost the other twenty-eight their drafts.
+    result.guardedOut.push({
+      buyer: f.buyer, question: f.question,
+      guard: "storing", reason: (e as Error).message,
+    });
+  }
 }
 
 /**
@@ -324,7 +334,18 @@ async function draftOne(
  */
 export function followUpId(showId: string, buyer: string): string {
   const slug = buyer.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32);
-  return `fu_${showId}_${slug || hash(buyer)}`.slice(0, 200);
+  // The hash is always there, not a fallback for a buyer whose handle slugified
+  // to nothing.
+  //
+  // A slug is lossy on exactly the characters platforms allow in a handle:
+  // `rae_kicks` and `rae.kicks` are two people and one slug. Two rows, same
+  // derived id — so the second insert raised a primary-key violation the
+  // `ON CONFLICT (show_id, buyer)` clause does not cover, and a show with two
+  // such buyers built no follow-ups at all. The slug stays because an id a
+  // person reads in a URL should say who it is about; the hash is what makes it
+  // an id. Built first so a long show id cannot truncate it away.
+  const base = `fu_${showId}_${hash(buyer)}`;
+  return `${base}_${slug}`.slice(0, 200);
 }
 
 function hash(s: string): string {

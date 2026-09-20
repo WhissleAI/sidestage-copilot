@@ -20,6 +20,8 @@
 
 import type { ActionKind } from "../domain/types.js";
 import type { CorpusKind } from "../retrieval/corpus.js";
+import type { Fact } from "../retrieval/facts.js";
+import type { ThreadContext } from "../ingest/threadContext.js";
 
 export type SurfaceId =
   | "simulated" | "ebaylive" | "whatnot" | "tiktoklive"   // live commerce
@@ -64,6 +66,53 @@ export interface SurfaceAdapter {
   parseTarget(input: string): SurfaceTarget | null;
   /** Start watching. Emits through the same callbacks the eBay watcher already uses. */
   open(t: SurfaceTarget, ev: SurfaceEvents): Promise<SurfaceConnection>;
+  /**
+   * What this room FORBIDS — the constraints every draft written here is
+   * checked against, as facts with `corpus: "community"`.
+   *
+   * Deliberately not a retrieval. `GuardInput.community` used to be a filter
+   * over the retriever's own results, and the retriever's index is the seller's
+   * listings and policies — so a subreddit's rules had no route into it and
+   * `communityRuleGuard` returned n/a on every real watch, however many rules
+   * had been fetched. A rule is not retrievable grounding: it is never an
+   * answer to the question, it must not be ranked against the question, and it
+   * has to be in force whether or not it happens to resemble what was asked.
+   * It is a per-room input of its own, and this is where it comes from.
+   *
+   * Synchronous and cache-only, because it is called on the reply path: an
+   * adapter answers with what it already knows and warms anything it does not
+   * in the background, so a draft is never delayed by a rules fetch and never
+   * composed without rules that were already in hand.
+   *
+   * @param t    the session's target — the room it was attached to.
+   * @param room the room THIS message was written in, when the surface said.
+   *   A profile watch spans rooms, and the rules that bind a reply are the
+   *   rules of the room the reply lands in, not of the watch.
+   */
+  constraintsFor?(t: SurfaceTarget, room?: string | null): Fact[];
+  /**
+   * The conversation ABOVE this message — the opening post, then the branch
+   * down to it, oldest first.
+   *
+   * The asynchronous counterpart to `ShowContextEngine`. "The last ninety
+   * seconds" is an empty window in a subreddit: a comment sits under a post and
+   * a branch of replies written over three days by different people, and a
+   * draft written without them answers the words instead of the conversation —
+   * which reads, correctly, as a bot.
+   *
+   * Asynchronous because it is a fetch, and on the reply path: a surface that
+   * cannot rebuild a branch cheaply should return null rather than make a buyer
+   * wait. A failure is not fatal — the caller composes without it.
+   *
+   * `rules` are passed in rather than fetched here so that the thread the
+   * composer sees and the constraints the guards enforce are the same set,
+   * from one read.
+   */
+  threadFor?(
+    t: SurfaceTarget,
+    m: { id: string; threadId?: string; parentId?: string; room?: string },
+    rules: Fact[],
+  ): Promise<ThreadContext | null>;
 }
 
 export interface SurfaceTarget {

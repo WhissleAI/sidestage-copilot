@@ -121,6 +121,19 @@ export interface ChatMessage {
   admitted: boolean;
   dropReason?: string;
   proposalId?: string;
+  /**
+   * Where this sits in an asynchronous conversation. Absent on a live show,
+   * where the message before it is the only neighbour it has.
+   *
+   * `threadId` groups, `parentId` is the rung above (what the branch is
+   * rebuilt by), `room` is the place whose rules constrain a reply to it, and
+   * `url` is the permalink — the "open" link on a draft's question, which was
+   * hard-coded null for as long as the runtime dropped these.
+   */
+  threadId?: string;
+  parentId?: string;
+  room?: string;
+  url?: string;
 }
 
 export type EvidenceSource =
@@ -170,6 +183,25 @@ export interface SpanBreakdown {
   overBudget: boolean;
 }
 
+/**
+ * The conversation a draft is answering, as it goes on the wire.
+ *
+ * `ThreadContext` (src/ingest/threadContext.ts) is the internal shape and
+ * carries whole `Fact`s — tokens, vectors and all. This is the same thing
+ * rendered for a client: the rules as `Evidence`, which is how every other
+ * cited thing reaches the console, and nothing an index needs.
+ */
+export interface ThreadView {
+  threadId: string;
+  /** The opening post, then the branch above the message being answered. */
+  ancestors: { author: string; text: string; at: string }[];
+  room: string;
+  /** The rules in force in this room. A constraint on the reply, never an
+   *  answer in it — the console renders them as rules, not as citations. */
+  rules: Evidence[];
+  summary: string | null;
+}
+
 export type ProposalStatus =
   | "drafting" | "ready" | "needs_review" | "blocked" | "sent" | "auto_sent" | "dismissed";
 
@@ -207,6 +239,32 @@ export interface ReplyProposal {
    */
   delivery: ReplyDelivery;
   sentText?: string;
+  /**
+   * When it went out — auto-sent by the copilot, or marked sent by the person
+   * who pasted it somewhere themselves.
+   *
+   * Stamped once and never moved: the follow-up inbox's row has said
+   * `sent_at = COALESCE(sent_at, now())` since it was written, and a session
+   * draft had no such field at all, so the Sent list showed a time for one half
+   * of the same queue and a blank for the other.
+   */
+  sentAt?: string;
+  /**
+   * The branch above the comment this answers, on an asynchronous surface.
+   *
+   * Absent on a live show, where the last ninety seconds are the context and a
+   * comment's only neighbour is the comment before it.
+   */
+  thread?: ThreadView;
+  /**
+   * The rules of the ROOM this draft was checked against (corpus: "community").
+   *
+   * Beside the evidence, never among it. A rule is a constraint on the reply
+   * and an answer abstains when it has no EVIDENCE — folding rules into that
+   * list would make a draft with rules and no grounding look grounded to the
+   * autonomy ladder.
+   */
+  rules?: Evidence[];
   /** The operator's own past reply this draft was written in the manner of.
    *  Style, not evidence — the console renders it as "written the way you
    *  answered this in March", beside the citations rather than among them. */

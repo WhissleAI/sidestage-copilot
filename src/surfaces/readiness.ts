@@ -89,6 +89,16 @@ export interface ReadinessFacts {
   liveBySurface: Partial<Record<SurfaceId, number>>;
   /** Rooms this account has added, per surface. */
   roomsBySurface: Partial<Record<SurfaceId, number>>;
+  /**
+   * Open sessions whose room's rules are actually in hand, per surface.
+   *
+   * Counted from the adapter's own constraints (`SurfaceAdapter.constraintsFor`)
+   * rather than inferred from a row in `surface_rooms`, which the rooms
+   * endpoint itself documents as "a choice, not a process". A protection is
+   * running or it is not, and a green tick for one that is not is worse than a
+   * red one.
+   */
+  roomRulesBySurface?: Partial<Record<SurfaceId, number>>;
   /** Follow-ups this account has built, in any state. */
   followups: number;
 }
@@ -183,6 +193,7 @@ function rowFor(
   const caps = capabilitiesOf(s.id);
   const live = f.liveBySurface[s.id] ?? 0;
   const rooms = f.roomsBySurface[s.id] ?? 0;
+  const rulesLoaded = f.roomRulesBySurface?.[s.id] ?? 0;
   const base = {
     id: s.id,
     label: s.label,
@@ -300,8 +311,19 @@ function rowFor(
             // Not a file anybody uploads: a room's rules are fetched from
             // Reddit when the room is attached, and they are the constraints
             // every draft there is checked against.
-            label: "Each room's rules load when you attach it",
-            done: credentialed && rooms > 0,
+            //
+            // Derived from the rules that are actually IN FORCE, not from a
+            // row count. `rooms` counts `surface_rooms`, which the endpoint
+            // that serves it calls "a choice, not a process" — so this used to
+            // put a green tick against a protection nothing was running, for an
+            // account that had typed a subreddit into a box.
+            label:
+              rulesLoaded > 0
+                ? `The rules of ${rulesLoaded === 1 ? "the room you are watching are" : `the ${rulesLoaded} rooms you are watching are`} in force`
+                : live > 0
+                  ? "This room's rules have not loaded — drafts here are unchecked against them"
+                  : "Each room's rules load when you attach it",
+            done: rulesLoaded > 0,
           },
           {
             // Said here as well as in `during`, because this is the step where
