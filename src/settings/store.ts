@@ -24,6 +24,7 @@ import {
   DEFAULT_POLICY, type SellerGuardrailPolicy,
   toContentGuardrails, toActionPolicy,
 } from "../guardrails/policy.js";
+import { gatewayFetch } from "../net/http.js";
 
 /** What the gateway reports as actually armed, after a push. */
 export interface ArmedReport {
@@ -194,7 +195,7 @@ export async function pushLayerA(
 ): Promise<ArmedReport> {
   const headers = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
   try {
-    const patch = await fetch(`${base}/api/agents/${agentId}`, {
+    const patch = await gatewayFetch(`${base}/api/agents/${agentId}`, {
       method: "PATCH",
       headers,
       body: JSON.stringify({
@@ -206,7 +207,7 @@ export async function pushLayerA(
       return { ok: false, agentId, items: [], error: `${patch.status} ${(await patch.text()).slice(0, 200)}` };
     }
 
-    const read = await fetch(`${base}/api/agents/${agentId}/guardrails`, { headers });
+    const read = await gatewayFetch(`${base}/api/agents/${agentId}/guardrails`, { headers });
     if (!read.ok) {
       return { ok: true, agentId, items: [], error: `pushed, but read-back failed: ${read.status}` };
     }

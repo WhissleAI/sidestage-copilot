@@ -30,6 +30,7 @@ import { resolveSellerUsername, sellerListings } from "../ingest/ebaylive/seller
 import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
 import { addCatalogFile, removeCatalogFile, type Catalog } from "./catalogs.js";
 import type { CatalogItem } from "./catalogImport.js";
+import { gatewayFetch } from "../net/http.js";
 
 export interface PreparedShow {
   eventId: string;
@@ -361,7 +362,7 @@ async function uploadCatalogKb(agentId: string, c: Catalog): Promise<void> {
   const name = `${c.id}-inventory.md`;
   form.append("file", new Blob([lines.join("\n")], { type: "text/markdown" }), name);
   form.append("title", name.replace(/\.md$/, ""));
-  const r = await fetch(`${config.whissle.base}/api/agents/${agentId}/kb/upload`, {
+  const r = await gatewayFetch(`${config.whissle.base}/api/agents/${agentId}/kb/upload`, {
     method: "POST",
     headers: { Authorization: `Bearer ${config.whissle.apiKey}` },
     body: form,

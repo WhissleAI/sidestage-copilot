@@ -16,6 +16,7 @@ import { config } from "../config.js";
 import type { Catalog } from "./catalogs.js";
 import { aspectGaps, type AspectGap } from "./catalogAspects.js";
 import { ebay } from "../ingest/ebay/client.js";
+import { gatewayFetch } from "../net/http.js";
 
 export interface ReadinessCheck {
   name: string;
@@ -51,7 +52,7 @@ export interface Readiness {
 
 async function api<T>(path: string): Promise<T | null> {
   try {
-    const r = await fetch(`${config.whissle.base}${path}`, {
+    const r = await gatewayFetch(`${config.whissle.base}${path}`, {
       headers: { Authorization: `Bearer ${config.whissle.apiKey}` },
     });
     if (!r.ok) return null;
