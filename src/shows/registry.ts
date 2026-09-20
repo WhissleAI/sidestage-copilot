@@ -96,7 +96,7 @@ export class ShowRegistry {
    * one on boot — a fake show is the worst possible empty state, because it
    * looks exactly like a working one.
    */
-  async ensureDemo(): Promise<ShowRuntime> {
+  async ensureDemo(ownerAccountId: string | null = null): Promise<ShowRuntime> {
     const existing = this.runtimes.get(DEMO_SHOW_ID);
     if (existing) return existing;
 
@@ -105,10 +105,19 @@ export class ShowRegistry {
       title: "Friday Night Grails — Ep. 42",
       sellerHandle: "@kicksbyrae",
       source: "simulated",
+      ownerAccountId,
       events: this.events,
     });
     this.runtimes.set(DEMO_SHOW_ID, rt);
     await rt.init();
+    // The row outlives the process, so a demo row written before this argument
+    // existed — or by a previous run under a different account — keeps its old
+    // owner unless we say otherwise. An owned demo is the only kind that can be
+    // driven now that an ownerless show refuses writes.
+    if (ownerAccountId) {
+      await db().query("UPDATE shows SET owner_account_id = $2 WHERE id = $1", [DEMO_SHOW_ID, ownerAccountId]);
+      await rt.loadOwner();
+    }
     await rt.start();
     if (!this.activeShowId) this.activeShowId = DEMO_SHOW_ID;
     return rt;
@@ -234,11 +243,17 @@ export class ShowRegistry {
   }
 
   /**
-   * The show a console lands on with no showId, or null when there is none.
+   * The last show attached or activated in THIS PROCESS, or null.
    *
-   * Falls forward to any other watched show rather than to a fixed id: after a
-   * detach the operator is far more likely to want the show still on air than
-   * an error about the one they just closed.
+   * Process-global and therefore NOT an answer to "which show is the caller
+   * asking about" — it was, and that was a cross-tenant read: a signed-in
+   * seller with no show of their own read whichever show the box happened to
+   * be running, because `get()` fell back to it. Nothing account-facing may
+   * use this. `activeFor(ownerId)` is the account-scoped question, and it is
+   * the only one the API layer is allowed to ask.
+   *
+   * What is left for it: the registry's own bookkeeping (a detach clears it),
+   * and `POST /api/shows/:id/activate`, which is already ownership-checked.
    */
   get active(): string | null {
     if (this.activeShowId && this.runtimes.has(this.activeShowId)) return this.activeShowId;
@@ -253,14 +268,22 @@ export class ShowRegistry {
     return shows.find((s) => s.showId === showId)!;
   }
 
-  get(showId?: string | null): ShowRuntime {
-    const id = showId || this.active;
+  /**
+   * The runtime for a show, named explicitly.
+   *
+   * The id is REQUIRED. It used to be optional and fell back to `this.active`,
+   * which is what made every unscoped read serve whichever show was attached
+   * last on the whole box. There is no "the" show any more: a caller who has
+   * not named one is asking about an account, and that question is
+   * `activeFor`.
+   */
+  get(showId: string): ShowRuntime {
     // Two different failures, and the console renders them differently: no show
     // at all sends the operator to Shows to start one; a show it cannot find is
     // a stale link.
-    if (!id) throw new Error("no show is being monitored — paste an eBay Live link on Shows to start one");
-    const rt = this.runtimes.get(id);
-    if (!rt) throw new Error(`show ${id} is not being watched`);
+    if (!showId) throw new Error("no show is being monitored — paste an eBay Live link on Shows to start one");
+    const rt = this.runtimes.get(showId);
+    if (!rt) throw new Error(`show ${showId} is not being watched`);
     return rt;
   }
 
@@ -287,12 +310,24 @@ export class ShowRegistry {
     for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
   }
 
-  /** The account's newest live show, or none when it has none. */
-  activeFor(ownerId: string | null | undefined): string | undefined {
+  /**
+   * The account's newest live show, or none when it has none.
+   *
+   * `includeOwnerless` is the legacy allowance, and it is off for anything
+   * that writes. Rows older than ownership belong to nobody and stay VISIBLE
+   * to everyone — a seller must not lose their own history to a column that
+   * did not exist when the row was written — but "nobody's" cannot mean
+   * "anybody may drive it", and with no showId to check the ownership
+   * preHandler never sees the question. So the answer is given here instead:
+   * a caller who is about to change something is only ever handed a show that
+   * is theirs.
+   */
+  activeFor(ownerId: string | null | undefined, opts: { includeOwnerless?: boolean } = {}): string | undefined {
     if (!ownerId) return undefined;
-    // Rows older than ownership belong to nobody and stay visible to everyone;
-    // every show attached since has exactly one owner.
-    const mine = [...this.runtimes.values()].filter((rt) => rt.ownerAccountId === ownerId || rt.ownerAccountId === null);
+    const ownerless = opts.includeOwnerless ?? true;
+    const mine = [...this.runtimes.values()].filter(
+      (rt) => rt.ownerAccountId === ownerId || (ownerless && rt.ownerAccountId === null),
+    );
     return mine.length ? mine[mine.length - 1]!.showId : undefined;
   }
 

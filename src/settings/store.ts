@@ -21,7 +21,7 @@
 
 import type { Pool } from "../db/pg.js";
 import {
-  DEFAULT_POLICY, setPolicy, type SellerGuardrailPolicy,
+  DEFAULT_POLICY, type SellerGuardrailPolicy,
   toContentGuardrails, toActionPolicy,
 } from "../guardrails/policy.js";
 
@@ -162,10 +162,13 @@ export class SettingsStore {
     );
   }
 
-  /** Re-arm Layer B for this process. The next reply drafted is checked by it. */
-  activate(p: SellerGuardrailPolicy): void {
-    setPolicy(p);
-  }
+  // `activate(p)` used to live here: `setPolicy(p)`, a PROCESS-global write,
+  // called on a per-account save. The per-request `policyScope` was the only
+  // thing that made it correct, so every path that is not inside a request —
+  // and every request whose scope failed to load — read the last writer's
+  // guardrails. Arming is per scope now (src/api/routes.ts), and the process
+  // default stays the shipped one. `setPolicy` remains a test seam in
+  // guardrails/policy.ts and has no caller in the product.
 
   /** One seller's merged policy, cached a minute; `persist` invalidates. */
   private perAccount = new Map<string, { p: SellerGuardrailPolicy; at: number }>();

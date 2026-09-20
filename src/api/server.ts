@@ -17,7 +17,18 @@ export async function buildApp(): Promise<{ app: FastifyInstance; ctx: AppContex
   // `forceCloseConnections` because this server's main transport is SSE, and an
   // SSE connection never ends on its own: without it a shutdown hangs for as
   // long as any console is open, which also hung the test suite.
-  const app = Fastify({ logger: false, forceCloseConnections: true });
+  const app = Fastify({
+    logger: false,
+    forceCloseConnections: true,
+    // Exactly ONE hop. The deployment is Caddy in front of this process
+    // (deploy/Caddyfile), so the address that matters is the one Caddy
+    // appended to `x-forwarded-for` — with `true` Fastify would take the
+    // LEFTMOST entry, which is whatever the client wrote there, and a rate
+    // limit keyed on a header the attacker controls is not a rate limit.
+    // With no proxy and no header this is the socket address, unchanged.
+    // (`hop === 0` is "trust only the machine we are actually talking to".)
+    trustProxy: (_address: string, hop: number) => hop === 0,
+  });
 
   // The console is served from a different origin in development. Commands are
   // idempotent-by-key or explicitly confirmed, and there is no cookie auth to

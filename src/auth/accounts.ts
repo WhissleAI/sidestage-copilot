@@ -16,6 +16,7 @@
 
 import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
+import { Gate } from "../api/rateLimit.js";
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: string, len: number, opts: { N: number; r: number; p: number; maxmem: number }) => Promise<Buffer>;
 
@@ -23,15 +24,35 @@ const scrypt = promisify(scryptCb) as (pw: string, salt: string, len: number, op
  *  the parameters travel in the hash so they can be raised later without a
  *  reset. `maxmem` is explicit: Node refuses anything past 32 MB by default. */
 const SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 128 * 1024 * 1024 };
+
+/**
+ * How many password hashes may be in flight AT ONCE, process-wide.
+ *
+ * 16 MB each, run before the caller is authenticated, in a container capped at
+ * 1100 MB: seventy concurrent logins from one unauthenticated caller took the
+ * process out, and `restart: unless-stopped` served up the next seventy. Rate
+ * limiting bounds arrivals and does not bound this — seventy in flight is the
+ * same 1.1 GB whether they arrived over a second or a minute.
+ *
+ * Six slots is ~96 MB of scrypt at the worst moment and about sixty hashes a
+ * second, which no real sign-in rate comes near. Past `maxWaiting` the request
+ * is refused rather than queued: an unbounded queue is the same leak with a
+ * longer fuse.
+ */
+export const scryptGate = new Gate(6, 64);
+
+const hash = (pw: string, salt: string, opts: { N: number; r: number; p: number; maxmem: number }) =>
+  scryptGate.run(() => scrypt(pw, salt, 64, opts));
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16).toString("hex");
-  const key = await scrypt(password, salt, 64, SCRYPT);
+  const key = await hash(password, salt, SCRYPT);
   return `scrypt$${SCRYPT.N}$${salt}$${key.toString("hex")}`;
 }
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   const [algo, n, salt, hex] = stored.split("$");
   if (algo !== "scrypt" || !salt || !hex) return false;
-  const key = await scrypt(password, salt, 64, { ...SCRYPT, N: Number(n) || SCRYPT.N });
+  const key = await hash(password, salt, { ...SCRYPT, N: Number(n) || SCRYPT.N });
   const want = Buffer.from(hex, "hex");
   return key.length === want.length && timingSafeEqual(key, want);
 }
@@ -57,6 +78,17 @@ export interface Session {
   token: string;
   account: Account;
   expiresAt: string;
+  /** Set on a session that may only act on ONE show — the audio bridge's.
+   *  Null/absent on a console session, which is every row written before
+   *  migration 025. */
+  scopeShowId?: string | null;
+}
+
+/** A resolved token: who, and how far it reaches. */
+export interface Resolved {
+  account: Account;
+  /** The show this token is confined to, or null for a console session. */
+  scopeShowId: string | null;
 }
 
 /** How long a console session lives before it has to be re-minted. */
@@ -120,15 +152,42 @@ export class Accounts {
   }
 
   /**
+   * A session that can do ONE thing, for one show, for an hour.
+   *
+   * The audio bridge is a bare HTML page in a tab: it cannot carry a bearer
+   * header, so its token rides in the URL — the address bar, the history, and
+   * whatever the operator copies when they send the link to their other
+   * machine. Handing it the console session put a thirty-day key to the whole
+   * account there. This is what belongs in a URL instead: minted by the show's
+   * owner, accepted only on that show's audio and visual ingest, and gone in
+   * an hour whether or not anyone remembers it.
+   */
+  async openBridgeSession(account: Account, showId: string, minutes = 60): Promise<Session> {
+    const token = `sbt_${randomBytes(24).toString("hex")}`;
+    const expiresAt = new Date(Date.now() + minutes * 60_000).toISOString();
+    await this.d.query(
+      "INSERT INTO auth_sessions (token, account_id, expires_at, scope_show_id) VALUES ($1, $2, $3, $4)",
+      [token, account.id, expiresAt, showId],
+    );
+    return { token, account, expiresAt, scopeShowId: showId };
+  }
+
+  /**
    * Resolve a bearer token to an account, or null.
    *
    * Expiry is enforced in the QUERY rather than in JavaScript: a check the
    * database performs cannot be skipped by a caller that forgot to run it.
    */
   async resolve(token: string | null): Promise<Account | null> {
+    return (await this.resolveSession(token))?.account ?? null;
+  }
+
+  /** As `resolve`, and says how far the token reaches. The API layer needs
+   *  both: who is asking, and whether this token may ask THIS. */
+  async resolveSession(token: string | null): Promise<Resolved | null> {
     if (!token) return null;
-    const r = await this.d.query<AccountRow>(
-      `SELECT a.* FROM auth_sessions s
+    const r = await this.d.query<AccountRow & { scope_show_id: string | null }>(
+      `SELECT a.*, s.scope_show_id FROM auth_sessions s
        JOIN accounts a ON a.id = s.account_id
        WHERE s.token = $1 AND s.expires_at > now()`,
       [token],
@@ -136,11 +195,68 @@ export class Accounts {
     if (!r.rows[0]) return null;
     // Best-effort liveness, never on the critical path of the answer.
     void this.d.query("UPDATE auth_sessions SET last_seen = now() WHERE token = $1", [token]).catch(() => {});
-    return toAccount(r.rows[0]);
+    return { account: toAccount(r.rows[0]), scopeShowId: r.rows[0].scope_show_id ?? null };
   }
 
   async endSession(token: string): Promise<void> {
     await this.d.query("DELETE FROM auth_sessions WHERE token = $1", [token]);
+  }
+
+  /**
+   * End every session this account has, except (optionally) the one asking.
+   *
+   * "Sign out everywhere" is the only answer to a token that has left the
+   * building — a bridge URL pasted into a chat, a laptop left on a train — and
+   * until now there was none: `logout` deleted exactly one token and a session
+   * lives thirty days with no idle timeout.
+   */
+  async endAllSessions(accountId: string, exceptToken?: string | null): Promise<number> {
+    const r = exceptToken
+      ? await this.d.query("DELETE FROM auth_sessions WHERE account_id = $1 AND token <> $2", [accountId, exceptToken])
+      : await this.d.query("DELETE FROM auth_sessions WHERE account_id = $1", [accountId]);
+    return r.rowCount ?? 0;
+  }
+
+  /**
+   * Change a password, and cut every other session loose.
+   *
+   * The current password is required: a stolen TOKEN must not be enough to
+   * take the account, or "sign out everywhere" would be a gift to whoever got
+   * there first. Sessions other than the caller's go at the same moment,
+   * because changing a password one believes to be compromised and leaving the
+   * thief signed in is the shape of the bug people actually hit.
+   */
+  async changePassword(
+    accountId: string, currentPassword: string, newPassword: string, keepToken?: string | null,
+  ): Promise<{ sessionsEnded: number }> {
+    if (newPassword.length < 8) throw new AuthError("use at least 8 characters for the password");
+    const r = await this.d.query<{ password_hash: string | null }>(
+      "SELECT password_hash FROM accounts WHERE id = $1", [accountId],
+    );
+    const stored = r.rows[0]?.password_hash;
+    // Same message either way, same as login: which half was wrong is not
+    // information to hand out.
+    if (!stored || !(await verifyPassword(currentPassword, stored))) {
+      throw new AuthError("that is not the current password", 401);
+    }
+    await this.d.query("UPDATE accounts SET password_hash = $2 WHERE id = $1", [
+      accountId, await hashPassword(newPassword),
+    ]);
+    return { sessionsEnded: await this.endAllSessions(accountId, keepToken) };
+  }
+
+  /**
+   * Delete sessions that have already expired.
+   *
+   * `resolve` has always enforced expiry in the QUERY, so an expired row was
+   * never usable — but nothing ever removed one, so the table only grew, and a
+   * seller asking "what is signed in" would have been answered with years of
+   * dead rows. Cheap, indexed by the primary key scan we already pay for, and
+   * safe to run on a timer.
+   */
+  async pruneExpiredSessions(): Promise<number> {
+    const r = await this.d.query("DELETE FROM auth_sessions WHERE expires_at <= now()");
+    return r.rowCount ?? 0;
   }
 }
 

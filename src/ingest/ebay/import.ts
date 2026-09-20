@@ -19,7 +19,7 @@
 // everywhere downstream. A production build would write to the seller's account
 // instead and nothing else would change.
 
-import { writeCatalogFile } from "../../shows/catalogs.js";
+import { catalogPath, writeCatalogFile } from "../../shows/catalogs.js";
 import { join } from "node:path";
 import { config } from "../../config.js";
 import type { Catalog } from "../../shows/catalogs.js";
@@ -205,7 +205,7 @@ export async function importSellerListings(opts: {
     items: catalogItems,
   };
 
-  const path = join(config.catalogsDir, `${opts.catalogId}.json`);
+  const path = catalogPath(opts.catalogId);
   // The same atomic, directory-creating write every other catalog write uses:
   // an import that truncates a file a live show is reading is the same hazard
   // here as anywhere else, and CATALOGS_DIR may not exist yet.

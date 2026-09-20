@@ -20,6 +20,30 @@ import type { Comp, PolicyClause } from "../domain/types.js";
 import { importCatalog, type CatalogItem, type ImportResult } from "./catalogImport.js";
 
 /**
+ * A catalog id is a FILE NAME. Anything that is not one is not an id.
+ *
+ * Every function below joins the id into `config.catalogsDir` and reads or
+ * truncates whatever it lands on, and two routes took the id from a request
+ * body: `POST /api/catalogs/:id/qa` and `POST /api/ebay/import`. An id of
+ * `../../data/something` walked out of the catalogs directory and overwrote a
+ * file that has nothing to do with catalogs. The shape is checked HERE, at the
+ * path join, rather than in the routes — a route can be added without knowing
+ * this rule exists, and a path join cannot.
+ */
+export const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export function isSafeCatalogId(id: string): boolean {
+  // A leading dot is excluded by the pattern, so `..` cannot be spelled at all.
+  return typeof id === "string" && CATALOG_ID.test(id) && !id.includes("..");
+}
+
+/** The file this catalog lives in. Throws rather than returning a path when
+ *  the id is not a name, so no caller can accidentally act on the answer. */
+export function catalogPath(id: string): string {
+  if (!isSafeCatalogId(id)) throw new Error(`"${String(id).slice(0, 40)}" is not a catalog id`);
+  return join(config.catalogsDir, `${id}.json`);
+}
+
+/**
  * Write a catalog file so a reader never sees half of one.
  *
  * Every write here is a read-modify-write of a whole JSON document, and
@@ -164,7 +188,7 @@ export function getCatalog(id: string): Catalog | null {
 
 /** Record the agent `seed:agent` provisioned for a catalog, back into its file. */
 export function setCatalogAgent(catalogId: string, agentId: string): void {
-  const path = join(config.catalogsDir, `${catalogId}.json`);
+  const path = catalogPath(catalogId);
   if (!existsSync(path)) return;
   const raw = JSON.parse(readFileSync(path, "utf8")) as Catalog;
   raw.agentId = agentId;
@@ -183,7 +207,7 @@ export function addCatalogQa(
   catalogId: string,
   entry: { question: string; answer: string; tags?: string; fromShowId?: string },
 ): CatalogQa | null {
-  const path = join(config.catalogsDir, `${catalogId}.json`);
+  const path = catalogPath(catalogId);
   if (!existsSync(path)) return null;
   const raw = JSON.parse(readFileSync(path, "utf8")) as Catalog;
   const qa = Array.isArray(raw.qa) ? raw.qa : [];
@@ -219,7 +243,7 @@ export function addCatalogQa(
  * to the seller's account instead; this is the same call either way.
  */
 export function addCatalogFile(c: Catalog): string {
-  const path = join(config.catalogsDir, `${c.id}.json`);
+  const path = catalogPath(c.id);
   writeCatalogFile(path, JSON.stringify(c, null, 2) + "\n");
   cache = null;
   return path;
@@ -227,7 +251,7 @@ export function addCatalogFile(c: Catalog): string {
 
 /** Remove a catalog we created. Only ever called on one of ours. */
 export function removeCatalogFile(id: string): void {
-  const path = join(config.catalogsDir, `${id}.json`);
+  const path = catalogPath(id);
   if (existsSync(path)) rmSync(path);
   cache = null;
 }
