@@ -201,7 +201,7 @@ function liveReader(budgetMs: number): { read: BrowseReader; close: () => Promis
   const deadline = Date.now() + budgetMs;
 
   const open = async () => {
-    const { ctx, close } = await openContext({ headless: true, userAgent: UA, ebaySession: false });
+    const { ctx, close } = await openContext({ headless: true, userAgent: UA, ebaySession: false, purpose: "whatnot-browse" });
     // Images, fonts and video are most of the bytes on a grid of thumbnails and
     // none of the data — and on a two-gigabyte box they are also most of the
     // renderer's memory.

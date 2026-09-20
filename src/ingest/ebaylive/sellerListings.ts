@@ -74,7 +74,7 @@ export async function resolveSellerUsername(slug: string): Promise<string | null
 }
 
 async function resolveUnlocked(slug: string, key: string): Promise<string | null> {
-  const { ctx, close } = await openContext({ headless: true, userAgent: UA });
+  const { ctx, close } = await openContext({ headless: true, userAgent: UA, purpose: "ebay-seller-listings" });
   try {
     const page = ctx.pages()[0] ?? (await ctx.newPage());
     await page.goto(`https://www.ebay.com/ebaylive/sellers/${encodeURIComponent(slug)}`, {
@@ -103,7 +103,7 @@ export async function sellerListings(username: string, limit = 120): Promise<Eba
 }
 
 async function listingsUnlocked(username: string, key: string, limit: number): Promise<EbayListing[]> {
-  const { ctx, close } = await openContext({ headless: true, userAgent: UA });
+  const { ctx, close } = await openContext({ headless: true, userAgent: UA, purpose: "ebay-seller-listings" });
   try {
     const page = ctx.pages()[0] ?? (await ctx.newPage());
     await ctx.route("**/*", (r) => {

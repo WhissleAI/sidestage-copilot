@@ -37,6 +37,29 @@ export const config = {
   catalogsDir: resolve(process.env.CATALOGS_DIR || "./fixtures/catalogs"),
   /** Each watched show costs a browser page; cap it. */
   maxWatchedShows: num("MAX_WATCHED_SHOWS", 6),
+  /**
+   * Watched rooms on a surface that owns a WHOLE BROWSER each.
+   *
+   * `MAX_WATCHED_SHOWS` counts sessions, and six sessions is a sensible
+   * number of sessions — but six Whatnot rooms is six real Chromes, because
+   * `scrapeWatcher.ts` launches its own (and says so, at :88-99). On the
+   * t3.small this runs on, `mem_limit: 1100m` holds Node plus every browser,
+   * and Chrome with one page is 150–300 MB. Six is an OOM kill that takes
+   * every other show with it; two leaves room for the eBay discovery poll and
+   * a Whatnot browse without the container dying.
+   */
+  maxScrapedRooms: num("MAX_SCRAPED_ROOMS", 2),
+  /**
+   * The hard ceiling on real Chrome processes, across every purpose.
+   *
+   * Four launch families share one box and none of them could see the others.
+   * This is the number the worst case is READ off, rather than derived from
+   * four call sites: two scraped rooms + the shared eBay Live browser + one
+   * eBay profile read (discovery, seller listings, prepare — they queue) + one
+   * Whatnot browse, with one spare so a recovery can open before its
+   * predecessor has finished closing.
+   */
+  maxBrowsers: num("MAX_BROWSERS", 6),
 
   whissle: {
     apiKey: process.env.WHISSLE_API_KEY || "",

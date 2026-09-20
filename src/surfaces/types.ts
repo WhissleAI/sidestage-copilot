@@ -161,6 +161,26 @@ export interface SurfaceEvents {
 export interface SurfaceConnection { stop(): Promise<void>; }
 
 /**
+ * Does watching one room on this surface cost a WHOLE Chrome process?
+ *
+ * Stated once, here, because it is the term that dominates the box's worst
+ * case and it was previously only derivable by reading four launchers.
+ *  - `ebaylive` drives a browser but SHARES one Chromium across every show it
+ *    watches (`watcher.ts` refcounts it), so the second eBay show is free.
+ *  - `whatnot` and `tiktoklive` go through `scrapeWatcher.ts`, which says so
+ *    at :88-99: "a second watched Whatnot room is a second Chrome."
+ *  - `twitch`, `reddit`, `dm` and `simulated` are HTTP and websockets.
+ *
+ * A new scraped surface must be added here deliberately, which is the point:
+ * the alternative is that the seventh surface silently makes the ceiling wrong.
+ */
+const OWNS_A_BROWSER: ReadonlySet<SurfaceId> = new Set<SurfaceId>(["whatnot", "tiktoklive"]);
+
+export function ownsABrowser(surface: SurfaceId): boolean {
+  return OWNS_A_BROWSER.has(surface);
+}
+
+/**
  * The surface exists, we know how to talk to it, and we cannot right now.
  *
  * A typed error rather than a generic one because the operator's next move

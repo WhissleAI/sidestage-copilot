@@ -162,6 +162,9 @@ export class ScrapedPageWatcher {
       userAgent: this.spec.userAgent ?? UA,
       viewport: { width: 1280, height: 900 },
       ebaySession: false,
+      // Named per surface, because this is the family that costs a whole
+      // browser per room and /health has to be able to say which rooms.
+      purpose: `room:${this.spec.surface}`,
     });
     this.ctx = opened.ctx;
     this.close = opened.close;

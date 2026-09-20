@@ -61,7 +61,7 @@ async function withBrowserUnlocked<T>(fn: (ctx: BrowserContext) => Promise<T>, h
   // Real Chrome either way — from the persistent profile on a developer's
   // machine, or from the exported state on a server. See `openContext`: the
   // bundled headless shell is exactly what eBay Live refuses to stream to.
-  const { ctx, close } = await openContext({ headless, userAgent: UA });
+  const { ctx, close } = await openContext({ headless, userAgent: UA, purpose: "ebay-discovery" });
   try {
     // Images and fonts are most of the bytes on this page and none of the data.
     await ctx.route("**/*", (r) => {
