@@ -27,6 +27,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { basename } from "node:path";
 import { dirname, join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext } from "playwright";
+import { takeBrowser, type BrowserLease } from "../../surfaces/browserBudget.js";
 
 const PATH = resolve(process.env.EBAY_SESSION_PATH || "./data/ebay-session.json");
 /** The persistent browser profile `npm run ebay:signin` signs into. Preferred
@@ -142,7 +143,35 @@ export async function openContext(o: {
    * the shm flag and the real-Chrome channel, and they keep all three.
    */
   ebaySession?: boolean;
+  /** What this browser is FOR, as it appears in the budget and in /health:
+   *  "ebay-discovery", "ebay-watcher", "whatnot-browse", "room:whatnot". */
+  purpose?: string;
 }): Promise<{ ctx: BrowserContext; close: () => Promise<void> }> {
+  // Every real Chrome in this process is launched from here, so this is the
+  // one place that can honestly say how many are open. Taken BEFORE the
+  // launch and released by `close()`, whichever of the two paths below built
+  // it — a refusal is an error a route can put in a response, which is the
+  // whole difference between degrading and being OOM-killed while holding six
+  // browsers.
+  const lease = takeBrowser(o.purpose ?? (o.ebaySession === false ? "scrape" : "ebay-profile"));
+  try {
+    return await launchContext(o, lease);
+  } catch (e) {
+    lease.release();
+    throw e;
+  }
+}
+
+async function launchContext(
+  o: {
+    headless: boolean;
+    userAgent: string;
+    viewport?: { width: number; height: number };
+    ebaySession?: boolean;
+    purpose?: string;
+  },
+  lease: BrowserLease,
+): Promise<{ ctx: BrowserContext; close: () => Promise<void> }> {
   const viewport = o.viewport ?? { width: 1440, height: 1200 };
   const args = [
     "--disable-blink-features=AutomationControlled",
@@ -163,7 +192,7 @@ export async function openContext(o: {
         ...(proxy ? { proxy } : {}),
       });
     const ctx = await persistent("chrome").catch(() => persistent());
-    return { ctx, close: () => closeAll(ctx) };
+    return { ctx, close: () => closeAll(ctx).finally(() => lease.release()) };
   }
   const launch = (channel?: "chrome") =>
     chromium.launch({ headless: o.headless, args, ...(channel ? { channel } : {}), ...(proxy ? { proxy } : {}) });
@@ -173,7 +202,7 @@ export async function openContext(o: {
     viewport, userAgent: o.userAgent,
     ...(state ? { storageState: state as never } : {}),
   });
-  return { ctx, close: () => closeAll(ctx, browser) };
+  return { ctx, close: () => closeAll(ctx, browser).finally(() => lease.release()) };
 }
 
 /**

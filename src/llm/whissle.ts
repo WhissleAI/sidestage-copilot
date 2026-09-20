@@ -23,6 +23,7 @@
 import { config } from "../config.js";
 import { LlmError, type LlmPort } from "./types.js";
 import { meter, type GatewayDoor } from "./meter.js";
+import { gatewayFetch } from "../net/http.js";
 
 export interface WhissleOpts {
   apiKey: string;
@@ -240,7 +241,7 @@ export class WhissleClient implements LlmPort {
     const form = new FormData();
     form.append("file", new Blob([content], { type: mime }), filename);
     const t0 = performance.now();
-    const r = await fetch(`${this.base}/api/agents/${this.o.agentId}/kb/upload`, {
+    const r = await gatewayFetch(`${this.base}/api/agents/${this.o.agentId}/kb/upload`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.o.apiKey}` },
       body: form,

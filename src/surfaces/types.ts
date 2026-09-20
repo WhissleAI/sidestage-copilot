@@ -145,9 +145,40 @@ export interface SurfaceEvents {
   }): void;
   onViewers?(n: number): void;
   onEnded?(why: string): void;
+  /**
+   * The watcher has stopped trying, and the room did not end.
+   *
+   * Distinct from `onEnded` on purpose, and the distinction is the whole
+   * point: `onEnded` means the show is over and the session should be
+   * finished; this means WE gave up while the show is very probably still
+   * running. Conflating them would write a report for a show that is still on
+   * air. Keeping them apart is what lets "it stopped answering mid-show"
+   * become a row rather than a conversation with the seller.
+   */
+  onGaveUp?(g: { reason: string; detail: string; reloads?: number; quietMs?: number }): void;
 }
 
 export interface SurfaceConnection { stop(): Promise<void>; }
+
+/**
+ * Does watching one room on this surface cost a WHOLE Chrome process?
+ *
+ * Stated once, here, because it is the term that dominates the box's worst
+ * case and it was previously only derivable by reading four launchers.
+ *  - `ebaylive` drives a browser but SHARES one Chromium across every show it
+ *    watches (`watcher.ts` refcounts it), so the second eBay show is free.
+ *  - `whatnot` and `tiktoklive` go through `scrapeWatcher.ts`, which says so
+ *    at :88-99: "a second watched Whatnot room is a second Chrome."
+ *  - `twitch`, `reddit`, `dm` and `simulated` are HTTP and websockets.
+ *
+ * A new scraped surface must be added here deliberately, which is the point:
+ * the alternative is that the seventh surface silently makes the ceiling wrong.
+ */
+const OWNS_A_BROWSER: ReadonlySet<SurfaceId> = new Set<SurfaceId>(["whatnot", "tiktoklive"]);
+
+export function ownsABrowser(surface: SurfaceId): boolean {
+  return OWNS_A_BROWSER.has(surface);
+}
 
 /**
  * The surface exists, we know how to talk to it, and we cannot right now.

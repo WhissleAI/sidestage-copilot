@@ -37,6 +37,7 @@
 //                          show watcher stay where they are.
 
 import { config } from "../../config.js";
+import { ebayFetch } from "../../net/http.js";
 
 const HOST = {
   sandbox: { api: "https://api.sandbox.ebay.com", auth: "https://auth.sandbox.ebay.com" },
@@ -123,7 +124,11 @@ export class EbayClient {
   constructor(
     private readonly creds = config.ebay,
     /** Injected so the suite can exercise this without a network. */
-    private readonly fetcher: Fetcher = fetch,
+    // Defaulted to the deadline-carrying client, not bare `fetch`: Node's
+    // has no request timeout, so an eBay host that stops answering held a
+    // Fastify connection for undici's five-minute body timeout. A test that
+    // injects its own fetcher is unaffected, which is the point of the seam.
+    private readonly fetcher: Fetcher = ebayFetch,
   ) {}
 
   get configured(): boolean {

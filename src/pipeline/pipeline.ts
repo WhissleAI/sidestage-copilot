@@ -51,6 +51,8 @@ import { ActionProposer } from "../actions/proposer.js";
 import type { AuditLog } from "../actions/audit.js";
 import { isOverBudget } from "../llm/budget.js";
 import { answeredRate } from "../shows/metrics.js";
+import { recordEvent } from "../obs/events.js";
+import { logSwallowed, errText } from "../obs/log.js";
 
 export interface PipelineEvents {
   onChat(m: ChatMessage): void;
@@ -962,7 +964,23 @@ export class Pipeline {
       if (action.status !== "proposed" && action.status !== "preflight_failed") continue;
       const disposition = decideAction(level, p.kind, action.preflight.ok);
       if (disposition.kind === "auto_commit") {
-        await this.d.executor.approve(action.id, "copilot").catch(() => {});
+        // The ladder decided to act without asking. A swallowed failure here
+        // is the worst kind this file can produce: the seller is told the
+        // copilot is acting on their behalf, the listing does not change, and
+        // nothing anywhere says the commit refused. Still swallowed — one
+        // failed action must not stop the loop evaluating the next — but no
+        // longer silent.
+        await this.d.executor.approve(action.id, "copilot").catch((e) => {
+          logSwallowed("action.auto_commit_failed", e, {
+            showId: this.d.repo.showId, actionId: action.id, kind: p.kind,
+          });
+          void recordEvent({
+            showId: this.d.repo.showId,
+            kind: "action.auto_commit_failed",
+            level: "error",
+            detail: { actionId: action.id, action: p.kind, why: errText(e) },
+          });
+        });
       }
     }
   }

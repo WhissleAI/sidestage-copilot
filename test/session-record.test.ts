@@ -1,8 +1,17 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { db, migrate } from "../src/db/pg.js";
+import { db, migrate, closeDb } from "../src/db/pg.js";
 import { SessionRecord } from "../src/shows/sessionRecord.js";
 import type { ReplyProposal } from "../src/domain/types.js";
+
+// This file used to take THIRTY-ONE SECONDS for a test body of about 820ms —
+// roughly 95% of the whole suite's wall time — because it opened a pool and
+// never closed it. Nothing was wrong with the test: the pool's idle clients sit
+// for `idleTimeoutMillis` (30s, src/db/pg.ts) before they are reaped, and the
+// runner cannot exit while a handle is open. Every other file that touches the
+// database goes through `test/helpers.ts`, whose `cleanup()` closes the pool in
+// an `after`; this one built its own and had no `after` to close it.
+after(async () => closeDb());
 
 // The proposal write is fire-and-forget, so nothing upstream ever noticed
 // when it started failing. This test notices: a settled proposal must land as

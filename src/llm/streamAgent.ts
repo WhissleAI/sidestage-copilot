@@ -27,6 +27,7 @@ import { config } from "../config.js";
 import { systemPrompt } from "./agentSpec.js";
 import { policy, toContentGuardrails, toActionPolicy } from "../guardrails/policy.js";
 import type { SellerProfile } from "../shows/catalogs.js";
+import { gatewayFetch } from "../net/http.js";
 
 export interface StreamAgentSpec {
   showId: string;
@@ -51,7 +52,7 @@ export function scoringPrompt(s: StreamAgentSpec): string {
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const r = await fetch(`${config.whissle.base}${path}`, {
+  const r = await gatewayFetch(`${config.whissle.base}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${config.whissle.apiKey}`,

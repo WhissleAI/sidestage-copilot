@@ -20,6 +20,8 @@
 // into the same `ChatSource` port the simulated source uses.
 
 import { chromium, type Browser, type Page } from "playwright";
+import { takeBrowser, type BrowserLease } from "../../surfaces/browserBudget.js";
+import { logSwallowed } from "../../obs/log.js";
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -52,6 +54,9 @@ export interface WatcherEvents {
   onStatus?: (s: { connected: boolean; detail: string }) => void;
   /** The show has gone quiet for long enough that it is over. Fired once. */
   onEnded?: (why: string) => void;
+  /** We stopped trying and the show did NOT end. Fired once. See
+   *  `SurfaceEvents.onGaveUp` for why this is not `onEnded`. */
+  onGaveUp?: (g: { reason: string; detail: string; reloads?: number; quietMs?: number }) => void;
 }
 
 export interface WatcherOpts extends WatcherEvents {
@@ -77,9 +82,15 @@ const MAX_RELOADS = 20;
 /** Shared browser across every watched show — one Chromium, N pages. */
 let shared: Browser | null = null;
 let refCount = 0;
+/** The budget slot the shared browser holds while it is alive. One slot for
+ *  the whole family, because it is one process however many shows use it. */
+let sharedLease: BrowserLease | null = null;
 
 async function acquireBrowser(headless: boolean): Promise<Browser> {
   if (!shared) {
+    // Taken before the launch, so a box that cannot afford another Chrome
+    // refuses the attach rather than being OOM-killed with six open.
+    sharedLease = takeBrowser("ebay-watcher");
     // Real Chrome first, the bundled build only where there is none. On the
     // deployed box Playwright's headless shell crashed its renderer on EVERY
     // player page ("Target crashed", measured 2026-09-15 on two live shows)
@@ -115,6 +126,10 @@ async function acquireBrowser(headless: boolean): Promise<Browser> {
     shared.on("disconnected", () => {
       shared = null;
       refCount = 0;
+      // The process is gone; the slot it held must go with it, or the budget
+      // counts a browser that does not exist and refuses a real one later.
+      sharedLease?.release();
+      sharedLease = null;
       console.warn("  ebaylive: Chromium disconnected — relaunching on the next tick");
     });
   }
@@ -127,8 +142,17 @@ async function releaseBrowser(): Promise<void> {
   if (refCount === 0 && shared) {
     const b = shared;
     shared = null;
-    await b.close().catch(() => {});
+    const lease = sharedLease;
+    sharedLease = null;
+    await b.close().catch((e) => logSwallowed("ebaylive.shared_browser_close_failed", e));
+    lease?.release();
   }
+}
+
+/** What the refcount thinks. Exported so a test can assert the pairing the
+ *  recovery path used to break, without driving a real browser. */
+export function sharedBrowserRefCount(): number {
+  return refCount;
 }
 
 export class EbayLiveWatcher {
@@ -146,6 +170,8 @@ export class EbayLiveWatcher {
   private lastCommentAt = Date.now();
   private lastActivityAt = Date.now();
   private reloads = 0;
+  /** Said once; see the give-up branch in `watchdog`. */
+  private gaveUp = false;
 
   constructor(private o: WatcherOpts) {
     this.pollMs = o.pollMs ?? 1000;
@@ -165,7 +191,7 @@ export class EbayLiveWatcher {
       if (!/crash|Target closed|disconnected/i.test(String((e as Error).message))) throw e;
       await this.page?.context().close().catch(() => {});
       this.page = null;
-      await releaseBrowser();
+      await this.releasePage();
       await this.openPage();
     }
 
@@ -185,8 +211,30 @@ export class EbayLiveWatcher {
 
   /** Build a fresh context + page on the shared browser. Called on start and
    *  again whenever the page or the browser underneath it has died. */
+  /**
+   * Does THIS watcher currently hold a reference to the shared browser?
+   *
+   * The refcount used to be paired by call site, and `recoverIfDead` was the
+   * call site that forgot: it called `openPage()` — and so `acquireBrowser()`
+   * — with no matching release, so every renderer crash-and-recover (routine
+   * on this box) permanently raised the count. After the first recovery,
+   * `stop()` on the last show left it above zero and the shared Chromium was
+   * never closed: an idle server holding a Chrome for a show that ended hours
+   * ago. Pairing per WATCHER instead of per call site makes forgetting one
+   * impossible rather than merely fixed.
+   */
+  private holding = false;
+
+  /** Give this watcher's reference back, if it has one. Idempotent. */
+  private async releasePage(): Promise<void> {
+    if (!this.holding) return;
+    this.holding = false;
+    await releaseBrowser();
+  }
+
   private async openPage(): Promise<void> {
     const browser = await acquireBrowser(this.o.headless ?? true);
+    this.holding = true;
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: UA });
 
     // The page is a video app we never watch. Dropping media and images cuts
@@ -280,7 +328,15 @@ export class EbayLiveWatcher {
     const dead = !this.page || this.page.isClosed() || !this.page.context().browser()?.isConnected();
     if (!dead) return;
     try {
+      // The LEAK this fixes: `openPage()` calls `acquireBrowser()`, and this
+      // path had no matching release. Every renderer crash-and-recover — which
+      // the comments above say is routine on this box — permanently raised
+      // `refCount`, so after the first recovery `stop()` on the last show left
+      // it above zero and the shared Chromium was NEVER closed. An idle server
+      // held a Chrome for a show that ended hours ago. Give the old page's
+      // reference back before taking a new one.
       this.page = null;
+      await this.releasePage();
       await this.openPage();
       // Everything on screen after a relaunch is history, not new traffic.
       const backlog = await this.scrape();
@@ -314,7 +370,21 @@ export class EbayLiveWatcher {
       return;
     }
     if (quietMs < COMMENT_SILENCE_MS || activeMs > ACTIVITY_WINDOW_MS) return;
-    if (this.reloads >= MAX_RELOADS) return;
+    if (this.reloads >= MAX_RELOADS) {
+      // Twenty reloads have failed and this loop will never try again. Until
+      // now that was a bare `return`: the show sat looking connected and
+      // permanently mute, with no log, no status line and no row anywhere that
+      // it had given up. Said once, on the way out.
+      if (!this.gaveUp) {
+        this.gaveUp = true;
+        const detail =
+          `chat has not recovered after ${MAX_RELOADS} reloads — this watcher has stopped trying. ` +
+          `The show is still open; replies will not resume until it is re-attached.`;
+        this.o.onStatus?.({ connected: false, detail });
+        this.o.onGaveUp?.({ reason: "reload-limit", detail, reloads: this.reloads, quietMs });
+      }
+      return;
+    }
 
     this.reloads++;
     this.o.onStatus?.({
@@ -399,7 +469,7 @@ export class EbayLiveWatcher {
     this.timer = null;
     const ctx = this.page?.context();
     this.page = null;
-    await ctx?.close().catch(() => {});
-    await releaseBrowser();
+    await ctx?.close().catch((e) => logSwallowed("ebaylive.context_close_failed", e, { eventId: this.o.eventId }));
+    await this.releasePage();
   }
 }

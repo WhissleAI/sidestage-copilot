@@ -26,6 +26,7 @@ import type { ShowReport } from "./sessionRecord.js";
 import { resolve as resolveSurface } from "../surfaces/registry.js";
 import { isWaiting } from "../api/drafts.js";
 import type { SurfaceId } from "../surfaces/types.js";
+import { ownsABrowser } from "../surfaces/types.js";
 
 export const DEMO_SHOW_ID = "show_ep42";
 
@@ -136,6 +137,18 @@ export class ShowRegistry {
   /** Attaches in flight, so two callers for one show share one runtime
    *  instead of the second getting a half-built one out of the map. */
   private attaching = new Map<string, Promise<ShowRuntime>>();
+  /** Of those in flight, which need a browser of their own. Kept beside
+   *  `attaching` rather than derived, because the adapter is not recoverable
+   *  from a show id once the attach has been handed out. */
+  private scrapedAttaching = new Map<string, boolean>();
+
+  /** Watched rooms that cost a WHOLE Chrome each — started and starting. */
+  private scrapedRoomCount(): number {
+    let n = 0;
+    for (const rt of this.runtimes.values()) if (ownsABrowser(rt.surface)) n++;
+    for (const owns of this.scrapedAttaching.values()) if (owns) n++;
+    return n;
+  }
 
   async attach(
     input: string,
@@ -183,8 +196,32 @@ export class ShowRegistry {
     const inFlight = this.attaching.get(showId);
     if (inFlight) return inFlight;
 
-    if (this.runtimes.size >= config.maxWatchedShows) {
-      throw new Error(`already watching ${this.runtimes.size} shows (MAX_WATCHED_SHOWS=${config.maxWatchedShows})`);
+    // Both caps count what is STARTING as well as what has started.
+    //
+    // `runtimes` is populated only after `rt.start()` RESOLVES, and for a
+    // scraped surface that is a browser launch plus up to 45 s on `page.goto`
+    // and 30 s on `waitForSelector`. So N concurrent attaches for N distinct
+    // rooms — a console firing one per Discover card, or a double-click — all
+    // observed `runtimes.size === 0`, all passed, and all launched a browser.
+    // The cap was a check against a map that is filled in after the expensive
+    // thing has already happened.
+    const watching = this.runtimes.size + this.attaching.size;
+    if (watching >= config.maxWatchedShows) {
+      throw new Error(`already watching ${watching} shows (MAX_WATCHED_SHOWS=${config.maxWatchedShows})`);
+    }
+    // A session is not a browser. Six sessions is a sensible number of
+    // sessions; six WHATNOT sessions is six real Chromes on a box whose
+    // container limit holds Node and every browser together, and the
+    // container OOMs long before the box does — so the app dies rather than
+    // degrades, taking every other watched show with it.
+    if (ownsABrowser(adapter.id)) {
+      const rooms = this.scrapedRoomCount();
+      if (rooms >= config.maxScrapedRooms) {
+        throw new Error(
+          `already watching ${rooms} ${rooms === 1 ? "room" : "rooms"} on a surface that needs its own browser ` +
+          `(MAX_SCRAPED_ROOMS=${config.maxScrapedRooms}). Stop one before attaching another.`,
+        );
+      }
     }
 
     const run = (async () => {
@@ -230,8 +267,16 @@ export class ShowRegistry {
       this.runtimes.set(showId, rt);
       this.hub.emit("shows", await this.list());
       return rt;
-    })().finally(() => this.attaching.delete(showId));
+    })();
+    // Registered in the SAME synchronous turn as the cap check above — the
+    // async body has only run as far as its first `await` — so the next caller
+    // counts this attach whether or not its browser has finished opening.
     this.attaching.set(showId, run);
+    this.scrapedAttaching.set(showId, ownsABrowser(adapter.id));
+    void run.catch(() => undefined).finally(() => {
+      this.attaching.delete(showId);
+      this.scrapedAttaching.delete(showId);
+    });
     return run;
   }
 

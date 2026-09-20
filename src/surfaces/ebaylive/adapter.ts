@@ -38,6 +38,7 @@ export const ebayLiveAdapter: SurfaceAdapter = {
       onStatus: ev.onStatus ? (s) => ev.onStatus!(s) : undefined,
       onTitle: ev.onTitle ? (title) => ev.onTitle!(title) : undefined,
       onEnded: ev.onEnded ? (why) => ev.onEnded!(why) : undefined,
+      onGaveUp: ev.onGaveUp ? (g) => ev.onGaveUp!(g) : undefined,
       onViewers: ev.onViewers ? (n) => ev.onViewers!(n) : undefined,
       onComment: ev.onMessage
         ? (c) => ev.onMessage!({ id: c.id, author: c.author, text: c.text })

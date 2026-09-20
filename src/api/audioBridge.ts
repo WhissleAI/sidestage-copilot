@@ -95,6 +95,9 @@ const BRIDGE_TEMPLATE = `<!doctype html>
   // transcript for this long → reconnect, at most a few times a session.
   var STALL_MS = 45000, lastFinalAt = 0, loudSince = 0, stallTimer = null, reconnects = 0, MAX_RECONNECTS = 5;
   var listenShowId = null, listenAudio = null;
+  // Session bookkeeping the SERVER is told about, so "it stopped at 300
+  // seconds" is a row rather than a screenshot of this page's <div>.
+  var startedAt = 0, gaveUp = false, levelPostFails = 0, transcriptFails = 0;
   /** How long each kept audio chunk is. Ten seconds is short enough that a
    *  failed upload loses little and long enough that a two-hour show is 720
    *  files, not 7,200. */
@@ -121,6 +124,48 @@ const BRIDGE_TEMPLATE = `<!doctype html>
     el("status").innerHTML = '<span class="dot ' + (cls || "") + '" id="dot"></span>' + text;
   }
 
+  /**
+   * Tell the SERVER what happened to this listen session.
+   *
+   * Everything below used to end at log() — a <div> in this tab. So the
+   * entire failure vocabulary of the listen path ("room disconnected",
+   * "transcript stalled", "reconnect limit reached", "tab sharing ended by the
+   * browser") existed only where nobody was looking, and the server knew one
+   * fact about a session: when it opened. A session cut at exactly 300 seconds
+   * had to be diagnosed by reading a different system's logs.
+   *
+   * "kind" is a fixed vocabulary and "detail" is a short operator sentence
+   * this page composes. Neither carries transcript text: what the host SAID
+   * goes through /audio/transcript with the seller's consent, and has no
+   * business in an operator's terminal.
+   *
+   * keepalive:true so the "ended" event survives the tab closing, which is the
+   * single most common way a listen session ends.
+   */
+  function bridgeEvent(kind, detail, extra) {
+    var showId = listenShowId || el("show").value.trim();
+    if (!showId) return;
+    var body = { kind: kind, detail: String(detail || "").slice(0, 200) };
+    if (extra && typeof extra === "object") {
+      if (typeof extra.reconnects === "number") body.reconnects = extra.reconnects;
+      if (typeof extra.elapsedMs === "number") body.elapsedMs = extra.elapsedMs;
+    }
+    if (kind === "ended" || kind === "gave-up") {
+      // The two failures that are individually too small to report and
+      // together are the reason a report has a hole in it.
+      if (levelPostFails) body.levelPostFails = levelPostFails;
+      if (transcriptFails) body.transcriptFails = transcriptFails;
+    }
+    try {
+      fetch(API + "/api/shows/" + encodeURIComponent(showId) + "/audio/event", {
+        method: "POST",
+        headers: Object.assign({ "content-type": "application/json" }, AUTH),
+        body: JSON.stringify(body),
+        keepalive: true
+      }).catch(function () {});
+    } catch (e) { /* a page that cannot report must still capture */ }
+  }
+
   // Whissle emits voice metadata on its own frames, slightly out of step with
   // the transcript. Hold the most recent and attach it to the next final
   // segment — near enough at a one-utterance granularity, and far simpler than
@@ -145,7 +190,10 @@ const BRIDGE_TEMPLATE = `<!doctype html>
       method: "POST",
       headers: Object.assign({ "content-type": "application/json" }, AUTH),
       body: JSON.stringify(body)
-    }).catch(function (e) { log("transcript post failed: " + e.message); });
+    }).catch(function (e) {
+      log("transcript post failed: " + e.message);
+      transcriptFails++;
+    });
   }
 
   el("start").onclick = async function () {
@@ -194,6 +242,8 @@ const BRIDGE_TEMPLATE = `<!doctype html>
       log("published host audio into room " + (s.room || "(unnamed)"));
       el("start").disabled = true; el("stop").disabled = false;
       listenShowId = showId; listenAudio = audio; lastFinalAt = Date.now(); loudSince = 0;
+      startedAt = Date.now(); gaveUp = false; levelPostFails = 0; transcriptFails = 0;
+      bridgeEvent("started", "host audio is publishing into room " + (s.room || "(unnamed)"));
       startStallWatch();
 
       if (video) startVisual(showId, video);
@@ -202,10 +252,15 @@ const BRIDGE_TEMPLATE = `<!doctype html>
       startLevels(showId, audio);
       startRecording(showId, audio);
 
-      audio.onended = function () { log("tab sharing ended by the browser"); el("stop").click(); };
+      audio.onended = function () {
+        log("tab sharing ended by the browser");
+        bridgeEvent("ended", "tab sharing was ended by the browser");
+        el("stop").click();
+      };
     } catch (e) {
       status("capture failed", "err");
       log(String(e && e.message ? e.message : e));
+      bridgeEvent("failed", "capture failed: " + String(e && e.message ? e.message : e));
     }
   };
 
@@ -316,7 +371,10 @@ const BRIDGE_TEMPLATE = `<!doctype html>
           method: "POST",
           headers: Object.assign({ "content-type": "application/json" }, AUTH),
           body: JSON.stringify({ levels: batch })
-        }).catch(function () {});
+          // Swallowed at one-second granularity on purpose — a failing levels
+          // post must not spam the log or the event table. Counted instead,
+          // and reported once when the session ends.
+        }).catch(function () { levelPostFails++; });
       }, 1000);
 
       log("measuring loudness at " + Math.round(1000 / LEVEL_EVERY_MS) + " Hz");
@@ -455,7 +513,11 @@ const BRIDGE_TEMPLATE = `<!doctype html>
       log(kind + ": " + top + p + flip);
     }
 
-    r.on(LivekitClient.RoomEvent.Disconnected, function () { status("disconnected", "err"); log("room disconnected"); });
+    r.on(LivekitClient.RoomEvent.Disconnected, function () {
+      status("disconnected", "err");
+      log("room disconnected");
+      bridgeEvent("disconnected", "the listen room disconnected");
+    });
   }
 
   function startStallWatch() {
@@ -466,16 +528,28 @@ const BRIDGE_TEMPLATE = `<!doctype html>
       var loudFor = loudSince ? now - loudSince : 0;
       var quiet = now - lastFinalAt;
       if (loudFor < STALL_MS || quiet < STALL_MS) return;
-      if (reconnects >= MAX_RECONNECTS) { status("transcript stalled — reconnect limit reached, stop and start again", "err"); return; }
+      if (reconnects >= MAX_RECONNECTS) {
+        status("transcript stalled — reconnect limit reached, stop and start again", "err");
+        if (!gaveUp) {
+          gaveUp = true;
+          bridgeEvent("gave-up", "transcript stalled and the reconnect limit was reached — this session is not coming back", { reconnects: reconnects });
+        }
+        return;
+      }
       reconnects++;
       log("transcript stalled " + Math.round(quiet / 1000) + "s while audio is live — reconnecting the listen session (" + reconnects + "/" + MAX_RECONNECTS + ")");
+      bridgeEvent("stalled", "transcript stalled " + Math.round(quiet / 1000) + "s while audio is live", { reconnects: reconnects });
       status("transcript stalled — reconnecting…", "err");
       try {
         var old = room; room = null;
         try { await old.disconnect(); } catch (e) {}
         var r = await fetch(API + "/api/shows/" + encodeURIComponent(listenShowId) + "/audio/session", { method: "POST", headers: AUTH });
         var s = await r.json();
-        if (!r.ok) { log("reconnect failed: " + (s.error || ("HTTP " + r.status))); return; }
+        if (!r.ok) {
+          log("reconnect failed: " + (s.error || ("HTTP " + r.status)));
+          bridgeEvent("reconnect-failed", "HTTP " + r.status, { reconnects: reconnects });
+          return;
+        }
         var next = new LivekitClient.Room({ adaptiveStream: false, dynacast: false });
         wireRoom(next, listenShowId);
         await next.connect(s.url, s.token);
@@ -483,8 +557,10 @@ const BRIDGE_TEMPLATE = `<!doctype html>
         room = next; lastFinalAt = Date.now(); loudSince = 0;
         status("capturing — host speech is feeding the copilot (reconnected)", "on");
         log("reconnected into room " + (s.room || "(unnamed)"));
+        bridgeEvent("reconnected", "the listen session was re-established", { reconnects: reconnects });
       } catch (e) {
         log("reconnect failed: " + String(e && e.message ? e.message : e));
+        bridgeEvent("reconnect-failed", String(e && e.message ? e.message : e), { reconnects: reconnects });
       }
     }, 5000);
   }
@@ -503,8 +579,17 @@ const BRIDGE_TEMPLATE = `<!doctype html>
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
     room = null; stream = null;
     status("stopped");
+    bridgeEvent("ended", "stopped from the bridge page", { elapsedMs: startedAt ? Date.now() - startedAt : 0 });
     el("start").disabled = false; el("stop").disabled = true;
+    startedAt = 0; reconnects = 0; gaveUp = false; levelPostFails = 0; transcriptFails = 0;
   };
+
+  // The tab closing IS how most listen sessions end. Without this the server's
+  // last word on the session is the moment it opened.
+  window.addEventListener("pagehide", function () {
+    if (!listenShowId) return;
+    bridgeEvent("ended", "the bridge page was closed", { elapsedMs: startedAt ? Date.now() - startedAt : 0 });
+  });
 })();
 </script>
 </body>

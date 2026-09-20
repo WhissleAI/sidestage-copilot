@@ -25,6 +25,7 @@
 
 import { config } from "../../config.js";
 import { SurfaceUnavailable } from "../types.js";
+import { redditFetch } from "../../net/http.js";
 
 type Fetcher = typeof fetch;
 
@@ -137,7 +138,7 @@ export class RedditClient {
     private readonly creds: Partial<RedditCreds> = config.reddit,
     /** Injected so the suite exercises token refresh, backoff and parsing with
      *  recorded fixtures and no network. */
-    private readonly fetcher: Fetcher = fetch,
+    private readonly fetcher: Fetcher = redditFetch,
     private readonly wait: (ms: number) => Promise<unknown> = sleep,
   ) {}
 

@@ -64,13 +64,16 @@ import { challengeResponse, honourDeletion, parseNotice, verifyNotification } fr
 import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { db as pgPool } from "../db/pg.js";
-import { config } from "../config.js";
+import { checkConfig, config, configSummary } from "../config.js";
 import { WhissleClient } from "../llm/whissle.js";
 import { describeFrames, describing } from "../shows/frameDescriber.js";
 import { SendRefused } from "../pipeline/pipeline.js";
 import type { ShowRuntime } from "../shows/runtime.js";
 import { GateBusy, RateLimiter } from "./rateLimit.js";
 import type { AppContext } from "./context.js";
+import { recordEvent, droppedEvents } from "../obs/events.js";
+import { logSwallowed, logWarn, errText } from "../obs/log.js";
+import { browserBudget } from "../surfaces/browserBudget.js";
 
 /**
  * What resolving a show needs from a request.
@@ -880,7 +883,70 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // A probe needs to know the process answers. The console's own status dot
   // (AppShell) reads nothing but the status code, and a seller who wants the
   // session list has `GET /api/shows`, which is scoped to their account.
-  app.get("/health", async () => ({ ok: true }));
+  /**
+   * Is it up — including the thing most likely to be wrong?
+   *
+   * This used to be a literal `ok: true`. Its only potentially DB-touching
+   * call went through `ShowRegistry.list()`, which maps over an in-memory map
+   * and issues zero queries when nothing is attached. So with Postgres down,
+   * every API call 500s while `/health` says healthy, and any uptime check —
+   * and compose's `depends_on` — reports green through a total outage.
+   *
+   * It answers 200 while DEGRADED and 503 only when the database is gone,
+   * because a monitor that pages on a missing sealing key is a monitor that
+   * gets muted.
+   */
+  app.get("/health", async (_req, reply) => {
+    const started = Date.now();
+    let database: { ok: boolean; ms: number; error?: string };
+    try {
+      await pgPool().query("SELECT 1");
+      database = { ok: true, ms: Date.now() - started };
+    } catch (e) {
+      database = { ok: false, ms: Date.now() - started, error: errText(e) };
+      logWarn("health.database_down", { ms: database.ms, err: database.error });
+    }
+    // Two fields and no more. This route is UNAUTHENTICATED and open to the
+    // internet — it used to answer with every live session on the box, which
+    // is why it says so little now — so the reason a check failed goes to the
+    // log and to `/api/diagnostics`, not into a public response. `ms` is a
+    // duration, which tells an operator "slow" versus "gone" and identifies
+    // nothing.
+    const body = { ok: database.ok, database: { ok: database.ok, ms: database.ms } };
+    return database.ok ? body : reply.code(503).send(body);
+  });
+
+  /**
+   * What an operator needs when /health is not enough.
+   *
+   * Everything the public probe deliberately will not say: how many browsers
+   * are open and what for, whether this box's own record of what it did is
+   * complete, and which configuration values are in a state somebody should
+   * know about. Authenticated, because each of those is a fact about the
+   * deployment rather than about the caller.
+   */
+  app.get("/api/diagnostics", async (req, reply) => {
+    if (!actorOf(req as object)) return reply.code(401).send({ error: "sign in" });
+    let database = false;
+    try {
+      await pgPool().query("SELECT 1");
+      database = true;
+    } catch {
+      database = false;
+    }
+    return {
+      database,
+      // Named rather than counted: "two browsers open" is a number, "two
+      // Whatnot rooms and the eBay discovery poll" is an answer.
+      browsers: browserBudget(),
+      /** Events that never reached Postgres. Non-zero means this box's own
+       *  record of what it did is incomplete, and every figure read off it is
+       *  a floor rather than a count. */
+      droppedEvents: droppedEvents(),
+      warnings: checkConfig().filter((p) => p.level === "warn").map((p) => `${p.name} ${p.detail}`),
+      config: configSummary(),
+    };
+  });
 
   // ── the event stream ──────────────────────────────────────────────────────
   app.get<{ Querystring: { showId?: string } }>("/api/stream", async (req, reply) => {
@@ -992,7 +1058,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // could not trip on them. Anchor every live show once the app is up.
   setTimeout(() => {
     void (async () => {
-      for (const s of await shows.list().catch(() => [])) await anchorSpend(s.showId).catch(() => {});
+      for (const s of await shows.list().catch((e) => {
+        logSwallowed("cost.anchor_sweep_failed", e);
+        return [];
+      })) {
+        await anchorSpend(s.showId).catch((e) => logSwallowed("cost.anchor_failed", e, { showId: s.showId }));
+      }
     })();
   }, 5_000).unref?.();
   const anchorSpend = async (showId: string): Promise<void> => {
@@ -2933,8 +3004,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // seller attaching to a live show: forget it, say so, and attach the
         // way an unprepared show attaches — its own agent, grounded from the
         // stream — rather than answering 400 to a perfectly good link.
-        console.warn(`  attach: prepared catalog ${preparedCatalogId} for ${eventId} is missing — dropping the preparation`);
-        await preparer.drop(eventId!).catch(() => {});
+        // DESTRUCTIVE and swallowed: this deletes a preparation, its remote
+        // agent and its catalog file. Whether it should be reachable from the
+        // attach path at all is a tenancy question and not this change's; what
+        // this change refuses to accept is that it happened silently.
+        logWarn("prepare.dropped_on_attach", {
+          eventId, catalogId: preparedCatalogId, actor: actorOf(req as object)?.id ?? null,
+          why: "the prepared catalog file is missing on disk",
+        });
+        void recordEvent({
+          showId: null, kind: "prepare.dropped_on_attach", level: "warn",
+          detail: { eventId, catalogId: preparedCatalogId },
+        });
+        await preparer.drop(eventId!).catch((e) => logSwallowed("prepare.drop_failed", e, { eventId }));
         preparedCatalogId = null;
         prepared = null; // its agent went with it; the attach below mints a fresh one
       }
@@ -3048,10 +3130,31 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
         // Seed the agent's knowledge base in the background — the reply path is
         // grounded per-turn regardless.
-        void kb.syncShow(target).catch(() => {});
+        // The reply path is grounded per turn regardless, so this failing costs
+        // the agent's knowledge base and not the show — but a seller who
+        // prepared a catalog and gets ungrounded answers all night deserves a
+        // line saying the sync refused.
+        void kb.syncShow(target).catch((e) => {
+          logSwallowed("kb.sync_failed", e, { showId: target.showId });
+          void recordEvent({
+            showId: target.showId, kind: "kb.sync_failed", level: "warn",
+            detail: { why: errText(e), consequence: "the agent's knowledge base is stale for this session" },
+          });
+        });
         // And anchor the cost window here, at the start of the session, not
         // whenever someone first opens the cost rail.
-        void anchorSpend(target.showId).catch(() => {});
+        // Swallowed so a wallet read cannot fail an attach — but the cost
+        // window is the DENOMINATOR of everything /api/cost says about this
+        // show. Without it the session's spend reads as zero rather than as
+        // unmeasured, and a page that shows a smaller number is not obviously
+        // a page that is missing one.
+        void anchorSpend(target.showId).catch((e) => {
+          logSwallowed("cost.anchor_failed", e, { showId: target.showId });
+          void recordEvent({
+            showId: target.showId, kind: "cost.window_not_anchored", level: "warn",
+            detail: { why: errText(e), consequence: "this session's spend will read as zero, not as unmeasured" },
+          });
+        });
         return {
           showId: target.showId, show: await target.show(),
           catalog: applied, snapshot: await target.snapshot(),
@@ -3236,6 +3339,79 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     } catch (e) {
       return reply.code(502).send({ error: (e as Error).message });
     }
+  });
+
+  /**
+   * What happened to this listen session, as the bridge saw it.
+   *
+   * The whole failure vocabulary of the listen path used to exist in a <div>
+   * in the bridge tab: "room disconnected", "transcript stalled",
+   * "reconnect limit reached", "tab sharing ended by the browser". Server-side
+   * there was a start time and nothing else — no end, no reason, no counter —
+   * so a session cut at exactly 300 seconds was diagnosed by reading a
+   * DIFFERENT system's logs. This is the route that makes that class of
+   * incident answerable here.
+   *
+   * A fixed vocabulary, because an event kind is something queries are written
+   * against. `detail` is the bridge's own short operator sentence; the body
+   * carries no transcript, no audio and no token, and anything else on it is
+   * dropped rather than stored.
+   */
+  const LISTEN_EVENTS = new Set([
+    "started", "stalled", "reconnected", "reconnect-failed", "disconnected", "gave-up", "failed", "ended",
+  ]);
+  /** The kinds that mean the session is over, and will not come back on its
+   *  own. `stalled` is not one of them: the bridge reconnects through it. */
+  const LISTEN_TERMINAL = new Set(["gave-up", "failed", "ended"]);
+
+  app.post<{
+    Params: { showId: string };
+    Body: { kind?: string; detail?: string; reconnects?: number; elapsedMs?: number; levelPostFails?: number; transcriptFails?: number };
+  }>("/api/shows/:showId/audio/event", async (req, reply) => {
+    const kind = typeof req.body?.kind === "string" ? req.body.kind : "";
+    if (!LISTEN_EVENTS.has(kind)) {
+      return reply.code(400).send({ error: `kind must be one of ${[...LISTEN_EVENTS].join(", ")}` });
+    }
+    const showId = req.params.showId;
+    const num = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : undefined;
+    const detail = typeof req.body?.detail === "string" ? req.body.detail.slice(0, 200) : "";
+
+    void recordEvent({
+      showId,
+      kind: `listen.${kind}`,
+      level: kind === "started" || kind === "reconnected" ? "info" : kind === "stalled" ? "warn" : "error",
+      detail: {
+        why: detail,
+        reconnects: num(req.body?.reconnects),
+        elapsedMs: num(req.body?.elapsedMs),
+        levelPostFails: num(req.body?.levelPostFails),
+        transcriptFails: num(req.body?.transcriptFails),
+      },
+    });
+
+    // The show row carries the ANSWER to "when did listening stop, and why" so
+    // the report and `/api/shows/:id/listen` can read it without walking the
+    // event table. `listen_ended_at` stays null while a session is running,
+    // which is the difference between "still listening" and "ended and we
+    // never wrote it down" that the row could not express before.
+    const pool = pgPool();
+    if (kind === "started") {
+      await pool
+        .query("UPDATE shows SET listen_ended_at = NULL, listen_end_reason = NULL, listen_stalls = 0 WHERE id = $1", [showId])
+        .catch((e) => logSwallowed("listen.start_not_recorded", e, { showId }));
+    } else if (kind === "stalled") {
+      await pool
+        .query("UPDATE shows SET listen_stalls = listen_stalls + 1 WHERE id = $1", [showId])
+        .catch((e) => logSwallowed("listen.stall_not_recorded", e, { showId }));
+    } else if (LISTEN_TERMINAL.has(kind)) {
+      await pool
+        .query("UPDATE shows SET listen_ended_at = now(), listen_end_reason = $2 WHERE id = $1", [
+          showId, `${kind}: ${detail}`.slice(0, 300),
+        ])
+        .catch((e) => logSwallowed("listen.end_not_recorded", e, { showId, kind }));
+    }
+    return { ok: true, kind };
   });
 
   /**
@@ -3513,7 +3689,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // The frame is kept WITH its reading, and only then. What the agent
         // saw and what it said it saw are one record; a seller reviewing a
         // wrong reading needs the picture to judge it.
-        const kept = await target.signals.recordFrame(target.showId, dataUrl, text).catch(() => null);
+        const kept = await target.signals
+          .recordFrame(target.showId, dataUrl, text)
+          // The reading is already in show context; only the PICTURE is lost.
+          // That is still the thing a seller needs to judge a wrong reading,
+          // and the report's visual timeline gets a hole with no explanation.
+          .catch((e) => {
+            logSwallowed("frame.not_kept", e, { showId: target.showId });
+            return null;
+          });
         if (kept) hub.emit("frame", { showId: target.showId, seq: kept.seq, at: kept.at, offsetMs: kept.offsetMs, reading: text });
         return { ok: true, onScreen: text, frameSeq: kept?.seq ?? null };
       } catch (e) {

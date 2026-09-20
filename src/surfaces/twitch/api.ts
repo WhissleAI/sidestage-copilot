@@ -24,6 +24,7 @@
 // token that no longer works.
 
 import { SurfaceUnavailable } from "../types.js";
+import { twitchFetch } from "../../net/http.js";
 
 const ID = "https://id.twitch.tv";
 const HELIX = "https://api.twitch.tv/helix";
@@ -106,7 +107,7 @@ export class TwitchApi {
   private warnedRotation = false;
 
   constructor(private readonly creds: TwitchCreds, opts: TwitchApiOpts = {}) {
-    this.fetcher = opts.fetcher ?? fetch;
+    this.fetcher = opts.fetcher ?? twitchFetch;
     this.onRefreshToken = opts.onRefreshToken;
     this.refreshToken = creds.botRefreshToken;
   }

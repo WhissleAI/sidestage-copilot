@@ -9,6 +9,7 @@ import { ShowRegistry, DEMO_SHOW_ID } from "../shows/registry.js";
 import { finishStranded, planResume } from "../shows/resume.js";
 import { KbSync } from "../llm/kbSync.js";
 import { db as pgPool, migrate, closeDb } from "../db/pg.js";
+import { useEventStore, recordEvent } from "../obs/events.js";
 import { applyCatalog, getCatalog } from "../shows/catalogs.js";
 import { seed, DEMO_SHOW_ID as SEED_SHOW } from "../db/seed.js";
 import { DiscoverService } from "../discover/service.js";
@@ -48,6 +49,12 @@ export async function buildContext(): Promise<AppContext> {
   // "relation does not exist" on the first buyer message.
   const pool = pgPool();
   await migrate(pool);
+
+  // From here on, everything the process decides has somewhere to be written
+  // down. Installed immediately after the schema and before anything is
+  // attached, because the boot sweep below is itself one of the things whose
+  // silence cost us an incident.
+  useEventStore(pool);
 
   // The simulated show is a scripted animation: seeded buyers, seeded lots, a
   // queue that fills whether or not anything is connected. It is genuinely

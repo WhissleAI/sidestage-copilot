@@ -25,6 +25,7 @@ const SHOW_DOC_PREFIX = "sidestage-show-";
 interface KbDoc { id: string; title?: string; file_name?: string }
 import type { ShowRuntime } from "../shows/runtime.js";
 import { formatMoney } from "../domain/money.js";
+import { gatewayFetch } from "../net/http.js";
 
 
 export class KbSync {
@@ -101,7 +102,7 @@ export class KbSync {
   /** Drop every `sidestage-show-*` document not in `keepTitles`. */
   private async removeShowDocs(agentId: string, keepTitles: string[]): Promise<void> {
     try {
-      const r = await fetch(`${config.whissle.base}/api/agents/${agentId}/kb`, {
+      const r = await gatewayFetch(`${config.whissle.base}/api/agents/${agentId}/kb`, {
         headers: { Authorization: `Bearer ${config.whissle.apiKey}` },
       });
       if (!r.ok) return;
@@ -116,7 +117,7 @@ export class KbSync {
       for (const d of docs) {
         const name = d.title || d.file_name || "";
         if (name.startsWith(SHOW_DOC_PREFIX) && !keepTitles.some((k) => name.startsWith(k))) {
-          const del = await fetch(`${config.whissle.base}/api/agents/${agentId}/kb/${d.id}`, {
+          const del = await gatewayFetch(`${config.whissle.base}/api/agents/${agentId}/kb/${d.id}`, {
             method: "DELETE",
             headers: { Authorization: `Bearer ${config.whissle.apiKey}` },
           }).catch((e: Error) => ({ ok: false, status: 0, statusText: e.message }) as Response);

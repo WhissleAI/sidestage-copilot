@@ -210,6 +210,18 @@ export class DiscoverService {
 
 class Timeout extends Error {}
 
+/**
+ * A budget on the ANSWER, not on the socket.
+ *
+ * This races rather than aborts, so the request it gave up on used to stay
+ * open for undici's 300-second body timeout — Discover answered in twelve
+ * seconds and the process kept five minutes of work it had already discarded.
+ * The socket is now bounded by the client's own deadline instead
+ * (`src/net/http.js`: eBay 15s, Twitch 10s, Reddit 15s), which is the half
+ * that actually cost the box. Threading an `AbortSignal` through
+ * `DiscoverSource.read` so the race CANCELS is the remaining half and is a
+ * change to the source port; it is not made here.
+ */
 async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
