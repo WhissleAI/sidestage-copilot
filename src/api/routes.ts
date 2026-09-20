@@ -71,6 +71,8 @@ import { SendRefused } from "../pipeline/pipeline.js";
 import type { ShowRuntime } from "../shows/runtime.js";
 import { GateBusy, RateLimiter } from "./rateLimit.js";
 import type { AppContext } from "./context.js";
+import { recordEvent } from "../obs/events.js";
+import { logSwallowed, logWarn, logInfo } from "../obs/log.js";
 
 /**
  * What resolving a show needs from a request.
@@ -3236,6 +3238,79 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     } catch (e) {
       return reply.code(502).send({ error: (e as Error).message });
     }
+  });
+
+  /**
+   * What happened to this listen session, as the bridge saw it.
+   *
+   * The whole failure vocabulary of the listen path used to exist in a <div>
+   * in the bridge tab: "room disconnected", "transcript stalled",
+   * "reconnect limit reached", "tab sharing ended by the browser". Server-side
+   * there was a start time and nothing else — no end, no reason, no counter —
+   * so a session cut at exactly 300 seconds was diagnosed by reading a
+   * DIFFERENT system's logs. This is the route that makes that class of
+   * incident answerable here.
+   *
+   * A fixed vocabulary, because an event kind is something queries are written
+   * against. `detail` is the bridge's own short operator sentence; the body
+   * carries no transcript, no audio and no token, and anything else on it is
+   * dropped rather than stored.
+   */
+  const LISTEN_EVENTS = new Set([
+    "started", "stalled", "reconnected", "reconnect-failed", "disconnected", "gave-up", "failed", "ended",
+  ]);
+  /** The kinds that mean the session is over, and will not come back on its
+   *  own. `stalled` is not one of them: the bridge reconnects through it. */
+  const LISTEN_TERMINAL = new Set(["gave-up", "failed", "ended"]);
+
+  app.post<{
+    Params: { showId: string };
+    Body: { kind?: string; detail?: string; reconnects?: number; elapsedMs?: number; levelPostFails?: number; transcriptFails?: number };
+  }>("/api/shows/:showId/audio/event", async (req, reply) => {
+    const kind = typeof req.body?.kind === "string" ? req.body.kind : "";
+    if (!LISTEN_EVENTS.has(kind)) {
+      return reply.code(400).send({ error: `kind must be one of ${[...LISTEN_EVENTS].join(", ")}` });
+    }
+    const showId = req.params.showId;
+    const num = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : undefined;
+    const detail = typeof req.body?.detail === "string" ? req.body.detail.slice(0, 200) : "";
+
+    void recordEvent({
+      showId,
+      kind: `listen.${kind}`,
+      level: kind === "started" || kind === "reconnected" ? "info" : kind === "stalled" ? "warn" : "error",
+      detail: {
+        why: detail,
+        reconnects: num(req.body?.reconnects),
+        elapsedMs: num(req.body?.elapsedMs),
+        levelPostFails: num(req.body?.levelPostFails),
+        transcriptFails: num(req.body?.transcriptFails),
+      },
+    });
+
+    // The show row carries the ANSWER to "when did listening stop, and why" so
+    // the report and `/api/shows/:id/listen` can read it without walking the
+    // event table. `listen_ended_at` stays null while a session is running,
+    // which is the difference between "still listening" and "ended and we
+    // never wrote it down" that the row could not express before.
+    const pool = pgPool();
+    if (kind === "started") {
+      await pool
+        .query("UPDATE shows SET listen_ended_at = NULL, listen_end_reason = NULL, listen_stalls = 0 WHERE id = $1", [showId])
+        .catch((e) => logSwallowed("listen.start_not_recorded", e, { showId }));
+    } else if (kind === "stalled") {
+      await pool
+        .query("UPDATE shows SET listen_stalls = listen_stalls + 1 WHERE id = $1", [showId])
+        .catch((e) => logSwallowed("listen.stall_not_recorded", e, { showId }));
+    } else if (LISTEN_TERMINAL.has(kind)) {
+      await pool
+        .query("UPDATE shows SET listen_ended_at = now(), listen_end_reason = $2 WHERE id = $1", [
+          showId, `${kind}: ${detail}`.slice(0, 300),
+        ])
+        .catch((e) => logSwallowed("listen.end_not_recorded", e, { showId, kind }));
+    }
+    return { ok: true, kind };
   });
 
   /**

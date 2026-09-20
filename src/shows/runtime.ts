@@ -830,7 +830,13 @@ export class ShowRuntime {
     this.showContext.stop();
     this.simSource?.stop();
     this.hostAudio?.stop();
-    await this.watcher?.stop().catch(() => {});
+    // Swallowed because a watcher that refuses to close must not stop a
+    // session ending — but a browser that would not shut down is exactly the
+    // shape of the outage this box has already had, and it was invisible.
+    await this.watcher?.stop().catch((e) => {
+      logSwallowed("watcher.stop_failed", e, { showId: this.showId, surface: this.surface });
+      void recordEvent({ showId: this.showId, kind: "watcher.stop_failed", level: "error", detail: { why: errText(e) } });
+    });
     this.watcher = null;
     this.started = false;
   }
@@ -854,10 +860,41 @@ export class ShowRuntime {
     try {
       const chain = await this.audit.verify();
       const listen = (
-        await this.db.query<{ listen_room: string | null; listen_started_at: string | null }>(
-          "SELECT listen_room, listen_started_at FROM shows WHERE id = $1", [this.showId],
+        await this.db.query<{
+          listen_room: string | null;
+          listen_started_at: string | null;
+          listen_ended_at: string | null;
+          listen_end_reason: string | null;
+          listen_stalls: number | null;
+        }>(
+          `SELECT listen_room, listen_started_at, listen_ended_at, listen_end_reason, listen_stalls
+             FROM shows WHERE id = $1`,
+          [this.showId],
         )
       ).rows[0];
+      // A listen session that started and never said how it ended is the shape
+      // of the 300-second cut: the bridge tab was closed, or the network went,
+      // or the page crashed, and the only record of it was in that tab. Now
+      // the absence itself is a recorded fact, at the moment a report with a
+      // hole in it is being written.
+      if (listen?.listen_started_at && !listen.listen_ended_at) {
+        void recordEvent({
+          showId: this.showId,
+          kind: "listen.unclosed",
+          level: "warn",
+          detail: {
+            why: "the session ended while a listen session was still open — the bridge never reported how it stopped",
+            startedAt: listen.listen_started_at,
+            stalls: listen.listen_stalls ?? 0,
+          },
+        });
+      } else if (listen?.listen_end_reason) {
+        void recordEvent({
+          showId: this.showId,
+          kind: "listen.closed",
+          detail: { why: listen.listen_end_reason, stalls: listen.listen_stalls ?? 0 },
+        });
+      }
       const sessions = new WhissleSessions(config.whissle.base, config.whissle.apiKey);
       const report = await buildReport(this.db, this.showId, {
         auditChain: chain,
