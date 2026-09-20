@@ -72,7 +72,7 @@ import type { ShowRuntime } from "../shows/runtime.js";
 import { GateBusy, RateLimiter } from "./rateLimit.js";
 import type { AppContext } from "./context.js";
 import { recordEvent } from "../obs/events.js";
-import { logSwallowed, logWarn, logInfo } from "../obs/log.js";
+import { logSwallowed, logWarn, errText } from "../obs/log.js";
 
 /**
  * What resolving a show needs from a request.
@@ -994,7 +994,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // could not trip on them. Anchor every live show once the app is up.
   setTimeout(() => {
     void (async () => {
-      for (const s of await shows.list().catch(() => [])) await anchorSpend(s.showId).catch(() => {});
+      for (const s of await shows.list().catch((e) => {
+        logSwallowed("cost.anchor_sweep_failed", e);
+        return [];
+      })) {
+        await anchorSpend(s.showId).catch((e) => logSwallowed("cost.anchor_failed", e, { showId: s.showId }));
+      }
     })();
   }, 5_000).unref?.();
   const anchorSpend = async (showId: string): Promise<void> => {
@@ -2935,8 +2940,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // seller attaching to a live show: forget it, say so, and attach the
         // way an unprepared show attaches — its own agent, grounded from the
         // stream — rather than answering 400 to a perfectly good link.
-        console.warn(`  attach: prepared catalog ${preparedCatalogId} for ${eventId} is missing — dropping the preparation`);
-        await preparer.drop(eventId!).catch(() => {});
+        // DESTRUCTIVE and swallowed: this deletes a preparation, its remote
+        // agent and its catalog file. Whether it should be reachable from the
+        // attach path at all is a tenancy question and not this change's; what
+        // this change refuses to accept is that it happened silently.
+        logWarn("prepare.dropped_on_attach", {
+          eventId, catalogId: preparedCatalogId, actor: actorOf(req as object)?.id ?? null,
+          why: "the prepared catalog file is missing on disk",
+        });
+        void recordEvent({
+          showId: null, kind: "prepare.dropped_on_attach", level: "warn",
+          detail: { eventId, catalogId: preparedCatalogId },
+        });
+        await preparer.drop(eventId!).catch((e) => logSwallowed("prepare.drop_failed", e, { eventId }));
         preparedCatalogId = null;
         prepared = null; // its agent went with it; the attach below mints a fresh one
       }
@@ -3050,10 +3066,31 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
         // Seed the agent's knowledge base in the background — the reply path is
         // grounded per-turn regardless.
-        void kb.syncShow(target).catch(() => {});
+        // The reply path is grounded per turn regardless, so this failing costs
+        // the agent's knowledge base and not the show — but a seller who
+        // prepared a catalog and gets ungrounded answers all night deserves a
+        // line saying the sync refused.
+        void kb.syncShow(target).catch((e) => {
+          logSwallowed("kb.sync_failed", e, { showId: target.showId });
+          void recordEvent({
+            showId: target.showId, kind: "kb.sync_failed", level: "warn",
+            detail: { why: errText(e), consequence: "the agent's knowledge base is stale for this session" },
+          });
+        });
         // And anchor the cost window here, at the start of the session, not
         // whenever someone first opens the cost rail.
-        void anchorSpend(target.showId).catch(() => {});
+        // Swallowed so a wallet read cannot fail an attach — but the cost
+        // window is the DENOMINATOR of everything /api/cost says about this
+        // show. Without it the session's spend reads as zero rather than as
+        // unmeasured, and a page that shows a smaller number is not obviously
+        // a page that is missing one.
+        void anchorSpend(target.showId).catch((e) => {
+          logSwallowed("cost.anchor_failed", e, { showId: target.showId });
+          void recordEvent({
+            showId: target.showId, kind: "cost.window_not_anchored", level: "warn",
+            detail: { why: errText(e), consequence: "this session's spend will read as zero, not as unmeasured" },
+          });
+        });
         return {
           showId: target.showId, show: await target.show(),
           catalog: applied, snapshot: await target.snapshot(),
@@ -3588,7 +3625,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         // The frame is kept WITH its reading, and only then. What the agent
         // saw and what it said it saw are one record; a seller reviewing a
         // wrong reading needs the picture to judge it.
-        const kept = await target.signals.recordFrame(target.showId, dataUrl, text).catch(() => null);
+        const kept = await target.signals
+          .recordFrame(target.showId, dataUrl, text)
+          // The reading is already in show context; only the PICTURE is lost.
+          // That is still the thing a seller needs to judge a wrong reading,
+          // and the report's visual timeline gets a hole with no explanation.
+          .catch((e) => {
+            logSwallowed("frame.not_kept", e, { showId: target.showId });
+            return null;
+          });
         if (kept) hub.emit("frame", { showId: target.showId, seq: kept.seq, at: kept.at, offsetMs: kept.offsetMs, reading: text });
         return { ok: true, onScreen: text, frameSeq: kept?.seq ?? null };
       } catch (e) {

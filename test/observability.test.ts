@@ -252,3 +252,58 @@ describe("a listen session says how it ended", () => {
     await post("ended", { detail: "stopped" });
   });
 });
+
+// ── swallowed errors ────────────────────────────────────────────────────────
+//
+// Seventy-odd sites deliberately continue past a failure, and most of them are
+// right to: a failed enrichment must not stop a reply. The defect was never
+// the decision to continue — it was that continuing was indistinguishable from
+// succeeding, for ever, because nothing logged. A swallowed error WITH a line
+// is a decision. Without one it is a blind spot.
+//
+// The sharpest of them is here: at L4 the copilot commits a listing change
+// without asking, and a rejected commit was swallowed outright. The seller was
+// told the copilot acts on their behalf, the listing did not change, and
+// nothing anywhere said the commit refused.
+
+import { Pipeline } from "../src/pipeline/pipeline.js";
+
+test("an auto-commit that the marketplace refuses is still swallowed — and no longer silent", async () => {
+  const approved: string[] = [];
+  const stub = {
+    repo: {
+      showId: "show_autocommit",
+      show: async () => ({ autonomyLevel: "L4_AUTO_ACT" }),
+    },
+    proposer: {
+      evaluate: async () => [{
+        kind: "adjust_stock", listingId: "lst_1", params: { qty: 2 },
+        summary: "stock", rationale: "sold two", dedupeKey: "k1",
+      }],
+    },
+    executor: {
+      propose: async () => ({ id: "act_1", status: "proposed", preflight: { ok: true } }),
+      approve: async (id: string) => {
+        approved.push(id);
+        throw new Error("marketplace refused: version conflict");
+      },
+    },
+  };
+
+  // The private loop, driven directly: the branch under test is three lines
+  // inside it and the alternative is standing up a whole show to reach them.
+  const pipeline = Object.create(Pipeline.prototype) as {
+    d: unknown; seenActionKeys: Set<string>; evaluateActions(): Promise<void>;
+  };
+  pipeline.d = stub;
+  pipeline.seenActionKeys = new Set();
+
+  const lines = await taped(() => pipeline.evaluateActions());
+
+  assert.deepEqual(approved, ["act_1"], "the commit was attempted");
+  const said = lines.find((l) => l.event === "action.auto_commit_failed");
+  assert.ok(said, "a refused auto-commit must leave a line — the seller cannot see this fail");
+  assert.equal(said!.level, "warn");
+  assert.equal(said!.actionId, "act_1");
+  assert.match(String(said!.err), /version conflict/);
+});

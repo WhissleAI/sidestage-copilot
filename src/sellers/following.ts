@@ -18,6 +18,7 @@
 import type { Pool } from "../db/pg.js";
 import { discoverLiveShows, type DiscoveredShow } from "../ingest/ebaylive/discovery.js";
 import { sessionStatus } from "../ingest/ebaylive/session.js";
+import { logSwallowed } from "../obs/log.js";
 
 export interface FollowedSeller {
   handle: string;
@@ -258,7 +259,12 @@ export class Following {
               WHERE account_id = $1 AND handle = $2`,
             [accountId, r.handle, checkedAt, s?.eventId ?? null, s?.title ?? null],
           )
-          .catch(() => {});
+          // Fire-and-forget because the Following page must not wait on a
+          // bookkeeping write — but a dropped one makes this tab quietly WRONG
+          // about the one thing migration 009 added the column for: "we have
+          // not seen them since Tuesday". Silence made the page's answer
+          // indistinguishable from the truth.
+          .catch((e) => logSwallowed("following.check_not_recorded", e, { accountId, handle: r.handle }));
       }
       out.push({
         handle: r.handle,
