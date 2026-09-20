@@ -205,14 +205,17 @@ describe("three verdicts, three consequences", () => {
 
   test("the ladder turns a revise into a card the seller can act on", () => {
     const d = decideReply({
+      // `delivery: "api"` is the stronger case for both assertions below: a
+      // revise still needs review, and a block still blocks, even on a surface
+      // that COULD send. On a draft-only surface nothing auto-sends anyway.
       level: "L1_SUGGEST", intent: "price_question", verdict: "revise",
-      confidence: 0.6, abstained: false,
+      confidence: 0.6, abstained: false, delivery: "api",
     });
     assert.equal(d.kind, "needs_review");
     // And a block is still a block, at every rung.
     for (const level of ["L1_SUGGEST", "L3_AUTO_REPLY", "L4_AUTO_ACT"] as const) {
       assert.equal(
-        decideReply({ level, intent: "shipping", verdict: "block", confidence: 0.99, abstained: false }).kind,
+        decideReply({ level, intent: "shipping", verdict: "block", confidence: 0.99, abstained: false, delivery: "api" }).kind,
         "blocked",
       );
     }
