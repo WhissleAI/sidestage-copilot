@@ -31,7 +31,8 @@ import type { Comp, CompBasis, Evidence, ResearchCard } from "../domain/types.js
 import { ebay, EbayError } from "../ingest/ebay/client.js";
 import type { ListingWithDescription, Repo } from "../domain/repo.js";
 import { formatMoney } from "../domain/money.js";
-import { median } from "../retrieval/facts.js";
+import { median, mkFact, type Fact } from "../retrieval/facts.js";
+import { toEvidence } from "../retrieval/retriever.js";
 import { terms } from "../retrieval/text.js";
 
 /** A live show asks the same question repeatedly; eBay should hear it once. */
@@ -92,29 +93,52 @@ export class ResearchService {
     const prices = comps.map((c) => c.priceCents);
     const med = median(prices);
 
-    const evidence: Evidence[] = [
+    // Built as FACTS, with the evidence derived from them rather than written
+    // beside them.
+    //
+    // This used to be an `Evidence[]` and nothing else, and the pipeline pushed
+    // it onto `r.evidence` only — so the market median reached the operator's
+    // citation chips and never reached the composer, which is given `r.facts`.
+    // The model was never shown the number it had just been billed for, and had
+    // it cited one anyway `claimGroundingGuard` would have blocked the reply for
+    // citing an id that resolves to nothing. One source, two shapes.
+    const scored: { fact: Fact; score: number }[] = [
       {
-        factId: `listing:${listing.id}#price`, source: "listing", corpus: "listing", label: "Listing · price",
-        text: `${listing.title} size ${listing.size} is listed at ${formatMoney(listing.priceCents)}.`,
-        score: 1, listingVersion: listing.version,
+        score: 1,
+        fact: mkFact({
+          factId: `listing:${listing.id}#price`, source: "listing", corpus: "listing",
+          label: "Listing · price", field: "price",
+          text: `${listing.title} size ${listing.size} is listed at ${formatMoney(listing.priceCents)}.`,
+          listingId: listing.id, listingVersion: listing.version, numericCents: listing.priceCents,
+        }),
       },
     ];
     if (med) {
       // The fact TEXT is what a reply quotes and what the grounding guard checks
       // it against, so the basis has to be in the sentence itself — not only in
       // a field beside it that the composer never sees.
-      evidence.push({
-        factId: `market:${listing.sku}#median`,
-        source: "market",
-        corpus: "listing",
-        label: basis === "asking" ? "Market · asking now" : "Market · comps",
-        text:
-          basis === "asking"
-            ? `Median ASKING price across ${comps.length} active eBay listings matching ${listing.sku} is ${formatMoney(med)}. These are current asking prices, not sold prices.`
-            : `Median of ${comps.length} recent comparable sales for ${listing.sku} is ${formatMoney(med)}.`,
+      scored.push({
         score: basis === "asking" ? 0.8 : 0.95,
+        fact: mkFact({
+          factId: `market:${listing.sku}#median`,
+          source: "market",
+          corpus: "listing",
+          // NOT `price`. A median of what other people are asking is not this
+          // lot's price, and a `price` field here would offer the guard a
+          // second "current price" to check a quote against.
+          field: "market",
+          label: basis === "asking" ? "Market · asking now" : "Market · comps",
+          text:
+            basis === "asking"
+              ? `Median ASKING price across ${comps.length} active eBay listings matching ${listing.sku} is ${formatMoney(med)}. These are current asking prices, not sold prices.`
+              : `Median of ${comps.length} recent comparable sales for ${listing.sku} is ${formatMoney(med)}.`,
+          // No `listingId`: this number belongs to the market, not to a lot, so
+          // it has no version to go stale against.
+          numericCents: med,
+        }),
       });
     }
+    const evidence: Evidence[] = scored.map((x) => toEvidence(x.fact, x.score));
 
     return {
       query,
@@ -128,6 +152,7 @@ export class ResearchService {
       specDiff: await this.specDiff(listing),
       latencyMs: Math.round(performance.now() - t0),
       evidence,
+      facts: scored.map((x) => x.fact),
     };
   }
 

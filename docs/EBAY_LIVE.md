@@ -224,11 +224,13 @@ watching the show.
    finishes the session the way a detach would — report written, slot freed. A seller can
    still end it by hand at any time. The cost of inferring is the fifteen minutes: a show
    that ends cleanly is not reported until they elapse.
-6. **Replies are not delivered — and not only here.** `Pipeline.send()` marks the proposal
-   `sent`, appends a `reply_sent` audit entry and returns; there is no platform call on any
-   path, on any surface. eBay's own absence of a chat-post API is why this surface was built
-   that way, but no other surface has a send path either. A reply is composed, guarded,
-   recorded and audited; a human posts it.
+6. **Replies are not delivered, and the code now says so too.** There is no chat-post
+   API. The capability row claimed `delivery: "api"` until 2026-09-19, which is what
+   made the console render a primary **Send** and toast "Reply sent to @buyer" over a
+   reply nobody received; it is `draft-only` now and the server enforces it (see
+   `docs/SURFACES.md`, "`delivery` is a contract"). What happens is: the reply is
+   composed against your catalog, checked by the guards, recorded, audited — and you
+   paste it into the show's chat.
 7. **Terms of service.** Automated access to eBay is restricted. This is fine for a
    prototype you run yourself; anything beyond that needs a partner or official route.
 

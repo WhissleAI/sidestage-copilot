@@ -200,7 +200,10 @@ describe("what each surface still needs", () => {
     assert.deepEqual(empty.before.map((s) => s.done), [false, false, false, false]);
     assert.equal(empty.connected, false);
     assert.equal(empty.missing, "a connected eBay account");
-    assert.equal(empty.during, "answers and acts");
+    // eBay Live acts — five real listing writes — and does NOT deliver a
+    // reply: eBay publishes no chat-post API, which is why this surface is
+    // read through a browser at all. Both halves, or the row lies about one.
+    assert.equal(empty.during, "answers you send, and acts");
 
     const ready = row(
       facts({ ebayConnected: true, ebaySignedIn: true, ownCatalogItems: 40, ownCatalogs: 1, prepared: 2 }),
@@ -238,8 +241,9 @@ describe("what each surface still needs", () => {
 
   test("during and after are read off the declared capabilities", () => {
     // Not a per-surface string table: a surface that loses `delivery: "api"`
-    // must stop claiming it can send in the same edit.
-    assert.equal(duringPhrase(capabilitiesOf("ebaylive")), "answers and acts");
+    // must stop claiming it can send in the same edit. eBay Live is the proof
+    // — it lost the claim, and this row changed with it.
+    assert.equal(duringPhrase(capabilitiesOf("ebaylive")), "answers you send, and acts");
     assert.equal(duringPhrase(capabilitiesOf("twitch")), "answers and acts");
     assert.equal(duringPhrase(capabilitiesOf("whatnot")), "answers, you send");
     assert.equal(duringPhrase(capabilitiesOf("reddit")), "drafts only");
@@ -256,7 +260,10 @@ describe("what each surface still needs", () => {
       assert.equal(typeof s.connected, "boolean", s.id);
       assert.ok(s.missing === null || typeof s.missing === "string", s.id);
       assert.ok(Array.isArray(s.before) && s.before.length > 0, s.id);
-      assert.ok(["answers and acts", "answers, you send", "drafts only"].includes(s.during), s.id);
+      assert.ok(
+        ["answers and acts", "answers you send, and acts", "answers, you send", "drafts only"].includes(s.during),
+        s.id,
+      );
       assert.ok(["report and follow-ups", "a record of what you sent"].includes(s.after), s.id);
     }
   });

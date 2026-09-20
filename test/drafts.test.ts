@@ -58,6 +58,8 @@ const proposal = (over: Partial<ReplyProposal> = {}): ReplyProposal => ({
   status: "ready",
   draft: "Yes — UK shipping is $18 and goes out the next working day.",
   claims: [], evidence: [], guards: [], verdict: "allow", confidence: 0.82, repaired: false,
+  // Reddit is draft-only, and so is every other surface in this build.
+  delivery: "human",
   spans: {
     admitMs: 1, classifyMs: 1, retrieveMs: 1, composeMs: 1, guardMs: 1, repairMs: 0,
     totalMs: 5, cacheHit: false, budgetMs: 1200, overBudget: false,

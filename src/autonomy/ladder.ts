@@ -24,13 +24,16 @@
 //   L4 AUTO_ACT    bounded writes (stock fixes, markdowns above the seller's
 //                  floor) execute themselves inside the undo window.
 //
-// Two rules hold at every rung and are not configurable:
+// Three rules hold at every rung and are not configurable:
 //   • A guardrail `block` NEVER auto-sends. The ladder can only ever act on a
 //     draft the guards already allowed.
 //   • Auto-acting is restricted to action kinds whose preflight is fully
 //     decidable from catalog state. Anything needing judgement stays with the seller.
+//   • Nothing auto-sends on a surface that cannot deliver. L3 on eBay Live,
+//     Whatnot, TikTok or Reddit means "pre-approved, no review needed" — the
+//     operator is still the sender, because there is nobody else.
 
-import type { ActionKind, AutonomyLevel, ChatIntent, Verdict } from "../domain/types.js";
+import type { ActionKind, AutonomyLevel, ChatIntent, ReplyDelivery, Verdict } from "../domain/types.js";
 
 /** Intents whose answers are pure policy or pure catalog lookup — the ones a
  *  deterministic guard can fully verify. Price and discount are deliberately NOT
@@ -55,7 +58,7 @@ export const rung = (l: AutonomyLevel): number => LADDER.indexOf(l);
 
 export type ReplyDisposition =
   | { kind: "drop"; why: string }
-  | { kind: "suggest" }
+  | { kind: "suggest"; why?: string }
   | { kind: "needs_review"; why: string }
   | { kind: "blocked"; why: string }
   | { kind: "auto_send" };
@@ -66,6 +69,14 @@ export interface ReplyDecisionInput {
   verdict: Verdict;
   confidence: number;
   abstained: boolean;
+  /**
+   * What sending actually DOES on this show — not what the surface would like
+   * to be able to do. Required rather than defaulted: a caller that has not
+   * worked out whether anything can deliver here has no business auto-sending,
+   * and a default of `"api"` would be a fail-open in the one decision that
+   * removes the human.
+   */
+  delivery: ReplyDelivery;
 }
 
 /** What happens to a drafted reply at the current rung. */
@@ -78,6 +89,17 @@ export function decideReply(i: ReplyDecisionInput): ReplyDisposition {
   if (i.verdict === "revise") return { kind: "needs_review", why: "a guardrail asked for a revision" };
 
   if (rung(i.level) >= rung("L3_AUTO_REPLY")) {
+    // Nothing sends itself where nothing sends.
+    //
+    // L3's promise is that an allow-listed reply "sends itself" — so on a
+    // surface with no delivery path it promises something that cannot happen,
+    // and marking the proposal `auto_sent` would record a delivery to a buyer
+    // who got nothing, with no human in the loop to notice. The rung still
+    // means something here and it is worth having: the draft is pre-approved,
+    // it needs no review, and the operator posts it. It is just not sent.
+    if (i.delivery !== "api") {
+      return { kind: "suggest", why: "nothing delivers a reply on this surface — pre-approved, yours to send" };
+    }
     if (!i.intent || !AUTO_REPLY_INTENTS.has(i.intent)) {
       return { kind: "needs_review", why: `intent "${i.intent ?? "unknown"}" is outside the auto-reply allow-list` };
     }

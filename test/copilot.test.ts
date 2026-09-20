@@ -202,13 +202,26 @@ test("a reply that failed a guardrail is never cached", async () => {
 
 test("a blocked draft never auto-sends, at any rung", async () => {
   for (const level of ["L1_SUGGEST", "L2_ONE_TAP", "L3_AUTO_REPLY", "L4_AUTO_ACT"] as const) {
-    const d = decideReply({ level, intent: "shipping", verdict: "block", confidence: 0.99, abstained: false });
+    const d = decideReply({ level, intent: "shipping", verdict: "block", confidence: 0.99, abstained: false, delivery: "api" });
     assert.equal(d.kind, "blocked", `${level} must not auto-send a blocked draft`);
   }
 });
 
+test("nothing auto-sends where nothing can deliver, however high the rung", async () => {
+  // The rung is not the only question. eBay Live, Whatnot, TikTok and Reddit
+  // have no way for us to put a reply in front of the person who asked, so an
+  // "auto-sent" proposal there would record a delivery that did not happen and
+  // would do it with no human in the loop to notice. L3 still earns something
+  // — the draft is pre-approved and needs no review — it is just not sent.
+  for (const level of ["L3_AUTO_REPLY", "L4_AUTO_ACT"] as const) {
+    const d = decideReply({ level, intent: "shipping", verdict: "allow", confidence: 0.99, abstained: false, delivery: "human" });
+    assert.equal(d.kind, "suggest", `${level} must not auto-send where nothing delivers`);
+    assert.match(d.kind === "suggest" ? d.why ?? "" : "", /yours to send/);
+  }
+});
+
 test("L3 auto-sends only allow-listed intents above the confidence floor", async () => {
-  const base = { level: "L3_AUTO_REPLY" as const, verdict: "allow" as const, abstained: false };
+  const base = { level: "L3_AUTO_REPLY" as const, verdict: "allow" as const, abstained: false, delivery: "api" as const };
   assert.equal(decideReply({ ...base, intent: "shipping", confidence: 0.9 }).kind, "auto_send");
   assert.equal(decideReply({ ...base, intent: "returns", confidence: 0.9 }).kind, "auto_send");
   // Price and discount move during a show — never auto-answered.
@@ -219,9 +232,9 @@ test("L3 auto-sends only allow-listed intents above the confidence floor", async
 });
 
 test("L1 suggests, L0 drops, and abstention always needs a human", async () => {
-  assert.equal(decideReply({ level: "L1_SUGGEST", intent: "shipping", verdict: "allow", confidence: 0.9, abstained: false }).kind, "suggest");
-  assert.equal(decideReply({ level: "L0_OBSERVE", intent: "shipping", verdict: "allow", confidence: 0.9, abstained: false }).kind, "drop");
-  assert.equal(decideReply({ level: "L4_AUTO_ACT", intent: "shipping", verdict: "allow", confidence: 0.99, abstained: true }).kind, "needs_review");
+  assert.equal(decideReply({ level: "L1_SUGGEST", intent: "shipping", verdict: "allow", confidence: 0.9, abstained: false, delivery: "api" }).kind, "suggest");
+  assert.equal(decideReply({ level: "L0_OBSERVE", intent: "shipping", verdict: "allow", confidence: 0.9, abstained: false, delivery: "api" }).kind, "drop");
+  assert.equal(decideReply({ level: "L4_AUTO_ACT", intent: "shipping", verdict: "allow", confidence: 0.99, abstained: true, delivery: "api" }).kind, "needs_review");
 });
 
 test("actions auto-commit only at L4, only for bounded kinds, only after preflight", async () => {

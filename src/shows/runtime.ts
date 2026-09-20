@@ -21,7 +21,6 @@ import { MockMarketplace } from "../actions/marketplace/mock.js";
 import { EbayMarketplace } from "../actions/marketplace/ebay.js";
 import { EbayOAuth } from "../ingest/ebay/oauth.js";
 import type { MarketplaceAdapter } from "../actions/marketplace/port.js";
-import type { RemoteListing } from "../actions/marketplace/port.js";
 import { ResearchService } from "../research/research.js";
 import { enrichLot, needsIdentity } from "../ingest/enrichLot.js";
 import { SessionRecord, buildReport, type ShowReport } from "./sessionRecord.js";
@@ -38,6 +37,7 @@ import type { Fact } from "../retrieval/facts.js";
 import { spendWindow } from "../llm/billing.js";
 import type { AutonomyLevel, ShowState } from "../domain/types.js";
 import type { SurfaceConnection, SurfaceId } from "../surfaces/types.js";
+import { SurfaceRooms } from "../surfaces/rooms.js";
 import { get as surfaceAdapter } from "../surfaces/registry.js";
 import { SimulatedShowSource, ScriptedHostAudio, type ChatSource } from "../ingest/sources.js";
 
@@ -104,6 +104,8 @@ export class ShowRuntime {
   readonly showContext: ShowContextEngine;
   readonly pipeline: Pipeline;
   readonly market: MockMarketplace;
+  /** Which rooms this show's owner has agreed we may speak in. */
+  private readonly rooms: SurfaceRooms;
   /**
    * Where this show's writes actually land.
    *
@@ -162,6 +164,7 @@ export class ShowRuntime {
     this.audit = new AuditLog(this.db, o.showId);
     this.market = new MockMarketplace([]);
     this.adapter = this.market;
+    this.rooms = new SurfaceRooms(this.db);
 
     const emit = (event: string, data: unknown) => o.events.emit(this.showId, event, data);
 
@@ -181,6 +184,16 @@ export class ShowRuntime {
       // The seller's setting, not an environment variable — they are the one
       // who decides how long a committed write stays one keystroke from undo.
       undoWindowS: policy().automation.undoWindowS,
+      // The rooms switch, joined to the preflight that has always asked for it.
+      // Scoped to this show's owner and this show's room: a posting permission
+      // is one account's decision about one room, and a lookup that lost either
+      // half would be a permission granted by somebody else.
+      postingFor: async () => {
+        const room = this.o.externalId ?? "";
+        const owner = this.ownerAccountId ?? (await this.loadOwner());
+        if (!owner || !room) return { room: room || "this room", enabled: false };
+        return this.rooms.posting(owner, this.o.source, room);
+      },
       onChange: (a) => {
         emit("action", a);
         void this.audit.list(1).then((rows) => { if (rows[0]) emit("audit", rows[0]); });
@@ -223,6 +236,13 @@ export class ShowRuntime {
       proposer: this.proposer,
       showContext: this.showContext,
       audit: this.audit,
+      // No `deliver`, on any surface, deliberately. Nothing in this build can
+      // put a reply in front of a buyer: eBay Live and the scraped rooms have
+      // no chat-post API, Reddit is draft-only in code as a product
+      // commitment, and Twitch's `post_reply` — the one real mechanism — runs
+      // through the action executor and is not wired to the console's Send.
+      // So every accepted reply is recorded as delivered by a human, which is
+      // what happens. See PipelineDeps.deliver.
       events: {
         onChat: (m) => {
           emit("chat", m);
@@ -347,10 +367,9 @@ export class ShowRuntime {
       });
     }
 
-    const remote: RemoteListing[] = this.lotRows.map((l) => ({
-      id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
-    }));
-    this.market.reset(remote);
+    // The marketplace mirror is seeded by `refreshIndex`, above and on every
+    // later change to the listing set — not once, here, from a show that has
+    // not loaded its catalog yet.
   }
 
   private lotRows: ListingWithDescription[] = [];
@@ -409,6 +428,25 @@ export class ShowRuntime {
     await this.retriever.rebuild();
     this.lotRows = await this.repo.listings();
     this.lots = this.lotRows.map((l) => ({ id: l.id, title: `${l.title} size ${l.size}` }));
+
+    // Re-seed the marketplace mirror from the lots that exist NOW.
+    //
+    // This used to happen once, at the end of `init()`, from whatever the show
+    // held at that moment. A freshly attached show holds nothing: the catalog
+    // is applied after attach and live lots are discovered later still, so
+    // every lot a real show actually sells was unknown to the mock and
+    // `reserve` answered "listing lst_xxx does not exist remotely" — a green
+    // preflight checklist followed by a failed commit. The demo show was
+    // seeded before `init` ran, which is why nothing caught it.
+    //
+    // `refreshIndex` is the one place that reloads the local listing set, so it
+    // is the one place the mirror can be kept in step with it. Seeding from the
+    // local rows is also what makes the version check mean something: a lot
+    // whose price moved under a proposal now conflicts, which is what the
+    // optimistic concurrency is for, instead of vanishing.
+    this.market.reset(this.lotRows.map((l) => ({
+      id: l.id, priceCents: l.priceCents, qty: l.qty, state: l.state, pinned: l.pinned, version: l.version,
+    })));
 
     // Warm the market cache for the lots about to be asked about — the pinned
     // one first, then the front of the queue. eBay is slow enough that fetching

@@ -31,7 +31,18 @@ export type Tempo = "live" | "async";
 /** What a surface can DO, so the UI and the guards stop guessing. */
 export interface SurfaceCapabilities {
   tempo: Tempo;
-  /** Can a reply be delivered by us, or only drafted for a human to send? */
+  /**
+   * Can a reply be delivered BY US, or only drafted for a human to send?
+   *
+   * A contract, not a label. `api` is a claim that a code path exists which
+   * puts our text in front of the person who asked — today that is exactly one
+   * mechanism, Twitch's `post_reply` action. Anything else is `draft-only`, and
+   * the server enforces it: `preflight` refuses `post_reply`, the rooms route
+   * refuses to store a posting switch, `Pipeline.send` refuses to record a
+   * delivery, and the ladder refuses to auto-send. Declaring `api` for a
+   * surface that has no such path is how the console spent months toasting
+   * "Reply sent to @buyer" for replies no buyer ever received.
+   */
   delivery: "api" | "draft-only";
   /** Does this surface carry the operator's audio / video? */
   perception: { audio: boolean; video: boolean };
@@ -125,7 +136,21 @@ export class SurfaceUnavailable extends Error {
  *  description of existing behaviour, not a new decision. */
 export const EBAYLIVE_CAPABILITIES: SurfaceCapabilities = {
   tempo: "live",
-  delivery: "api",
+  // `draft-only`, and it always was.
+  //
+  // eBay publishes no chat-post API for a Live event — that absence is the
+  // entire reason this surface is read by a scraped browser session rather
+  // than a client. `docs/EBAY_LIVE.md` has said "Replies are not delivered"
+  // since the surface landed, and `docs/PRD.md` listed delivery as ✗. Only
+  // this row said otherwise, and because the console renders its Send button
+  // and its "Reply sent to @buyer" toast off this row, the reference
+  // surface's most-used button reported a success that never happened and the
+  // answered-rate metric counted replies nobody received.
+  //
+  // What actually happens is worth stating, because it is real and it is what
+  // the product is for: the reply is composed against the seller's catalog,
+  // checked by eight guards, recorded, audited — and a human posts it.
+  delivery: "draft-only",
   perception: { audio: true, video: true },
   actions: ["push_listing", "swap_pinned", "markdown_price", "adjust_stock", "end_listing"],
   corpora: ["listing", "policy", "qa", "community"],

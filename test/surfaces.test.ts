@@ -81,7 +81,12 @@ describe("what a surface can do", () => {
   test("eBay Live's capabilities describe eBay Live as it already behaves", () => {
     const c = capabilitiesOf("ebaylive");
     assert.equal(c.tempo, "live");
-    assert.equal(c.delivery, "api");
+    // Draft-only, because eBay publishes no chat-post API for a Live event —
+    // the absence this whole surface is scraped because of. It declared "api"
+    // for months, which is what made the console render a primary Send and
+    // toast "Reply sent to @buyer" for replies nobody received.
+    assert.equal(c.delivery, "draft-only");
+    assert.equal(c.actions.includes("post_reply"), false);
     assert.deepEqual(c.perception, { audio: true, video: true });
     assert.ok(c.actions.includes("markdown_price"));
     assert.ok(hasCorpus(c, "listing"));

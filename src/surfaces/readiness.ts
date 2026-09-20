@@ -24,6 +24,7 @@
 //      from `missingTwitchKey` and `missingCredential` themselves rather than
 //      from a second list that can drift.
 
+import type { ActionKind } from "../domain/types.js";
 import { capabilitiesOf, type SurfaceCapabilities, type SurfaceId, type Tempo } from "./types.js";
 import { missingTwitchKey } from "./twitch/api.js";
 import { missingCredential as missingRedditCredential } from "./reddit/api.js";
@@ -105,38 +106,48 @@ const blanked = (env: NodeJS.ProcessEnv, name: string): string =>
   env.NODE_ENV === "test" ? "" : env[name] ?? "";
 
 /**
- * What the surface can do with a reply once it has written one.
+ * Actions that change nothing anybody outside this product can see.
+ *
+ * Marking a highlight and handing a question to a human write to our own rows;
+ * a reply is a reply, not an act. A surface whose whole action set is in here
+ * does not "act" in the sense this phrase claims — which is the scraped
+ * surfaces exactly, where the five listing writes are absent because we hold no
+ * credentials for those marketplaces.
+ */
+const OWN_RECORDS_ONLY: ReadonlySet<ActionKind> = new Set<ActionKind>([
+  "mark_highlight", "flag_for_human", "post_reply",
+]);
+
+/**
+ * What the surface can do with a reply once it has written one, and whether it
+ * also acts.
  *
  * Read off the declared capabilities rather than hard-coded per surface: a
  * surface that loses `delivery: "api"` must stop claiming it can send, in the
- * same edit, without anybody remembering this file.
+ * same edit, without anybody remembering this file. eBay Live lost it.
  *
- * KNOWN DEFECT — this reads the capability TABLE, not the wiring, so it
- * promises what a surface declares rather than what is plugged in. Two
- * consequences today:
- *   · No surface delivers anything. `Pipeline.send()` records and audits; there
- *     is no platform call on any path. Every branch below that assumes
- *     `delivery: "api"` means "we can send" is describing an intention.
- *   · Twitch reads "answers and acts" because its capability row declares
- *     `create_clip`, `run_poll` and the rest. `src/surfaces/twitch/actions.ts`
- *     is imported by its test and by nothing in `src/`, so no executor reaches
- *     it. The next surface will make the same claim the day its row lands and
- *     before its executor does.
- * Left as-is: correcting the phrase means deciding what it should read from,
- * which is a behaviour change.
+ * Still true of ACTIONS, though delivery is now a server contract: this
+ * reads the capability table, so Twitch reads "acts" because its row declares
+ * create_clip and run_poll, while `src/surfaces/twitch/actions.ts` is imported
+ * by its test and by nothing in `src/`. The next surface will make the same
+ * claim the day its row lands and before its executor does.
  */
 export function duringPhrase(caps: SurfaceCapabilities): string {
+  const acts = caps.actions.some((a) => !OWN_RECORDS_ONLY.has(a));
   if (caps.delivery === "draft-only") {
     // An async surface is a queue of drafts and nothing else. A live one that
     // cannot deliver is still answering in the moment — the operator is the
     // one who presses send, in their own browser, while the room is open.
-    return caps.tempo === "async" ? "drafts only" : "answers, you send";
+    //
+    // The two axes are independent, and eBay Live is why this has to say both:
+    // it cannot deliver a reply (there is no chat-post API) and it genuinely
+    // does act (five real listing writes against the seller's own catalog).
+    // Collapsing that to "answers, you send" would hide the half of the
+    // product that reaches a buyer, and "answers and acts" claimed the half
+    // that does not.
+    if (caps.tempo === "async") return "drafts only";
+    return acts ? "answers you send, and acts" : "answers, you send";
   }
-  // Delivery is ours. Whether it also ACTS is the question of whether it has
-  // an action that changes something outside the conversation — a price, a
-  // clip, a poll, a pin. `flag_for_human` and `post_reply` are the two that
-  // never leave it.
-  const acts = caps.actions.some((a) => a !== "post_reply" && a !== "flag_for_human");
   return acts ? "answers and acts" : "answers, you send";
 }
 
