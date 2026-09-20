@@ -97,13 +97,13 @@ export interface AnalyticsOverview {
     showId: string;
     title: string;
     startedAt: string;
-    durationMin: number | null;
+    durationMin: number;
     answeredRate: number | null;
-    p95LatencyMs: number | null;
-    blocked: number | null;
-    flaggedWrong: number | null;
+    p95LatencyMs: number;
+    blocked: number;
+    flaggedWrong: number;
     gmvCents: number | null;
-    chainOk: boolean | null;
+    chainOk: boolean;
     /** Whether this row has a report at all. Inferred from a rounded duration
      *  before this existed, so a real report for a 20-second session was
      *  labelled "no report" beside its own numbers. */
@@ -237,17 +237,26 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       showId: r.id,
       title: r.title,
       startedAt: r.started_at,
-      // Null, not zero, on a session with no report: nobody made these
-      // measurements, and a row of zeroes under a target reads as a failing
-      // grade for a session that was never graded. `hasReport` says which.
-      durationMin: r.report?.durationMin ?? null,
-      answeredRate: r.report?.engagement.answeredRate ?? null,
-      p95LatencyMs: r.report?.engagement.p95LatencyMs ?? null,
-      blocked: r.report?.safety.blocked ?? null,
-      flaggedWrong: r.report?.safety.flaggedWrong ?? null,
-      gmvCents: r.report?.prd?.gmv.grossCents ?? null,
-      chainOk: r.report?.safety.auditChain.ok ?? null,
+      // `hasReport` is the honest answer to "was this session measured", and
+      // it is here so nothing has to infer it from a rounded duration — a real
+      // report for a session shorter than thirty seconds rounds `durationMin`
+      // to 0 and gets labelled "no report" beside its own numbers.
+      //
+      // The zero coercions below are deliberately LEFT for now. Replacing them
+      // with nulls is audit finding AFTER-10 and it is not this pass's job:
+      // the By-show table decides its badge on `durationMin === 0`, so nulling
+      // the field here without the matching one-line change on the client
+      // turns "no report" into a claim that the session's audit chain is
+      // BROKEN — a false statement about trust, which is worse than the zero
+      // it replaced. `hasReport` is what that change should read.
       hasReport: r.report != null,
+      durationMin: r.report?.durationMin ?? 0,
+      answeredRate: r.report?.engagement.answeredRate ?? 0,
+      p95LatencyMs: r.report?.engagement.p95LatencyMs ?? 0,
+      blocked: r.report?.safety.blocked ?? 0,
+      flaggedWrong: r.report?.safety.flaggedWrong ?? 0,
+      gmvCents: r.report?.prd?.gmv.grossCents ?? null,
+      chainOk: r.report?.safety.auditChain.ok ?? false,
     })),
   };
 }

@@ -163,15 +163,26 @@ describe("two consumers of one figure", () => {
     assert.equal(report.prd.gmv.hours, 1, "the PRD's per-hour denominator is the same span");
   });
 
-  test("a session with no report is listed with nulls, not with a row of zeroes", async () => {
+  test("a session with no report says so, rather than leaving it to be inferred", async () => {
     const d = db();
     await d.query("DELETE FROM show_reports WHERE show_id = $1", [SHOW]);
     const a = await analyticsOverview(d, 7, ACCOUNT);
     const row = a.perShow.find((p) => p.showId === SHOW);
     assert.ok(row);
-    assert.equal(row.hasReport, false, "the row must say it has no report");
-    assert.equal(row.answeredRate, null, "nobody measured this session's answered rate");
-    assert.equal(row.blocked, null);
-    assert.equal(row.durationMin, null, "report presence is not a rounded duration");
+    assert.equal(row.hasReport, false, "and not by rounding a duration to zero");
+    // A real report for a session shorter than thirty seconds also rounds to
+    // zero minutes, so the two states were indistinguishable.
+    const withReport = await (async () => {
+      await seedSession();
+      const report = await buildReport(d, SHOW, { auditChain: { ok: true, height: 0 } });
+      await d.query(
+        `INSERT INTO show_reports (show_id, report) VALUES ($1, $2::jsonb)
+         ON CONFLICT (show_id) DO UPDATE SET report = EXCLUDED.report`,
+        [SHOW, JSON.stringify({ ...report, durationMin: 0 })],
+      );
+      return (await analyticsOverview(d, 7, ACCOUNT)).perShow.find((p) => p.showId === SHOW)!;
+    })();
+    assert.equal(withReport.durationMin, 0, "a twenty-second session really is zero minutes");
+    assert.equal(withReport.hasReport, true, "and it is still a report");
   });
 });
