@@ -99,18 +99,46 @@ describe("the seam that broke", () => {
 });
 
 describe("read routes answer the shape the console destructures", () => {
-  test("GET /health proves the process is alive and says nothing else", async () => {
+  test("GET /health asks Postgres, and still says nothing else", async () => {
     // Deliberately UNauthenticated: this is the one route open to the
     // internet, and it used to answer with every live session on the box —
     // show id, owner account, agent id, seller handle, the eBay event, and
     // whether writes were armed against real eBay. The console's status dot
     // reads the status code and nothing else, so there is nothing to carry.
+    //
+    // It now issues one `SELECT 1`, because a literal `ok: true` reported
+    // green through a total database outage: its only potentially DB-touching
+    // call mapped over an in-memory map and issued zero queries. What it
+    // reports is a boolean and a duration — enough to tell "slow" from "gone"
+    // and not enough to identify anything. The REASON goes to the log and to
+    // the authenticated /api/diagnostics.
     const r = await app.inject({ method: "GET", url: "/health" });
     assert.equal(r.statusCode, 200);
     const b = r.json();
     assert.equal(b.ok, true);
-    assert.deepEqual(Object.keys(b), ["ok"], `/health published ${JSON.stringify(b)}`);
+    assert.deepEqual(Object.keys(b), ["ok", "database"], `/health published ${JSON.stringify(b)}`);
+    assert.equal(b.database.ok, true);
+    assert.equal(typeof b.database.ms, "number");
+    assert.deepEqual(Object.keys(b.database), ["ok", "ms"]);
     assert.doesNotMatch(r.body, /show|agent|account|seller|catalog/i);
+  });
+
+  test("the richer answer is behind a session, because it describes the deployment", async () => {
+    const anon = await app.inject({ method: "GET", url: "/api/diagnostics" });
+    assert.equal(anon.statusCode, 401);
+
+    const r = await inject({ method: "GET", url: "/api/diagnostics" });
+    assert.equal(r.statusCode, 200);
+    const b = r.json();
+    assert.equal(b.database, true);
+    assert.equal(typeof b.browsers.open, "number");
+    assert.equal(typeof b.browsers.max, "number");
+    assert.equal(typeof b.droppedEvents, "number");
+    assert.ok(Array.isArray(b.warnings));
+    // Resolved configuration, so two boxes can be compared without guessing —
+    // with every secret reduced to set/unset.
+    assert.equal(b.config.whissleApiKey === "set" || b.config.whissleApiKey === "unset", true);
+    assert.doesNotMatch(JSON.stringify(b.config), /[0-9a-f]{32}/i);
   });
 
   test("GET /api/show carries the fields the top bar reads", async () => {

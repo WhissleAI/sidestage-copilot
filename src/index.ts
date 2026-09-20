@@ -7,7 +7,7 @@
 // The operator console (the separate frontend repo) points at this with
 // VITE_API_BASE=http://localhost:8790 and VITE_USE_MOCKS=false.
 
-import { config } from "./config.js";
+import { checkConfig, config, configSummary } from "./config.js";
 import { buildApp } from "./api/server.js";
 import { db as pgPool } from "./db/pg.js";
 import { startFollowingPoller } from "./sellers/following.js";
@@ -16,6 +16,34 @@ import { retireStaleAgents, startAgentGc } from "./llm/agentGc.js";
 import { onAgentCap } from "./llm/streamAgent.js";
 
 async function main(): Promise<void> {
+  // Configuration is checked HERE, before a port is opened and before a
+  // migration runs. Every variable used to be discovered at first use — no
+  // schema, no required set, no report of what was read — so a malformed one
+  // surfaced as a 500 on whichever workflow touched it first, at whatever hour
+  // that happened to be, and a missing one surfaced as nothing at all.
+  const problems = checkConfig();
+  const refuse = problems.filter((p) => p.level === "refuse");
+  const warn = problems.filter((p) => p.level === "warn");
+  if (warn.length) {
+    // Boxed, because the thing this exists for — a seller's eBay credential
+    // with nowhere safe to go — was previously ONE line in a process that
+    // emitted eleven in sixteen hours.
+    process.stderr.write(
+      `\n${"!".repeat(74)}\n` +
+      warn.map((p) => `!! ${p.name} ${p.detail}`).join(`\n${"!".repeat(74)}\n`) +
+      `\n${"!".repeat(74)}\n\n`,
+    );
+  }
+  if (refuse.length) {
+    process.stderr.write(
+      `\nSideStage will not start — the configuration is wrong:\n` +
+      refuse.map((p) => `  ${p.name} ${p.detail}`).join("\n") +
+      `\n\nFix the value and start again. Nothing has been changed.\n\n`,
+    );
+    process.exit(78); // EX_CONFIG
+  }
+  for (const [k, v] of Object.entries(configSummary())) console.log(`  config  ${k.padEnd(20)} ${v}`);
+
   const { app, ctx } = await buildApp();
 
   await app.listen({ port: config.port, host: "0.0.0.0" });
@@ -47,12 +75,22 @@ async function main(): Promise<void> {
   );
 
   const shutdown = async () => {
-    stopFollowing();
-    stopAgentGc();
-    stopBudgetWatch();
-    await ctx.stop();
-    await app.close();
-    process.exit(0);
+    // try/finally, because this used to be a bare sequence registered directly
+    // as the signal handler: a rejection from `app.close()` rejected the
+    // handler's promise, so `process.exit` never ran and the container waited
+    // out its grace period to SIGKILL — which is how orphaned Chrome processes
+    // are made.
+    try {
+      stopFollowing();
+      stopAgentGc();
+      stopBudgetWatch();
+      await ctx.stop();
+      await app.close();
+    } catch (e) {
+      console.error(`  shutdown: ${(e as Error).message}`);
+    } finally {
+      process.exit(0);
+    }
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

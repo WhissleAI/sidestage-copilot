@@ -38,6 +38,13 @@ services:
     # everything else keeps serving.
     mem_limit: 1100m
     memswap_limit: 1100m
+    # Docker's default is TEN SECONDS, and the shutdown chain is: drain the
+    # reply pipeline (each in-flight gateway call up to 6s) and THEN close
+    # every browser. On a 2 vCPU box that can exceed ten seconds, at which
+    # point SIGKILL leaves exactly the orphaned Chrome processes `init: true`
+    # above exists to reap. Reaping them is containment, not a reason to keep
+    # making them.
+    stop_grace_period: 45s
     env_file: .env
     environment:
       DATABASE_URL: postgres://sidestage:${POSTGRES_PASSWORD:-sidestage}@db:5432/sidestage

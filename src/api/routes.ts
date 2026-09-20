@@ -64,15 +64,16 @@ import { challengeResponse, honourDeletion, parseNotice, verifyNotification } fr
 import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { db as pgPool } from "../db/pg.js";
-import { config } from "../config.js";
+import { checkConfig, config, configSummary } from "../config.js";
 import { WhissleClient } from "../llm/whissle.js";
 import { describeFrames, describing } from "../shows/frameDescriber.js";
 import { SendRefused } from "../pipeline/pipeline.js";
 import type { ShowRuntime } from "../shows/runtime.js";
 import { GateBusy, RateLimiter } from "./rateLimit.js";
 import type { AppContext } from "./context.js";
-import { recordEvent } from "../obs/events.js";
+import { recordEvent, droppedEvents } from "../obs/events.js";
 import { logSwallowed, logWarn, errText } from "../obs/log.js";
+import { browserBudget } from "../surfaces/browserBudget.js";
 
 /**
  * What resolving a show needs from a request.
@@ -882,7 +883,70 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // A probe needs to know the process answers. The console's own status dot
   // (AppShell) reads nothing but the status code, and a seller who wants the
   // session list has `GET /api/shows`, which is scoped to their account.
-  app.get("/health", async () => ({ ok: true }));
+  /**
+   * Is it up — including the thing most likely to be wrong?
+   *
+   * This used to be a literal `ok: true`. Its only potentially DB-touching
+   * call went through `ShowRegistry.list()`, which maps over an in-memory map
+   * and issues zero queries when nothing is attached. So with Postgres down,
+   * every API call 500s while `/health` says healthy, and any uptime check —
+   * and compose's `depends_on` — reports green through a total outage.
+   *
+   * It answers 200 while DEGRADED and 503 only when the database is gone,
+   * because a monitor that pages on a missing sealing key is a monitor that
+   * gets muted.
+   */
+  app.get("/health", async (_req, reply) => {
+    const started = Date.now();
+    let database: { ok: boolean; ms: number; error?: string };
+    try {
+      await pgPool().query("SELECT 1");
+      database = { ok: true, ms: Date.now() - started };
+    } catch (e) {
+      database = { ok: false, ms: Date.now() - started, error: errText(e) };
+      logWarn("health.database_down", { ms: database.ms, err: database.error });
+    }
+    // Two fields and no more. This route is UNAUTHENTICATED and open to the
+    // internet — it used to answer with every live session on the box, which
+    // is why it says so little now — so the reason a check failed goes to the
+    // log and to `/api/diagnostics`, not into a public response. `ms` is a
+    // duration, which tells an operator "slow" versus "gone" and identifies
+    // nothing.
+    const body = { ok: database.ok, database: { ok: database.ok, ms: database.ms } };
+    return database.ok ? body : reply.code(503).send(body);
+  });
+
+  /**
+   * What an operator needs when /health is not enough.
+   *
+   * Everything the public probe deliberately will not say: how many browsers
+   * are open and what for, whether this box's own record of what it did is
+   * complete, and which configuration values are in a state somebody should
+   * know about. Authenticated, because each of those is a fact about the
+   * deployment rather than about the caller.
+   */
+  app.get("/api/diagnostics", async (req, reply) => {
+    if (!actorOf(req as object)) return reply.code(401).send({ error: "sign in" });
+    let database = false;
+    try {
+      await pgPool().query("SELECT 1");
+      database = true;
+    } catch {
+      database = false;
+    }
+    return {
+      database,
+      // Named rather than counted: "two browsers open" is a number, "two
+      // Whatnot rooms and the eBay discovery poll" is an answer.
+      browsers: browserBudget(),
+      /** Events that never reached Postgres. Non-zero means this box's own
+       *  record of what it did is incomplete, and every figure read off it is
+       *  a floor rather than a count. */
+      droppedEvents: droppedEvents(),
+      warnings: checkConfig().filter((p) => p.level === "warn").map((p) => `${p.name} ${p.detail}`),
+      config: configSummary(),
+    };
+  });
 
   // ── the event stream ──────────────────────────────────────────────────────
   app.get<{ Querystring: { showId?: string } }>("/api/stream", async (req, reply) => {
