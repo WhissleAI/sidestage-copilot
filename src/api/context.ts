@@ -116,25 +116,17 @@ export async function buildContext(): Promise<AppContext> {
       // a page and finds nothing. They are marked `ended` instead, so the
       // database stops claiming something that is not true.
       // A row nothing in this build can resume must not keep claiming to be
-      // live.
+      // live — but "not live" is not the same as "finished". This used to be a
+      // blanket `UPDATE shows SET status = 'ended'` over every non-eBay live
+      // row, which ran BEFORE the sweep below and starved it: the rows were
+      // already `ended`, so `planResume` never saw them, and each one lost its
+      // end time, its report and its cost row. The sweep does this job
+      // properly for every surface, so the update is gone and the reasoning
+      // stays here.
       //
-      // The resume below is `source = 'ebaylive'` only, deliberately: there is
-      // no supervisor for a standing watch yet (docs/SURFACES.md). So a Reddit
-      // room stayed `status = 'live'` after every restart with no runtime
-      // behind it — a session in neither "now" nor "behind you", whose drafts
-      // the queue could not find. The drafts survive (they are rows in
-      // `reply_proposals`, and `/api/drafts` reads them back); the claim that
-      // somebody is still watching the room does not.
-      await pool
-        .query(
-          `UPDATE shows SET status = 'ended'
-            WHERE status = 'live' AND COALESCE(surface, source) NOT IN ('ebaylive', 'simulated')`,
-        )
-        .then((r) => {
-          if (r.rowCount) console.log(`  ${r.rowCount} watch(es) did not survive the restart — marked ended`);
-        })
-        .catch((e) => console.warn(`  could not settle stale watches: ${(e as Error).message}`));
-
+      // The drafts of a standing watch survive either way — they are rows in
+      // `reply_proposals` and `/api/drafts` reads them back. What must not
+      // survive is the claim that somebody is still watching the room.
       const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
       let activatedResume = false;
       try {
