@@ -55,8 +55,27 @@ export const twitchAdapter: SurfaceAdapter = {
   capabilities: capabilitiesOf("twitch"),
   parseTarget(input) { /* a link or a handle, or null */ },
   async open(target, ev) { /* emit through ev.onMessage / onItem / … */ },
+  // Optional, for a surface whose conversations sit in rooms and trees:
+  constraintsFor(target, room) { /* the room's rules, from cache */ },
+  threadFor(target, message, rules) { /* the branch above this message */ },
 };
 ```
+
+### The target is the whole target
+
+`parseTarget` returns a `SurfaceTarget`, and everything an async surface knows
+that a live one does not is in its `meta` — which thread, whose profile, which
+room's rules. `ShowRegistry.attach` used to keep `externalId` and nothing else,
+and `ShowRuntime` rebuilt `{ externalId }` to hand back to `open()`: lossless
+while a target was only ever an eBay Live event id, and silently destructive the
+moment it was not, because a thread link then opened as a watch on a subreddit
+named `t3_1abc2d`. The whole target travels now, and is persisted on the show
+row (migration 024) so a restart reopens what the operator pasted.
+
+A session's identity is the **surface plus the external id plus the account**.
+`whatnot:kicksbyrae` and `twitch:kicksbyrae` both parse to `kicksbyrae`, so a
+lookup on the id alone handed the second operator to paste one the first
+operator's running session.
 
 Register it in `src/surfaces/registry.ts`. `resolve(input)` tries every adapter
 in registration order, and eBay Live is first because it has the tightest
@@ -143,7 +162,7 @@ and preflight refuses any action a surface does not declare. A row in
 
 | | |
 |---|---|
-| `adapter.ts` | `parseTarget` for a subreddit, a user or a thread; `open` starts the poller and warms the room's rules |
+| `adapter.ts` | `parseTarget` for a subreddit, a user or a thread; `open` starts the poller and warms the room's rules; `constraintsFor` and `threadFor` answer the reply path |
 | `api.ts` | the OAuth script-app client — token cache, the User-Agent Reddit rate-limits by, and `x-ratelimit-*` pacing |
 | `poll.ts` | a subreddit's new posts, a profile's comments, or one thread; deduped by fullname |
 | `thread.ts` | the comment tree, and the branch above a message as a `ThreadContext` |
@@ -169,6 +188,23 @@ draft reads "r/mechmarket rule 3 — No vendor self-promotion (community:mechmar
 and the operator's "says who" is answerable from the card. They are cached for
 an hour and warmed at attach, because a draft path that fetched them would
 either block on a network call or compose without them.
+
+They reach the guard chain by their OWN door, not through retrieval.
+`SurfaceAdapter.constraintsFor` → `PipelineDeps.constraints` →
+`GuardInput.community`: cache-only, synchronous, and asked per message so a
+watch on a profile is checked against the rules of the room each comment is
+actually in. The retriever's index is the seller's listings and policies, so a
+rule routed through it could never arrive — which is why `communityRuleGuard`
+answered n/a on every real watch until this existed. A rule is not grounding to
+be ranked against a question: it is in force whether or not it resembles what
+was asked.
+
+**A draft answers the conversation, not the comment.** `threadFor` rebuilds the
+branch above the message — the opening post, then the path down to it — and the
+pipeline hands it to the composer (`=== THE THREAD ===`, with the room's rules
+under it as constraints) and carries it onto the card. A message with a
+`threadId` bypasses the reply cache: the same words under two branches are two
+different questions.
 
 **Some messages should not be drafted for at all.** `src/ingest/classify.ts`
 gained a third axis alongside topic and speech act: is this person **asking**,
@@ -334,10 +370,11 @@ list below is why it was not attempted alongside the drafts queue:
    subreddits would fill the registry and leave an operator unable to attach the
    show they are actually hosting.
 4. **Lifecycle has no owner.** Adding a room does not start a watch, removing
-   one does not stop it, credentials arriving later does not retry, and a
-   restart forgets every non-eBay session — the resume query does not select
-   them and does not mark them ended either, so the row keeps saying `live`
-   while nothing watches.
+   one does not stop it, and credentials arriving later does not retry. A
+   restart still forgets every non-eBay session — the resume query selects
+   `ebaylive` only — but it no longer leaves the row claiming to be live: boot
+   marks a watch it cannot resume as `ended`, and the drafts that watch wrote
+   are read back out of `reply_proposals` rather than dying with the runtime.
 5. **Rate budget is shared and global.** The Reddit script app is one set of
    environment credentials for the whole deployment, not one per account. Every
    account's rooms would poll through the same credential and the same
@@ -366,9 +403,18 @@ confidence, rules) are absent rather than zero.
 
 **The count and the list are one fact.** `now.drafts` on `/api/home` and
 `waiting` on `/api/drafts` are both built by `queueCounts` (`src/api/home.ts`)
-from the same two sources under the same tenancy filter — sessions on air whose
-surface is `async`, plus the account's inbox — so the two payloads are
-deep-equal, ordering included. Waiting means `isWaiting`, the one predicate
+from the same three sources under the same tenancy filter — sessions on air
+whose surface is `async`, the async drafts in `reply_proposals` that no runtime
+is holding, and the account's inbox — so the two payloads are deep-equal,
+ordering included.
+
+**A draft outlives the runtime that wrote it.** The async half of the queue was
+read out of live in-memory pipelines, so a deploy, a detach, or a subreddit
+going private emptied the page of every reply written for that room — while the
+rows sat in `reply_proposals` the whole time. `persistedAsyncDrafts`
+(`src/api/drafts.ts`) reads them back, a live runtime's copy wins by proposal
+id, and mark-sent and dismiss have durable paths with the same refusals and the
+same idempotency the live ones have. Waiting means `isWaiting`, the one predicate
 `ShowRegistry.list` also counts `awaiting` with. A blocked draft is carried in
 the list with `status: "blocked"` and is not waiting: there is nothing to send.
 
