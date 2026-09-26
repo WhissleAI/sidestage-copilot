@@ -69,6 +69,17 @@ const MAX_ITEMS = 80;
  */
 const FORMAT_TAGS = /^(\$?\d+\s*starts?|auction|live|new seller spotlight|deals?)$/i;
 
+/**
+ * Could this string be an eBay account username?
+ *
+ * The seller-results page is keyed on `_ssn=<username>`, and an eBay username
+ * carries no whitespace. A display name that does ("MR WIKD") is not a
+ * candidate for that page at all — asking for it spends a browser load to
+ * learn nothing, and, worse, its empty answer used to read as "this seller has
+ * no listings".
+ */
+export const couldBeUsername = (c: string): boolean => /^[^\s]{2,64}$/.test(c.trim());
+
 function queriesFor(input: PrepareInput): string[] {
   const tags = (input.tags ?? []).filter((t) => t && !FORMAT_TAGS.test(t.trim()));
   if (tags.length) return tags.slice(0, 4);
@@ -172,13 +183,38 @@ export class Preparer {
         // and a real seller. The seller's public results page has no such
         // limit, and the signed-in session can read it. A catalog from there
         // says so, because it is a scrape and a scrape drifts.
-        const fromPage = await sellerListings(candidates[0]!, MAX_ITEMS).catch((e: unknown) => {
-          warnings.push(`could not read the seller's listings page: ${(e as Error).message}`);
-          return [];
-        });
+        // EVERY candidate, not just the first.
+        //
+        // This read used to try `candidates[0]` alone. When
+        // `resolveSellerUsername` finds no `/usr/` link on the seller's Live
+        // page it returns null, and the first candidate becomes the card's
+        // DISPLAY name — "MR WIKD", "SWISS ICE" — which is the one candidate
+        // that cannot be a username, because eBay usernames have no spaces.
+        // `_ssn=MR%20WIKD` matches nothing, and the show prepared with an
+        // empty catalog while the seller's slug, never tried, would have
+        // worked. Two of four real shows failed exactly this way.
+        const pageCandidates = candidates.filter(couldBeUsername);
+        let fromPage: Awaited<ReturnType<typeof sellerListings>> = [];
+        let readAs: string | null = null;
+        for (const c of pageCandidates) {
+          const rows = await sellerListings(c, MAX_ITEMS).catch((e: unknown) => {
+            warnings.push(`could not read ${c}'s listings page: ${(e as Error).message}`);
+            return [];
+          });
+          if (rows.length) {
+            fromPage = rows;
+            readAs = c;
+            break;
+          }
+        }
+        if (!pageCandidates.length) {
+          warnings.push(
+            `none of ${candidates.map((c) => `"${c}"`).join(" or ")} can be an eBay username, so there was no listings page to read`,
+          );
+        }
         if (fromPage.length) {
           warnings.push(
-            `built from ${candidates[0]}'s public listings page (${fromPage.length} items) — the ${config.ebay.env} API does not recognise them as a seller, so this is a page read, not an API read`,
+            `built from ${readAs}'s public listings page (${fromPage.length} items) — the ${config.ebay.env} API does not recognise them as a seller, so this is a page read, not an API read`,
           );
           for (const r of fromPage) {
             if (seen.has(r.itemId) || items.length >= MAX_ITEMS) continue;
