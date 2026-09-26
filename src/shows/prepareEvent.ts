@@ -268,6 +268,40 @@ export class Preparer {
           });
         }
       }
+      // A seller the API DOES know, whose tag queries matched nothing.
+      //
+      // "$1 LIVE WATCH AUCTION" prepared empty this way: the username resolved
+      // and Browse accepted it, so the page-read fallback above never ran, and
+      // then every keyword taken from the show's title and tags returned zero
+      // rows. Knowing exactly whose listings we want and giving up because we
+      // asked the wrong question is the one empty catalog with no excuse — the
+      // results page needs no keyword at all.
+      if (usable && items.length === 0) {
+        const all = await sellerListings(username!, MAX_ITEMS).catch((e: unknown) => {
+          warnings.push(`could not read ${username}'s listings page: ${(e as Error).message}`);
+          return [];
+        });
+        if (all.length) {
+          warnings.push(
+            `no listing matched this show's tags, so the catalog is ${username}'s ${all.length} most recent listings instead`,
+          );
+          for (const r of all) {
+            if (seen.has(r.itemId) || items.length >= MAX_ITEMS) continue;
+            seen.add(r.itemId);
+            items.push({
+              sku: r.itemId,
+              title: r.title,
+              priceCents: r.priceCents,
+              floorPriceCents: r.priceCents,
+              qty: 1,
+              state: "queued",
+              condition: /new/i.test(r.condition ?? "") ? "DS" : "USED",
+              ...(r.imageUrl ? { imageUrl: r.imageUrl } : {}),
+              ...(r.itemWebUrl ? { url: r.itemWebUrl } : {}),
+            });
+          }
+        }
+      }
       if (items.length === 0 && warnings.length === 0) {
         warnings.push(
           `eBay returned no active listings for @${input.sellerHandle} matching this show's tags`,
