@@ -638,14 +638,46 @@ describe("asking every surface at once", () => {
     );
   });
 
-  test("`all` is only ever a question about one named surface", async () => {
+  test("`all` across every surface needs a named surface — unless there is no question to ask", async () => {
+    const nameless = () => answers("twitch", [hit({ id: "nameless", why: [] })]);
+
+    // An operator WITH interests asking for everything everywhere is still
+    // refused: they told us what they sell, and a page of strangers is not an
+    // answer to it.
+    const known = new DiscoverService({ sources: [nameless()] });
+    const everywhere = await known.run({
+      accountId: "a", interests: [{ slug: "pokemon", term: "Pokémon" }], all: true,
+    });
+    assert.deepEqual(everywhere[0]!.hits, [], "asked of every surface it is a page of strangers");
+    assert.equal(everywhere[0]!.unmatched, false);
+
+    const here = await known.run({
+      accountId: "a", interests: [{ slug: "pokemon", term: "Pokémon" }], surface: "twitch", all: true,
+    });
+    assert.equal(here[0]!.hits.length, 1);
+    assert.equal(here[0]!.unmatched, true, "a whole-grid read says its hits carry no reason");
+  });
+
+  test("no interests is not a filter that matches nothing — it is no filter, said out loud", async () => {
+    // The state a brand-new operator is in: no catalog, so no derived terms.
+    // Filtering by nothing returned nothing from all five surfaces, and the
+    // screen above it promised "live right now, on what you sell". The grid is
+    // the honest answer; `unmatched` is what stops it reading as a match.
     const svc = new DiscoverService({
       sources: [answers("twitch", [hit({ id: "nameless", why: [] })])],
     });
-    const everywhere = await svc.run({ accountId: "a", interests: [], all: true });
-    assert.deepEqual(everywhere[0]!.hits, [], "asked of every surface it is a page of strangers");
-    const here = await svc.run({ accountId: "a", interests: [], surface: "twitch", all: true });
-    assert.equal(here[0]!.hits.length, 1);
+    const out = await svc.run({ accountId: "new-operator", interests: [] });
+    assert.equal(out[0]!.hits.length, 1, "what is live comes back rather than an empty page");
+    assert.equal(out[0]!.unmatched, true);
+    assert.deepEqual(out[0]!.hits[0]!.why, [], "and no card claims a reason it does not have");
+  });
+
+  test("a surface that cannot answer still says whether its hits would have been matched", async () => {
+    const svc = new DiscoverService();
+    const out = await svc.run({ accountId: "acct", interests: [], env: {} as NodeJS.ProcessEnv });
+    for (const s of out) {
+      assert.equal(typeof s.unmatched, "boolean", `${s.surface} says it either way`);
+    }
   });
 
   test("the eBay source says why it is empty rather than showing a quiet night", () => {

@@ -2077,6 +2077,26 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   /** Preparations running right now, so the UI can show progress per event. */
   const preparing = new Set<string>();
 
+  /**
+   * Preparations that THREW, by event id, most recent message wins.
+   *
+   * A preparation runs detached, so its only trace was a `console.warn` on the
+   * box. A client that starts one has exactly two observable states — the id is
+   * in `preparing`, or a row appeared in `prepared` — and a throw produces
+   * neither: the id leaves `preparing` and no row ever lands. Anything waiting
+   * on it waits forever, or gives up and says something vague. This is the
+   * third state, and it exists so a client can say what actually went wrong.
+   *
+   * Cleared when the same event is prepared again: a stale failure next to a
+   * fresh success is worse than no failure at all. Bounded because it is a
+   * process-lifetime map keyed by a string a caller chooses.
+   */
+  const prepareFailed = new Map<string, { at: string; error: string }>();
+  const notePrepareFailure = (eventId: string, error: string) => {
+    if (prepareFailed.size >= 200) prepareFailed.delete(prepareFailed.keys().next().value as string);
+    prepareFailed.set(eventId, { at: new Date().toISOString(), error });
+  };
+
   // Unscoped on purpose. A prepared show's agent is created on the workspace's
   // Whissle key and its catalog sits in the shared catalogs directory — it is a
   // workspace resource, and scoping the LIST by whichever session happened to
@@ -2086,6 +2106,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return {
       prepared: await preparer.list(),
       preparing: [...preparing],
+      failed: [...prepareFailed].map(([eventId, f]) => ({ eventId, ...f })),
       session: sessionStatus(),
     };
   });
@@ -2096,6 +2117,17 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * Answers immediately and works in the background: several Browse calls plus
    * an agent creation take the better part of a minute, and a seller clicking
    * "prepare" on four shows should not be watching a spinner for four of them.
+   *
+   * **Only `eventId` is required, and everything else is read off the grid we
+   * already hold.** That is not a convenience. A preparation's entire value is
+   * the seller's listings, and the only key to those is the seller handle —
+   * which arrives on the grid row and on NO other path a client has. Discover's
+   * hits do not carry it (the index sends an id, a title and a reason, by
+   * design) and a pasted URL carries nothing at all, so every caller was
+   * sending `sellerHandle: null` and every preparation was coming back with an
+   * empty catalog, a warning nobody read, and a title of "eBay Live <id>" —
+   * five of which are sitting in this deployment's report list, each with zero
+   * answers. Asking the client for a fact only the server has was the bug.
    */
   app.post<{
     Body: {
@@ -2106,24 +2138,43 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const actor = mustWrite(req as object, reply, "prepare a show");
     if (!actor) return reply;
     const eventId = (req.body?.eventId ?? "").trim();
-    const title = (req.body?.title ?? "").trim();
-    if (!eventId || !title) {
-      return reply.code(400).send({ error: "an eventId and a title are required" });
+    if (!eventId) return reply.code(400).send({ error: "an eventId is required" });
+
+    // The grid row, when we have one. It is eBay's own description of the
+    // show and it is fresher than anything a client is holding, so it wins;
+    // the body fills only what the grid does not know, which is what keeps a
+    // show that has dropped off the grid preparable from a link.
+    const seen = cachedDiscovery().shows.find((s) => s.eventId === eventId);
+    const title = seen?.title || (req.body?.title ?? "").trim();
+    if (!title) {
+      return reply.code(400).send({
+        error:
+          `this server's eBay Live grid does not have ${eventId} — send a title with it, ` +
+          `or refresh discovery if the show is on air`,
+        code: "unknown-event",
+        eventId,
+      });
     }
+
     if (preparing.has(eventId)) return { eventId, status: "already-preparing" };
 
     preparing.add(eventId);
+    prepareFailed.delete(eventId);
     void preparer
       .prepare({
         eventId,
         title,
-        host: req.body?.host ?? "",
-        sellerHandle: req.body?.sellerHandle ?? null,
-        tags: req.body?.tags ?? [],
-        thumbnailUrl: req.body?.thumbnailUrl ?? null,
+        host: seen?.host || req.body?.host || "",
+        sellerHandle: seen?.sellerHandle ?? req.body?.sellerHandle ?? null,
+        tags: seen?.tags?.length ? seen.tags : (req.body?.tags ?? []),
+        thumbnailUrl: seen?.thumbnailUrl ?? req.body?.thumbnailUrl ?? null,
         accountId: actor.id,
       })
-      .catch((e) => console.warn(`[prepare] ${eventId}: ${(e as Error).message}`))
+      .catch((e) => {
+        const message = (e as Error)?.message ?? String(e);
+        console.warn(`[prepare] ${eventId}: ${message}`);
+        notePrepareFailure(eventId, message);
+      })
       .finally(() => preparing.delete(eventId));
 
     return { eventId, status: "preparing" };
@@ -2441,6 +2492,9 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       discovery: { reason: discovery.reason, session: discovery.session, checkedAt: gridCheckedAt() },
       prepared,
       preparing: [...preparing],
+      // A preparation that threw, so a screen polling Home can stop waiting
+      // and say why rather than spinning until it times out.
+      preparingFailed: [...prepareFailed].map(([eventId, f]) => ({ eventId, ...f })),
       watching: watched,
       now,
       next: {

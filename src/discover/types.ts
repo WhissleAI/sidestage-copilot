@@ -66,6 +66,20 @@ export interface DiscoverSourceResult {
   method: string;
   hits: DiscoverHit[];
   unavailable: SourceUnavailable | null;
+  /**
+   * These hits were NOT filtered by a reason, so some or all of them match
+   * nothing the operator sells and carry an empty `why`.
+   *
+   * It is a LABEL, not a permission. Two questions set it: "show me everything
+   * live on this surface", which a caller asks by name, and the case an
+   * operator meets on their first day — no catalog, so no interests, so no
+   * question to ask. The second one used to return an empty page on every
+   * surface, which reads as a broken product rather than as a product that
+   * does not know them yet. Returning the grid is fine; returning it while
+   * implying it was matched is not, and this flag is how the interface knows
+   * which sentence to put above it.
+   */
+  unmatched: boolean;
 }
 
 /** Everything a source needs to answer. */
@@ -75,9 +89,10 @@ export interface SourceRequest {
   /** Hits to return at most. */
   limit: number;
   /**
-   * The caller asked for everything live on this surface, so hits with no `why`
-   * are allowed. Only ever true when a surface was named explicitly: "show me
-   * the whole grid" is a different question from "what should I look at".
+   * Hits with no `why` are allowed. True when a surface was named explicitly
+   * ("show me the whole grid"), and true when the operator has no interests at
+   * all — with no terms there is no question to filter by, and the alternative
+   * is an empty screen on every surface.
    */
   all: boolean;
   /** How long this source may take before it is an `unavailable` with a

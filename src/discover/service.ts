@@ -119,10 +119,18 @@ export class DiscoverService {
     const env = q.env ?? process.env;
     const limit = Math.min(50, Math.max(1, q.limit ?? 12));
     const wanted = q.surface ? this.sources.filter((s) => s.surface === q.surface) : this.sources;
-    // "Everything live here" is only ever a question about ONE surface. Asked
-    // of all of them it would be a page of strangers with no reason on any
-    // card, which is the thing Discover stopped being.
-    const all = Boolean(q.all && q.surface);
+    // Two questions suspend the every-hit-has-a-why rule, and only two.
+    //
+    //   · "Everything live HERE", which names one surface. Asked of all of
+    //     them it would be a page of strangers, which is the thing Discover
+    //     stopped being.
+    //   · No interests at all. There is then no question to filter by, and
+    //     filtering by it anyway returns nothing from every surface — which is
+    //     what a brand-new operator saw: five empty tabs under a heading
+    //     promising what is live on what they sell. The grid is the honest
+    //     answer to "we do not know you yet"; `unmatched` on the result is
+    //     what stops it being passed off as a match.
+    const all = Boolean(q.all && q.surface) || q.interests.length === 0;
 
     return Promise.all(
       wanted.map((source) => this.one(source, { ...q, env, limit, all })),
@@ -176,7 +184,14 @@ export class DiscoverService {
     source: DiscoverSource,
     q: DiscoverQuery & { env: NodeJS.ProcessEnv; limit: number; all: boolean },
   ): Promise<DiscoverSourceResult> {
-    const base = { surface: source.surface, method: source.method, hits: [] as DiscoverHit[] };
+    const base = {
+      surface: source.surface,
+      method: source.method,
+      hits: [] as DiscoverHit[],
+      // Said on every answer including the refusals, so a client never has to
+      // infer it from an absent field.
+      unmatched: q.all,
+    };
     // Asked before any work: a keyless Twitch must cost nothing to refuse.
     const refused = source.unavailable(q.env);
     if (refused) return { ...base, unavailable: refused };
