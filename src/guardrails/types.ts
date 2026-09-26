@@ -8,6 +8,12 @@ import type { SurfaceCapabilities } from "../surfaces/types.js";
 export interface GuardInput {
   draft: Draft;
   question: string;
+  /** Who asked. A reply addresses them by name, and on a live marketplace that
+   *  name usually carries digits ("dw2ks", "jgomez1331"). Every checkability
+   *  test below runs on the answer with the vocative removed — otherwise the
+   *  asker's handle reads as a figure that needs grounding, and every
+   *  personally-addressed reply is falsely flagged. */
+  asker?: string;
   /** The facts the draft was GIVEN. A citation outside this set is fabricated. */
   facts: Fact[];
   factById: Map<string, Fact>;

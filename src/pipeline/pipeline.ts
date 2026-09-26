@@ -497,6 +497,7 @@ export class Pipeline {
         return {
           draft,
           question: msg.text,
+          asker: msg.author,
           facts: r.facts,
           factById: new Map(r.facts.map((f) => [f.factId, f])),
           currentListings: new Map(listings.map((l) => [l.id, l])),
