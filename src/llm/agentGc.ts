@@ -8,11 +8,13 @@
 
 import type { Pool } from "../db/pg.js";
 import { Preparer } from "../shows/prepareEvent.js";
-import { deleteStreamAgent } from "./streamAgent.js";
+import { AGENT_NAME_PREFIX, deleteStreamAgent, listStreamAgents } from "./streamAgent.js";
 
 export interface GcResult {
   retired: number;
   droppedPreparations: number;
+  /** Ours by name, and referenced by nothing in this database. */
+  orphansReaped: number;
   failed: number;
 }
 
@@ -20,7 +22,7 @@ export interface GcResult {
 export async function retireStaleAgents(pool: Pool, opts: { reportAgeH?: number; preparedAgeH?: number } = {}): Promise<GcResult> {
   const reportAgeH = opts.reportAgeH ?? 24;
   const preparedAgeH = opts.preparedAgeH ?? 48;
-  const out: GcResult = { retired: 0, droppedPreparations: 0, failed: 0 };
+  const out: GcResult = { retired: 0, droppedPreparations: 0, orphansReaped: 0, failed: 0 };
 
   // Shows that ended and whose report is older than a day — or that ended two
   // days ago and never got a report at all — no longer need their agent.
@@ -63,8 +65,50 @@ export async function retireStaleAgents(pool: Pool, opts: { reportAgeH?: number;
     }
   }
 
-  if (out.retired || out.droppedPreparations || out.failed) {
-    console.log(`  agent-gc: retired ${out.retired} agent(s), dropped ${out.droppedPreparations} preparation(s), ${out.failed} failed`);
+  // ── orphans ────────────────────────────────────────────────────────────
+  //
+  // Everything above walks OUR rows, which is why a full workspace used to be
+  // unrecoverable from inside the app: the cap is counted by the workspace, and
+  // an agent no row names is invisible to a pass that starts from rows. It
+  // happens for ordinary reasons — a show deleted outside the app, a dropped
+  // preparation, a run that created the agent and then threw — and the symptom
+  // is every new preparation 429ing with "no agent" under the card.
+  //
+  // Only agents carrying this app's own name prefix are considered, and only
+  // when nothing in this database points at them. Anything else on the
+  // workspace belongs to somebody else and is not ours to delete.
+  try {
+    const live = await listStreamAgents();
+    const ours = live.filter((a) => (a.name ?? "").startsWith(AGENT_NAME_PREFIX));
+    if (ours.length) {
+      const referenced = new Set<string>();
+      for (const q of [
+        "SELECT agent_id FROM shows WHERE agent_id IS NOT NULL",
+        "SELECT agent_id FROM prepared_shows WHERE agent_id IS NOT NULL",
+      ]) {
+        const { rows } = await pool.query<{ agent_id: string }>(q);
+        for (const r of rows) referenced.add(r.agent_id);
+      }
+      for (const a of ours) {
+        if (referenced.has(a.id)) continue;
+        const res = await deleteStreamAgent(a.id);
+        if (res.ok || /404|not found/i.test(res.detail)) out.orphansReaped += 1;
+        else {
+          out.failed += 1;
+          console.warn(`  agent-gc: could not reap orphan ${a.id} — ${res.detail}`);
+        }
+      }
+    }
+  } catch (e) {
+    // Listing is a courtesy, not a precondition: the passes above already ran.
+    console.warn(`  agent-gc: could not list workspace agents — ${(e as Error).message}`);
+  }
+
+  if (out.retired || out.droppedPreparations || out.orphansReaped || out.failed) {
+    console.log(
+      `  agent-gc: retired ${out.retired} agent(s), dropped ${out.droppedPreparations} preparation(s), ` +
+      `reaped ${out.orphansReaped} orphan(s), ${out.failed} failed`,
+    );
   }
   return out;
 }

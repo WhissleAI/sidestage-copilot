@@ -157,6 +157,41 @@ export async function createStreamAgent(s: StreamAgentSpec): Promise<string> {
   return created.id;
 }
 
+/** The prefix every agent this app creates is named with, so one that outlives
+ *  its show is recognisable as ours without guessing. */
+export const AGENT_NAME_PREFIX = "SideStage · ";
+
+export interface WorkspaceAgent {
+  id: string;
+  name: string;
+}
+
+/**
+ * Every agent on the workspace, so the ones nothing points at can be found.
+ *
+ * The cap is counted by the WORKSPACE, not by this database, and the two drift:
+ * a show deleted outside the app, a preparation whose row was dropped, a failed
+ * run that created an agent before it threw. The garbage collector could only
+ * ever see agents a row still named, so a workspace full of agents this app no
+ * longer tracks was unrecoverable from inside the app — every new preparation
+ * 429s and the console says "no agent" with nothing anybody can do about it.
+ */
+export async function listStreamAgents(): Promise<WorkspaceAgent[]> {
+  const out: WorkspaceAgent[] = [];
+  // Paged, because a workspace at its cap is exactly when this matters and a
+  // single page is not promised to hold it.
+  for (let page = 1; page <= 10; page++) {
+    const r = await call<{ agents?: WorkspaceAgent[]; items?: WorkspaceAgent[] } | WorkspaceAgent[]>(
+      "GET",
+      `/api/agents?page=${page}&page_size=100`,
+    );
+    const batch = Array.isArray(r) ? r : (r.agents ?? r.items ?? []);
+    out.push(...batch.filter((a) => a && typeof a.id === "string"));
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
 /**
  * Delete an agent this app created for a show.
  *

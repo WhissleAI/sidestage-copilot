@@ -20,7 +20,8 @@
     "ebay:signin": "node scripts/ebay-signin.mjs",
     "ebay:shows": "tsx src/ingest/ebaylive/discovery.ts",
     "demo:ebaylive": "tsx bench/ebayLive.demo.ts",
-    "ebay:export": "node scripts/ebay-export-session.mjs"
+    "ebay:export": "node scripts/ebay-export-session.mjs",
+    "agents:gc": "tsx src/llm/reapAgents.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
