@@ -114,6 +114,19 @@ export async function createStreamAgent(s: StreamAgentSpec): Promise<string> {
     name: `SideStage · ${s.showTitle}`.slice(0, 80),
     agent_type: "text_assistant",
     direction: "inbound",
+    // A per-show agent is exactly the fleet the gateway's LIGHTWEIGHT kind
+    // exists for. Migration 193's own note: a separate, higher cap "so a fleet
+    // of short-lived per-show / per-listing agents does not eat the standard
+    // cap". Standard caps at 50 and is shared with every other project on the
+    // workspace; lightweight caps at 500 and is counted apart. Creating these
+    // as standard is what put "You've reached the limit of 50 agents" under
+    // every card, with only one of the workspace's 41 agents actually ours.
+    kind: "lightweight",
+    // A backstop, not the primary reaper. `llm/agentGc.ts` retires an agent a
+    // day after its show's report and drops unattached preparations at two
+    // days; this fires strictly after both, so an agent still cannot outlive
+    // the app by more than a weekend if the GC never runs at all.
+    ttl_seconds: AGENT_TTL_SECONDS,
     system_prompt: systemPrompt(handle, s.seller) + showPreamble(s),
     greeting: "",
     language_mode: policy().languageMode,
@@ -156,6 +169,11 @@ export async function createStreamAgent(s: StreamAgentSpec): Promise<string> {
 
   return created.id;
 }
+
+/** Three days: comfortably after `agentGc`'s own 24h-post-report and 48h-
+ *  unattached passes, so the sweeper is a backstop and never the thing that
+ *  takes an agent out from under a running show. */
+const AGENT_TTL_SECONDS = 3 * 24 * 60 * 60;
 
 /** The prefix every agent this app creates is named with, so one that outlives
  *  its show is recognisable as ours without guessing. */
