@@ -181,10 +181,21 @@ export function moneyCents(text: string): number {
  *  viewer count collapsing from 999 to 1 — a drop the activity watchdog would
  *  take as real movement and the console would draw as a cliff. */
 export function audienceCount(text: string): number | null {
-  const m = (text || "").replace(/,/g, "").match(/([0-9]*\.?[0-9]+)\s*([KkMm])?/);
+  // ANCHORED at the start, because the badge is the start of its own string.
+  // Unanchored, this read a number out of whatever text the DOM happened to
+  // concatenate after it — a Whatnot card whose viewer badge ran into the
+  // title "20K Celebration show" parsed as `21520K` and rendered 21,520,000
+  // people watching a room with 215 in it.
+  const m = (text || "").replace(/,/g, "").trim().match(/^([0-9]*\.?[0-9]+)\s*([KkMm])?/);
   if (!m) return null;
   const n = Number(m[1]);
   if (!Number.isFinite(n)) return null;
-  const scale = m[2] ? (m[2].toLowerCase() === "k" ? 1_000 : 1_000_000) : 1;
-  return Math.round(n * scale);
+  if (!m[2]) return Math.round(n);
+  // A scale suffix exists to SHORTEN a number, so it never rides one that is
+  // already four digits long: nobody writes "21520K". When it does, the digits
+  // in front of it came from more than one place and there is no honest way to
+  // say how many belong to the badge. Null — unknown — rather than a count
+  // that is wrong by three orders of magnitude and drawn as a fact.
+  if (n >= 1_000) return null;
+  return Math.round(n * (m[2].toLowerCase() === "k" ? 1_000 : 1_000_000));
 }

@@ -22,6 +22,7 @@
 //                write: it comes from how the host spoke, not what buyers typed.
 
 import type { LlmPort } from "../llm/types.js";
+import { logSwallowed, logWarn } from "../obs/log.js";
 import type { HostSummary } from "./signals.js";
 
 export type NextActionKind = "catalog" | "pricing" | "inventory" | "hosting" | "policy" | "setup";
@@ -189,12 +190,33 @@ export function parseConclusion(raw: string, at = new Date().toISOString()): Con
   return { summary, outcome, keyPoints, nextActions, by: "agent", at };
 }
 
-/** Ask the show's agent. Null when it cannot answer — the report says so. */
+/**
+ * Ask the show's agent. Null when it cannot answer — the report says so.
+ *
+ * The two failure modes are logged apart, because the report cannot tell them
+ * apart and its copy guesses: it blames an unreachable gateway even when the
+ * gateway answered perfectly well and the agent simply returned prose instead
+ * of the JSON it was asked for. That guess was unfalsifiable while this
+ * function swallowed the error silently. Now the reason is in the log, which
+ * is where the question gets settled after a session rather than during one.
+ */
 export async function concludeShow(llm: LlmPort, e: ConclusionEvidence): Promise<Conclusion | null> {
+  let raw: string;
   try {
-    const raw = await llm.utilityTurn(SYSTEM, evidenceText(e), { maxTokens: 900 });
-    return parseConclusion(raw);
-  } catch {
+    raw = await llm.utilityTurn(SYSTEM, evidenceText(e), { maxTokens: 900 });
+  } catch (err) {
+    logSwallowed("show.conclusion_call_failed", err, { show: e.title });
     return null;
   }
+  const parsed = parseConclusion(raw);
+  if (!parsed) {
+    logWarn("show.conclusion_unparsable", {
+      show: e.title,
+      // The shape of the reply, never its content — a conclusion quotes the
+      // seller's own show back at us.
+      chars: raw.length,
+      hasBrace: raw.includes("{"),
+    });
+  }
+  return parsed;
 }

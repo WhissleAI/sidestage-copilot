@@ -80,6 +80,15 @@ export function slugify(raw: string): string {
     .replace(/['’]/g, "")
     .toLowerCase()
     .replace(/\s+/g, " ")
+    // Hyphens at a token's EDGE are punctuation, not spelling. Live-commerce
+    // titles are full of them — "SOLD- Rolex …", "eLive- Oris …" — and leaving
+    // one attached silently defeats the stopword list, because `sold-` is not
+    // `sold`. That is exactly how "SOLD" came out as a top chip on a watch
+    // catalog where every sold lot's title starts with it. Interior hyphens
+    // stay: "t-shirt" and "pre-owned" are single words.
+    .replace(/(^|\s)[-]+/g, "$1")
+    .replace(/[-]+(?=\s|$)/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 

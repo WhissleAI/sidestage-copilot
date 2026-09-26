@@ -308,10 +308,35 @@ const FACTUAL = /\d|\$|\b(ship\w*|return\w*|refund\w*|authentic\w*|cert\w*|size|
 /** Long enough to be an assertion rather than an acknowledgement. */
 const SUBSTANTIVE_CHARS = 60;
 
+/** Strip the part of a reply that is ADDRESS, not assertion, before asking
+ *  whether it says anything checkable.
+ *
+ *  This is not cosmetic. `FACTUAL` fires on any digit, and a live marketplace
+ *  hands us askers called `dw2ks` and `jgomez1331`. A perfectly well-behaved
+ *  deferral — "dw2ks, the host will cover that shortly" — therefore counted as
+ *  a checkable claim purely because the buyer's handle has a 2 in it, and got
+ *  flagged for citing nothing. On eBay Live that was most replies, because the
+ *  composer is asked to address the asker by name. The handle is not a figure
+ *  the seller is standing behind; it is who we are talking to. */
+function withoutVocative(answer: string, asker?: string): string {
+  let a = answer;
+  if (asker) {
+    const h = asker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Leading "name," / "name:" / "@name" and a trailing "…, name!" — the two
+    // shapes the composer actually produces.
+    a = a.replace(new RegExp(`^\\s*@?${h}\\s*[,:]\\s*`, "i"), "");
+    a = a.replace(new RegExp(`[,\\s]@?${h}\\s*[!.?]*`, "gi"), " ");
+  }
+  // Any remaining @handle is an address too, whoever it points at.
+  return a.replace(/@[\w.-]+/g, " ");
+}
+
 export const claimGroundingGuard: Guard = {
   name: "claim_grounding",
   run(i: GuardInput): GuardResult {
     const a = i.draft.answer;
+    // Checkability is judged on what the reply ASSERTS, not on who it greets.
+    const body = withoutVocative(a, i.asker);
 
     // A reply must either CITE something or commit to nothing. The old test —
     // "does it contain a number or a catalog keyword" — let a whole class
@@ -325,7 +350,8 @@ export const claimGroundingGuard: Guard = {
     // combination available: unverified and presented as verified. The show
     // context is a real source, but nothing traceable backs that sentence.
     const substantive =
-      FACTUAL.test(a) || (a.trim().length >= SUBSTANTIVE_CHARS && !NON_COMMITTAL.test(a));
+      FACTUAL.test(body) ||
+      (body.trim().length >= SUBSTANTIVE_CHARS && !NON_COMMITTAL.test(body));
     const needsGrounding = substantive;
 
     for (const c of i.draft.claims) {

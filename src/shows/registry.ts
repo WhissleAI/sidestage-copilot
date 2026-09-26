@@ -228,7 +228,12 @@ export class ShowRegistry {
       const rt = new ShowRuntime({
         showId,
         title: meta.title || target.title || `${adapter.label} ${externalId}`,
-        sellerHandle: meta.host || target.handle || "eBay Live seller",
+        // The surface names its own placeholder. A Whatnot room whose host we
+        // could not read used to be labelled "eBay Live seller" in the console
+        // header, which tells the operator the wrong thing about where they
+        // are — and `isPlaceholderHandle` in api/drafts.ts only knew the eBay
+        // spelling, so any other surface's placeholder read as a real name.
+        sellerHandle: meta.host || target.handle || `${adapter.label} seller`,
         source: adapter.id,
         externalId,
         // The WHOLE target, not the one string of it that an eBay Live event

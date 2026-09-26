@@ -118,6 +118,26 @@ describe("what an operator sells, read off their catalog", () => {
     assert.equal(slugify("Pokémon"), "pokemon");
   });
 
+  test("a hyphen stuck to a stopword does not smuggle it back in", () => {
+    // Observed on a live eBay Live catalog: "SOLD" came out as a top-ten chip
+    // on ten watches, because every sold lot's title begins "SOLD- " and
+    // `sold-` is not the `sold` the stopword list knows about.
+    const rows = deriveInterests([
+      { title: "SOLD- Rolex Submariner Date 41mm Black Dial" },
+      { title: "SOLD-Oris BC ProPilot X Calibre 400 39mm Blue Dial" },
+      { title: "SOLD Oris BC ProPilot X Calibre 400 39mm Blue Titanium" },
+      { title: "eLive FWF Rolex Oyster Perpetual Date 34mm Silver Dial" },
+    ]);
+    const slugs = rows.map((r) => r.slug);
+    assert.ok(!slugs.includes("sold"), "the stopword itself");
+    assert.ok(!slugs.some((s) => /(^|\s)-|-(\s|$)/.test(s)), `edge hyphen survived: ${slugs}`);
+    assert.equal(slugify("SOLD-"), "sold");
+    assert.equal(slugify("-Oris"), "oris");
+    // Interior hyphens are spelling, not punctuation, and must survive.
+    assert.equal(slugify("T-Shirt"), "t-shirt");
+    assert.equal(slugify("pre-owned"), "pre-owned");
+  });
+
   test("no catalog is no interests — nothing is ever invented", () => {
     assert.deepEqual(deriveInterests([]), []);
     assert.deepEqual(deriveInterests([{ title: "" }, { title: "   " }]), []);

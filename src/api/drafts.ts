@@ -166,16 +166,23 @@ const STATUS: Partial<Record<ProposalStatus, DraftStatus>> = {
 /**
  * Host handles that are not a name.
  *
- * `ShowRegistry.attach` falls back to a literal "eBay Live seller" when a
- * target carries no handle, which is fine on a stream and is not the name of a
- * room. A Reddit thread link without its subreddit is exactly that case.
+ * `ShowRegistry.attach` falls back to "<surface> seller" when a target carries
+ * no handle, which is fine on a stream and is not the name of a room. A Reddit
+ * thread link without its subreddit is exactly that case.
+ *
+ * Matched by SHAPE rather than by a list of spellings: the old set held only
+ * the eBay wording, so every other surface's placeholder — "Whatnot seller",
+ * "Twitch seller" — was treated as somebody's actual handle and rendered as
+ * the name of the room.
  */
-const PLACEHOLDER_HANDLES = new Set(["ebay live seller", "seller", ""]);
+const PLACEHOLDER_HANDLE = /^(?:[a-z0-9 ]*\s)?sellers?$/i;
+const isPlaceholderHandle = (h: string): boolean =>
+  h.trim() === "" || PLACEHOLDER_HANDLE.test(h.trim());
 
 /** What an operator calls the room a live async session is watching. */
 export function originOfSession(s: ShowSummary): DraftOrigin {
   const handle = (s.sellerHandle ?? "").trim();
-  const named = PLACEHOLDER_HANDLES.has(handle.toLowerCase()) ? "" : handle;
+  const named = isPlaceholderHandle(handle) ? "" : handle;
   return {
     kind: "room",
     id: s.externalId ?? s.showId,
