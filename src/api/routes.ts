@@ -2703,8 +2703,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         return reply.code(400).send({
           error:
             asKind === "thread"
-              ? `that is a thread, not a room — paste it on Shows to watch the thread itself`
-              : `that is a person, not a room — paste it on Shows to watch what they post`,
+              ? `that is a thread, not a room — paste it on Home to watch the thread itself`
+              : `that is a person, not a room — paste it on Home to watch what they post`,
           code: "not-a-room",
           surface,
         });
