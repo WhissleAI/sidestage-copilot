@@ -143,8 +143,10 @@ export async function createStreamAgent(s: StreamAgentSpec): Promise<string> {
   try {
     created = await create();
   } catch (e) {
-    // The workspace caps agents at fifty. Retire what is finished and try
-    // once more before telling the operator to go and delete things by hand.
+    // A cap was hit. These are `lightweight`, so it is the 500-agent lane
+    // rather than the standard fifty — but the retry is the same: retire what
+    // is finished and try once more before telling the operator to go and
+    // delete things by hand.
     if (!/limit of \d+ agents|429/.test(String((e as Error).message)) || !makeRoom) throw e;
     await makeRoom().catch(() => undefined);
     created = await create();

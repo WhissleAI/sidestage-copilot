@@ -1,7 +1,8 @@
-// Every stream gets its own agent, and the workspace caps agents at fifty.
-// Without something retiring them, the cap arrives after fifty shows — it did,
-// on 2026-09-15, as "You've reached the limit of 50 agents" under every card on
-// the Discover tab. An agent's work is done once its show's report is written:
+// Every stream gets its own agent, and a cap arrives if nothing retires them.
+// It did, on 2026-09-15, as "You've reached the limit of 50 agents" under every
+// card on the Discover tab. Per-show agents are `lightweight` now, which counts
+// against a 500-agent lane instead of the fifty shared with every other project
+// on the workspace — a bigger runway, and still finite. An agent's work is done once its show's report is written:
 // the report, the transcript, the frames and the audit all live in Postgres,
 // not on the agent. So a day after the report, the agent goes; the row keeps
 // the show. Preparations that nobody attached within two days go the same way.
