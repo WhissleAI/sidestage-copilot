@@ -35,11 +35,16 @@ function reasonFor(reason: string): SourceUnavailable | null {
     default:
       // `blocked` is the case where the session is FINE and eBay withheld the
       // grid anyway — `readSignedOut` returned false, so the header greeted us
-      // by name. Measured 2026-09-26: the box read "Hi Karan!" on /ebaylive and
-      // zero event links, while an ordinary browser on the same account showed
-      // ninety-two, and the page POSTed to an Akamai Bot Manager sensor. Every
-      // automated browser we have — headed and headless, bundled Chromium and
-      // the real Chrome channel, through the proxy and direct — reads zero.
+      // by name.
+      //
+      // It is INTERMITTENT, and the first measurement said otherwise. On
+      // 2026-09-26 the box read "Hi Karan!" and zero event links while an
+      // ordinary browser on the same account showed ninety-two, and the page
+      // POSTed to an Akamai Bot Manager sensor; every automated browser we had
+      // read zero, headed or headless, proxied or direct. The next morning the
+      // same box, headless, same session, read 144. So this is eBay's bot
+      // check tightening and relaxing, not a permanent wall — which changes
+      // the advice from "this path is gone" to "try again shortly".
       //
       // The old copy blamed the session and pointed at EBAY_DISCOVERY_PROXY.
       // Both are wrong here and both send the operator to re-run a sign-in that
@@ -48,9 +53,9 @@ function reasonFor(reason: string): SourceUnavailable | null {
       // still read normally, which is why the remedy is a link and not a fix.
       return {
         reason:
-          "eBay served the grid page without its shows — the session is signed in and working, " +
-          "but eBay's bot check withholds the index from an automated browser. Paste a show's " +
-          "link to attach it directly; preparing, monitoring and reports are unaffected",
+          "eBay served the grid page without its shows. The session is signed in and working — " +
+          "this comes and goes, so a refresh in a few minutes often has it back. Pasting a " +
+          "show's link attaches it either way; preparing, monitoring and reports are unaffected",
         missing: null,
       };
   }
