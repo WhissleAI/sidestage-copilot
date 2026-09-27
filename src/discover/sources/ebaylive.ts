@@ -33,8 +33,24 @@ function reasonFor(reason: string): SourceUnavailable | null {
     case "pending":
       return { reason: "the eBay Live grid has not been read yet since this server started", missing: null };
     default:
+      // `blocked` is the case where the session is FINE and eBay withheld the
+      // grid anyway — `readSignedOut` returned false, so the header greeted us
+      // by name. Measured 2026-09-26: the box read "Hi Karan!" on /ebaylive and
+      // zero event links, while an ordinary browser on the same account showed
+      // ninety-two, and the page POSTed to an Akamai Bot Manager sensor. Every
+      // automated browser we have — headed and headless, bundled Chromium and
+      // the real Chrome channel, through the proxy and direct — reads zero.
+      //
+      // The old copy blamed the session and pointed at EBAY_DISCOVERY_PROXY.
+      // Both are wrong here and both send the operator to re-run a sign-in that
+      // was never the problem. Only the grid INDEX is gated: an individual show
+      // page, the seller's listings page and everything downstream of attaching
+      // still read normally, which is why the remedy is a link and not a fix.
       return {
-        reason: "eBay Live served this server the anonymous grid, which streams no shows — an egress eBay trusts is set with EBAY_DISCOVERY_PROXY",
+        reason:
+          "eBay served the grid page without its shows — the session is signed in and working, " +
+          "but eBay's bot check withholds the index from an automated browser. Paste a show's " +
+          "link to attach it directly; preparing, monitoring and reports are unaffected",
         missing: null,
       };
   }
