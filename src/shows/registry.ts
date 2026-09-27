@@ -58,6 +58,24 @@ export interface ShowSummary {
   blocked: number;
 }
 
+/**
+ * Nobody is watching anything — which is the console's RESTING state, not a
+ * failure of it.
+ *
+ * A plain Error here made the SSE route emit `stream_error`, so the console
+ * rendered its failed branch: a red panel, a warning triangle, "That did not
+ * load." and a Reload button, for the ordinary situation of being between
+ * shows. Console.tsx already draws absent and failed differently and says so
+ * in a comment; it was being handed the wrong one. A type is what lets the
+ * route tell them apart without matching on a sentence.
+ */
+export class NoShowMonitored extends Error {
+  constructor() {
+    super("no show is being monitored — paste a live link on Home to start one");
+    this.name = "NoShowMonitored";
+  }
+}
+
 export class ShowRegistry {
   private runtimes = new Map<string, ShowRuntime>();
 
@@ -410,7 +428,7 @@ export class ShowRegistry {
     // Two different failures, and the console renders them differently: no show
     // at all sends the operator to Shows to start one; a show it cannot find is
     // a stale link.
-    if (!showId) throw new Error("no show is being monitored — paste an eBay Live link on Shows to start one");
+    if (!showId) throw new NoShowMonitored();
     const rt = this.runtimes.get(showId);
     if (!rt) throw new Error(`show ${showId} is not being watched`);
     return rt;

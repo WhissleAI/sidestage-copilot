@@ -12,6 +12,7 @@ import { discoverLiveShows, discoverSellerShows, parseEventId } from "../ingest/
 import { Following, cachedDiscovery, cachedGrid, gridCheckedAt, liveGrid, rememberGrid } from "../sellers/following.js";
 import { SurfaceRooms } from "../surfaces/rooms.js";
 import { all as surfaceAdapters, resolve as resolveSurface } from "../surfaces/registry.js";
+import { NoShowMonitored } from "../shows/registry.js";
 import { SURFACE_CAPABILITIES, SurfaceUnavailable, capabilitiesOf, type SurfaceId } from "../surfaces/types.js";
 import { surfaceReadiness } from "../surfaces/readiness.js";
 import { behindBand, nowBand } from "./home.js";
@@ -160,7 +161,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     // Deliberately the same sentence the registry uses for "nothing is being
     // watched": from the caller's side those are the same fact. What it must
     // never do is reach for a show that is not theirs.
-    if (!mine) throw new Error("no show is being monitored — paste an eBay Live link on Shows to start one");
+    if (!mine) throw new NoShowMonitored();
     return shows.get(mine);
   };
 
@@ -981,7 +982,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       reply.raw.write(`event: hello\ndata: ${JSON.stringify({ showId: target.showId, ...snapshot })}\n\n`);
       reply.raw.write(`event: shows\ndata: ${JSON.stringify(list)}\n\n`);
     } catch (e) {
-      reply.raw.write(`event: stream_error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`);
+      // Between shows is not a broken stream. `stream_idle` opens the console
+      // in its resting state — "no session is on air" — while a real failure
+      // still gets `stream_error` and the red panel it deserves.
+      reply.raw.write(
+        e instanceof NoShowMonitored
+          ? `event: stream_idle\ndata: {}\n\n`
+          : `event: stream_error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`,
+      );
       reply.raw.write(`event: shows\ndata: ${JSON.stringify(await shows.list(actorOf(req as object)?.id).catch(() => []))}\n\n`);
     }
   });
