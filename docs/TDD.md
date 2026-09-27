@@ -217,8 +217,18 @@ several shows writing their lots into one knowledge base — five dead show corp
 each answerable with total confidence about lots that sold days ago. So a show owns its agent:
 created at attach (or reused from a preparation), retired a day after the show's report by
 `src/llm/agentGc.ts` (boot + every six hours; preparations nobody attached go after two days).
-The workspace caps agents at fifty; hitting the cap runs one retirement pass and retries once
-before the operator is told. Re-preparing an event retires its previous agent.
+A per-show agent is created as `kind: "lightweight"` with a three-day `ttl_seconds`, which is
+the lane the gateway added for exactly this shape — a fleet of short-lived per-show agents that
+must not eat the standard fifty-agent cap it shares with every other project on the workspace.
+Lightweight counts against its own limit of five hundred. Hitting a cap still runs one retirement
+pass and retries once before the operator is told. The TTL is a backstop only: it fires strictly
+after `agentGc`'s own 24h-post-report and 48h-unattached passes, so the gateway's sweeper can
+never take an agent out from under a running show. Re-preparing an event retires its previous
+agent.
+
+Before this, per-show agents were `standard`. The workspace held 41 agents of which exactly one
+was ours, and every new preparation failed with "You've reached the limit of 50 agents" — a cap
+the product could not free, because the other forty belonged to other projects.
 
 **The split of responsibility is deliberate.** The agent carries **identity and policy** — the
 persona, the voice guide, the never-say list, the tool-approval gate — so it travels across
