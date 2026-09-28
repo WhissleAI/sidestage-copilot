@@ -133,6 +133,9 @@ export interface SurfaceEvents {
   onMessage?(m: {
     id: string; author: string; text: string; at?: string;
     threadId?: string; parentId?: string; meta?: Record<string, unknown>;
+    /** Said before we attached. Shown to the operator, never drafted against —
+     *  see the backlog note in `scrapeWatcher`. */
+    historic?: boolean;
   }): void;
   /** Something on sale / on screen changed (a lot, a game, a pinned item). */
   onItem?(i: {
