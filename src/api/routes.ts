@@ -3376,7 +3376,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       if (!items.length) return reply.code(400).send({ error: "no catalog items found in the body" });
 
       const result = await importCatalog(target.repo, items);
-      await target.retriever.rebuild();
+      // `refreshIndex`, not `retriever.rebuild` — the same reason the catalog
+      // SWAP three routes up gives, and this path was the one doing the other
+      // thing. Rebuilding the retriever indexes the new lots for retrieval and
+      // leaves everything else derived from the listing set behind: the
+      // runtime's `lotRows`, the `lots` list the action proposer reads to spot
+      // a swap, and the marketplace mirror an action commits against. An
+      // import that answers questions about lots the proposer cannot see and
+      // the executor cannot write to is half an import.
+      await target.refreshIndex();
       // An import is the one time emitting the whole catalog is right.
       for (const l of await target.repo.listings()) hub.emit("listing", { showId: target.showId, ...l });
 
