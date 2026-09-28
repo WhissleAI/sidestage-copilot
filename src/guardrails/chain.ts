@@ -68,20 +68,49 @@ export function runChain(i: GuardInput, opts: ChainOptions = {}): ChainResult {
 
   const failures = [...blocked, ...revise].map((g) => ({ guard: g.guard, reason: g.reason || "failed" }));
 
-  return { guards, verdict, failures, confidence: confidenceOf(guards, opts) };
+  return { guards, verdict, failures, confidence: confidenceOf(guards, opts, i.draft.claims.length) };
 }
+
+/** A reply that cited nothing cannot be trusted at the evidence's confidence.
+ *  Low enough to sit under `AUTO_CONFIDENCE_FLOOR` with room to spare, high
+ *  enough to stay distinct from an abstention's 0.1. */
+const UNCITED_CEILING = 0.35;
 
 /**
  * Confidence is a reported quantity, not a model output. It falls out of how
- * good the grounding was and how many checks the draft tripped — so it means
- * the same thing on every reply, and the autonomy ladder can threshold on it.
+ * good the grounding was, whether the reply USED it, and how many checks the
+ * draft tripped — so it means the same thing on every reply, and the autonomy
+ * ladder can threshold on it.
+ *
+ * The middle clause was missing, and it is the one the ladder depends on.
+ * Confidence read the quality of what RETRIEVAL found and never asked what the
+ * draft did with it, so on a simulated show:
+ *
+ *   "how much for the chicago 1s"
+ *   -> "The host will cover that shortly, dre_23."
+ *      claims 0 · groundless false · confidence 0.82
+ *
+ * Retrieval returned good facts, the draft used none of them, and the number
+ * the auto-send gate thresholds on reported 0.82 against a floor of 0.80. The
+ * gate exists to stop a bad answer reaching a buyer unreviewed, and it could
+ * not see that this answer was empty — it was reading the evidence's score,
+ * which was excellent.
+ *
+ * Three states, now distinguishable:
+ *   retrieval found nothing                      0.10  (abstained)
+ *   retrieval found things, the reply ignored them  <= 0.35
+ *   the reply cited what it was given            0.45 - 0.98
  */
-function confidenceOf(
+export function confidenceOf(
   guards: GuardResult[],
   opts: { evidenceQuality?: number; abstained?: boolean },
+  claimCount = 1,
 ): number {
   if (opts.abstained) return 0.1;
   let c = 0.45 + 0.5 * clamp01(opts.evidenceQuality ?? 0.5);
+  // Applied before the guard penalties, so a draft that both cites nothing and
+  // trips a check still scores below one that only does the first.
+  if (claimCount === 0) c = Math.min(c, UNCITED_CEILING);
   for (const g of guards) {
     if (g.verdict === "block") c -= 0.6;
     else if (g.verdict === "revise") c -= 0.22;
