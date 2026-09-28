@@ -114,10 +114,26 @@ Measured per show, compared against the same seller's own baseline shows.
 
 | Metric | Baseline | Target | Why it is the right measure |
 |---|---|---|---|
-| Answered-question rate | ~35% | **> 85%** | ✓ The direct mechanism. An unanswered question is a buyer who was close. |
+| Answered-question rate | ~35% | **> 85%** | ✓ The direct mechanism. An unanswered question is a buyer who was close. **Sent ÷ asked**, so it needs a surface that can post *and* an autonomy level that posts — see the note below the table. |
 | Time-to-answer, p95 | 90 s+ | **< 10 s** | ✓ Past roughly a minute the buyer has scrolled; the answer no longer converts. |
 | GMV per show hour | baseline | **+15%** | ✓ The outcome the seller actually cares about. Null below 15 minutes of show — a rate extrapolated from four minutes is noise wearing a decimal point. |
 | Sell-through on lots with ≥1 answered question | baseline | **+20%** | ✓ Isolates the effect from general show variance. Joined through the evidence on a SENT reply, which names the listing it was grounded in. |
+
+**What the answered-question rate can and cannot measure here.** It is sent ÷ asked, which is
+right for the row — a draft nobody sent reached no buyer. But two facts bound it:
+
+- **Every live-commerce surface is `delivery: "draft-only"`.** eBay Live, Whatnot and TikTok Live
+  expose no way for us to post; only Twitch and YouTube Live do. On the surfaces this product is
+  for, the seller copies the reply into the platform's own chat and marks it sent, so the figure
+  records what they *told us*, not a delivery we observed.
+- **The >85% target assumes L3**, where the copilot sends for itself. At L1 Suggest — the default,
+  and the level every production show has run at — the rate is bounded by whether a human pressed
+  a button.
+
+So the analytics surface reports **two** numbers: `answeredRate` (this row) and `groundedRate`,
+answered ÷ asked, which is what the copilot managed before the seller decided. Across the first
+14 production sessions those read 7% and 76%. Treating the first as a copilot score is the
+mistake the second exists to prevent.
 
 **Operator load**
 
@@ -206,7 +222,11 @@ assumption:
    driven by slot resolution failing. (`src/retrieval/slots.ts`, `docs/EVALS.md` §2)
 2. **Similarity score is unusable as a confidence signal** on a catalog this small — grounded
    and ungrounded questions overlap almost completely on BM25 score. That killed a planned
-   "confidence from retrieval score" feature and moved confidence onto guard outcomes.
+   "confidence from retrieval score" feature and moved confidence onto guard outcomes — and,
+   since, onto whether the draft USED its grounding. A reply citing nothing is capped below the
+   0.8 auto-send floor no matter how good the evidence behind it was: retrieval scoring 0.74 on
+   a question the draft then deflected reported 0.82, and the gate that exists to stop a bad
+   answer reaching a buyer could not see that the answer was empty. (`src/guardrails/chain.ts`)
 3. **Cheap latency wins were not where they looked.** Capping output tokens at 220 changed p50
    by under 1%; the tail is the shared LLM pool. The win that mattered was the version-keyed
    cache (p50 1.2 s → 2 ms on repeats), which matters *because* live chat asks the same six

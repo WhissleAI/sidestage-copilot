@@ -425,6 +425,14 @@ the chain parts, and the console exposes it as a **Verify chain** button. `test/
 tampers with a committed row and asserts detection. A send, an approval or a rollback is
 attributed to `seller:<handle>`, never a literal "seller".
 
+An **empty** chain verifies trivially — `verify()` walks nothing and returns
+`{ok: true, height: 0}`, which is true as a fact and vacuous as assurance. That matters because
+most sessions write no audit entries at all: a show where nobody sent, approved or changed
+anything has nothing to record. Counting those as verified made the analytics tile read
+"Audit chains intact 13/13" in green when eleven of the thirteen held no entries. The rollup now
+counts only chains with entries, and reports the empty ones separately — an empty chain is not a
+failure either, and calling it broken would be as wrong as calling it intact.
+
 `MockMarketplace` is a real two-phase participant with injectable latency, injectable apply
 failures and genuine optimistic-concurrency conflicts. The rollback tests force all three — a
 rollback path that is never exercised is a rollback path that does not work.
