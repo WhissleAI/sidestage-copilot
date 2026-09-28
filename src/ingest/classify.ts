@@ -19,7 +19,20 @@ const CUES: [ChatIntent, RegExp][] = [
   // it takes to propose a markdown (measured 2026-09-15).
   ["discount_request", /\b(discount\w*|deals?|cheap\w*|lower\w*|lowest|can (?:you|u) do|(?:would|will|could) (?:you|u) take|take (?:less|\$?\d)|\$?\d+\s*%?\s*off|percent off|price drop|negotiat\w*|obo|bundle|best (?:price|offer)|offer\w*)\b/i],
   ["price_question",   /\b(price|prices|cost|costs|how much|howmuch|asking|going for|what.?s it at)\b/i],
-  ["availability",     /\b(available|avail|still (?:there|up|have|got)|left|in stock|instock|sold|gone|any more|anymore|last one|claim\w*|\bmine\b)\b/i],
+  // The cue list asked how a seller talks — "in stock", "sold", "available" —
+  // and buyers do not. Measured over the whole production corpus on
+  // 2026-09-28: 39 of 54 questions landed in `other`, and eight of them were
+  // plainly availability asked as possession or existence — "do you have any
+  // spiders?", "Any men's watches", "Is there another color?", "any dragons?".
+  //
+  // It costs more than a mislabel. `availability` is on `AUTO_REPLY_INTENTS`
+  // and the action proposer counts availability signals, so a question in
+  // `other` is invisible to both: it can never auto-reply and never
+  // contributes to a swap proposal.
+  //
+  // `^any` is safe at this position because `discount_request` is matched
+  // first, so "any deals" and "any bundles" are already taken.
+  ["availability",     /\b(available|avail|still (?:there|up|have|got)|left|in stock|instock|sold|gone|any more|anymore|last one|claim\w*|\bmine\b)\b|\b(?:do(?:es)?\s+(?:you|u|ya|yall|y'all|they)\s+have|(?:you|u|yall|y'all)\s+(?:have|got)\s+any|got\s+any|have\s+any|is\s+there\s+(?:a|an|any|another)|are\s+there\s+any)\b|^any\b/i],
   ["sizing",           /\b(size|sizes|sizing|fit|fits|run big|run small|runs|true to size|tts|half size|what size)\b/i],
   ["shipping",         /\b(ship\w*|deliver\w*|post|mail|canada|uk|eu|international|intl|customs|duties|tracking|how (?:fast|long|soon))\b/i],
   ["returns",          /\b(return\w*|refund\w*|exchange|send (?:it )?back|money back)\b/i],
