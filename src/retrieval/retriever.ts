@@ -44,6 +44,28 @@ export interface RetrievalResult {
   abstain: boolean;
   slots: Slots;
   mode: "structured" | "hybrid" | "mixed" | "abstain";
+  /**
+   * The three numbers the abstain decision was made from, and the size of the
+   * index it was made against.
+   *
+   * Abstention is the loudest thing this system does — it is the copilot
+   * declining to answer a buyer — and it recorded only that it happened. When a
+   * production show abstained on all thirteen of its questions against a
+   * catalog of 53 good lots, nothing stored said which of the three conditions
+   * fired, or whether the index even held those lots. Reconstructing it took a
+   * database copy, a local Retriever and six wrong hypotheses, and the logs had
+   * already rotated.
+   *
+   * Four numbers, written once per draft. `indexedFacts` is the one that
+   * separates "we looked and found nothing" from "there was nothing to look
+   * at", which is the distinction that cost the most to recover.
+   */
+  why: {
+    inventoryQuery: string | null;
+    structuredCount: number;
+    bm25Top: number;
+    indexedFacts: number;
+  };
 }
 
 /** Retrieval configurations. `hybrid` is production: structured lookup plus both
@@ -210,10 +232,11 @@ export class Retriever {
     // Nothing resolved structurally AND nothing matched lexically with any
     // conviction: say so, rather than hand the composer a loosely-related fact
     // and invite it to answer from it.
+    const bm25Top = this.bm25.topScore(question);
     const abstain =
       !slots.inventoryQuery &&
       structuredCount === 0 &&
-      this.bm25.topScore(question) < ABSTAIN_BM25_BELOW;
+      bm25Top < ABSTAIN_BM25_BELOW;
 
     const chosen = [...picked.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -227,6 +250,12 @@ export class Retriever {
       abstain,
       slots,
       mode: abstain ? "abstain" : structuredCount && chosen.length > structuredCount ? "mixed" : structuredCount ? "structured" : "hybrid",
+      why: {
+        inventoryQuery: slots.inventoryQuery,
+        structuredCount,
+        bm25Top: Math.round(bm25Top * 100) / 100,
+        indexedFacts: this.facts.length,
+      },
     };
   }
 
