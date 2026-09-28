@@ -18,6 +18,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { rig, PINNED, cleanup } from "./helpers.js";
 import type { RetrievalMode } from "../src/retrieval/retriever.js";
 
@@ -142,6 +143,46 @@ test("retrieval: ablation over the labelled question set", async () => {
   // Absolute floors, so a regression is caught rather than merely compared.
   assert.ok(by.hybrid.r1 / by.hybrid.n >= 0.8, `hybrid R@1 ${(by.hybrid.r1 / by.hybrid.n).toFixed(3)} is below 0.80`);
   assert.ok(by.hybrid.r3 / by.hybrid.n >= 0.9, `hybrid R@3 ${(by.hybrid.r3 / by.hybrid.n).toFixed(3)} is below 0.90`);
+
+  // ── and the table docs/EVALS.md publishes is this table ──────────────────
+  //
+  // These four columns are the submission's headline evidence: the argument
+  // that structured lookup does the work and the similarity legs buy tail
+  // recall rests entirely on them. The floors above would let every number
+  // drift by a tenth without a word, and the doc would go on quoting the old
+  // ones — which is how a reviewer ends up diffing a claim against a system
+  // that no longer makes it.
+  //
+  // Exact match, because the suite is deterministic: EVALS.md records it was
+  // run twice and printed identically, and that stdout is what the doc quotes.
+  // A number that moves is not a failure — it is a result that has to be
+  // written down with the reason it moved.
+  const published = readFileSync(
+    new URL("../docs/EVALS.md", import.meta.url),
+    "utf8",
+  );
+  const rowRe = /^\s*(lexical|ngram|fused|structured-only|hybrid)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$/gm;
+  const inDoc = new Map<string, string[]>();
+  for (const m of published.matchAll(rowRe)) inDoc.set(m[1]!, [m[2]!, m[3]!, m[4]!, m[5]!]);
+
+  assert.equal(inDoc.size, MODES.length, `docs/EVALS.md publishes ${inDoc.size} ablation rows; the suite measures ${MODES.length}`);
+
+  for (const [mode, s] of rows) {
+    const doc = inDoc.get(mode);
+    assert.ok(doc, `docs/EVALS.md does not publish a row for "${mode}"`);
+    const measured = [
+      (s.r1 / s.n).toFixed(3),
+      (s.r3 / s.n).toFixed(3),
+      (s.r5 / s.n).toFixed(3),
+      (s.mrr / s.n).toFixed(3),
+    ];
+    assert.deepEqual(
+      measured,
+      doc,
+      `${mode}: measured ${measured.join(" ")} but docs/EVALS.md publishes ${doc!.join(" ")}. ` +
+        "Update the table AND say in §3 why it moved — the numbers are the argument.",
+    );
+  }
 });
 
 /** Deterministic keyboard-style typos: transpose, drop, double. Live-chat buyers
