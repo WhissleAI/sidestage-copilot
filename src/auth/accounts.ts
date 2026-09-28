@@ -287,6 +287,41 @@ export class Accounts {
   }
 }
 
+/**
+ * Run the prune on a timer.
+ *
+ * `pruneExpiredSessions` described itself as "safe to run on a timer" and
+ * nothing ever called it, which was survivable while sessions were minted only
+ * at sign-in and when the bridge opened. `openMediaSession` writes one every
+ * time a report page loads, all of them dead within the hour, so the table now
+ * grows with ordinary use rather than with sign-ins.
+ *
+ * Hourly, matching the shortest thing it collects, and `unref`'d so it never
+ * holds the process open — same shape as `startAgentGc`.
+ */
+export function startSessionPrune(
+  accounts: Accounts,
+  opts: { everyMs?: number; firstDelayMs?: number } = {},
+): () => void {
+  let stopped = false;
+  const tick = () => {
+    if (stopped) return;
+    void accounts
+      .pruneExpiredSessions()
+      .then((n) => n > 0 && console.log(`  session-prune: removed ${n} expired`))
+      .catch((e: Error) => console.warn(`  session-prune: ${e.message}`));
+  };
+  const first = setTimeout(tick, opts.firstDelayMs ?? 90_000);
+  const timer = setInterval(tick, opts.everyMs ?? 60 * 60_000);
+  first.unref?.();
+  timer.unref?.();
+  return () => {
+    stopped = true;
+    clearTimeout(first);
+    clearInterval(timer);
+  };
+}
+
 interface AccountRow { id: string; kind: string; handle: string; display_name: string; email?: string | null }
 
 const toAccount = (r: AccountRow): Account => ({

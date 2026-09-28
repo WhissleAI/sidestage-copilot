@@ -13,6 +13,7 @@ import { db as pgPool } from "./db/pg.js";
 import { startFollowingPoller } from "./sellers/following.js";
 import { startBudgetWatch, stopBudgetWatch } from "./llm/budget.js";
 import { retireStaleAgents, startAgentGc } from "./llm/agentGc.js";
+import { Accounts, startSessionPrune } from "./auth/accounts.js";
 import { onAgentCap } from "./llm/streamAgent.js";
 
 async function main(): Promise<void> {
@@ -58,6 +59,9 @@ async function main(): Promise<void> {
   startBudgetWatch();
   // Agents are capped per workspace; finished shows give theirs back.
   const stopAgentGc = startAgentGc(pgPool());
+  // Expired auth rows. Cheap, and now load-bearing: a scoped media token is
+  // minted on every report view and dead within the hour.
+  const stopSessionPrune = startSessionPrune(new Accounts(pgPool()));
   onAgentCap(() => retireStaleAgents(pgPool(), { reportAgeH: 1, preparedAgeH: 24 }));
 
   const rows = await ctx.shows.list();
@@ -83,6 +87,7 @@ async function main(): Promise<void> {
     try {
       stopFollowing();
       stopAgentGc();
+      stopSessionPrune();
       stopBudgetWatch();
       await ctx.stop();
       await app.close();

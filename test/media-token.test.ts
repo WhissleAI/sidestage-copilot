@@ -20,6 +20,7 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/api/server.js";
 import type { AppContext } from "../src/api/context.js";
 import { db as pgPool } from "../src/db/pg.js";
+import { Accounts, startSessionPrune } from "../src/auth/accounts.js";
 
 let app: FastifyInstance;
 let ctx: AppContext;
@@ -126,5 +127,37 @@ describe("a media token is not a console session", () => {
     assert.equal(r.statusCode, 403);
     await ctx.shows.detach(other.showId).catch(() => {});
     await pgPool().query("DELETE FROM shows WHERE id = $1", [other.showId]).catch(() => {});
+  });
+});
+
+/**
+ * The prune existed and nothing called it.
+ *
+ * Survivable while sessions were minted at sign-in and when the bridge opened.
+ * `openMediaSession` writes one on every report view, all dead within the hour,
+ * so this became the difference between a table that grows with sign-ins and
+ * one that grows with ordinary use.
+ */
+describe("expired sessions are actually collected", () => {
+  test("prune removes an expired row and leaves a live one", async () => {
+    const dead = `smt_${Math.random().toString(16).slice(2)}dead`;
+    await pgPool().query(
+      "INSERT INTO auth_sessions (token, account_id, expires_at, scope_show_id) VALUES ($1,$2,now() - interval '1 hour',$3)",
+      [dead, A.id, showId],
+    );
+    const removed = await new Accounts(pgPool()).pruneExpiredSessions();
+    assert.ok(removed >= 1, `pruned ${removed}`);
+
+    const gone = await pgPool().query("SELECT 1 FROM auth_sessions WHERE token = $1", [dead]);
+    assert.equal(gone.rowCount, 0, "the expired row is gone");
+
+    const live = await pgPool().query("SELECT 1 FROM auth_sessions WHERE token = $1", [media.token]);
+    assert.equal(live.rowCount, 1, "the hour-old media token is untouched");
+  });
+
+  test("the scheduler is stoppable and does not hold the process open", () => {
+    const stop = startSessionPrune(new Accounts(pgPool()), { firstDelayMs: 50_000, everyMs: 60_000 });
+    assert.equal(typeof stop, "function");
+    stop();
   });
 });
