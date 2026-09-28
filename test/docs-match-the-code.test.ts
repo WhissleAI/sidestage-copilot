@@ -88,6 +88,59 @@ describe("numbers in the docs match the constants that decide them", () => {
   }
 });
 
+/**
+ * The latency allocation lives in three places and nothing compared them.
+ *
+ * `config.latencyBudgetMs` (2000) is the target the code enforces. TDD §5
+ * publishes a table of per-stage budgets. `src/latency/spans.ts` repeats that
+ * allocation in a comment. All three agree today, by hand.
+ *
+ * The failure is quiet and specific: change one stage's budget without
+ * adjusting headroom and the table stops adding up to the target it claims to
+ * allocate — while every number in it still looks reasonable on its own.
+ */
+describe("the latency budget adds up", () => {
+  const tdd = text("docs/TDD.md");
+  const spans = text("src/latency/spans.ts");
+
+  /** Stage rows of the §5 table: `| name | 120 ms | …`. */
+  const stageBudgets = (src: string, re: RegExp) =>
+    [...src.matchAll(re)].map((m) => ({ stage: m[1]!.trim(), ms: Number(m[2]) }));
+
+  const fromTable = stageBudgets(
+    tdd,
+    /^\|\s*(admit \+ classify|retrieve|compose|guard|headroom)\s*\|\s*(\d+) ms\s*\|/gm,
+  );
+  const fromComment = stageBudgets(
+    spans,
+    /^\/\/\s+(admit \+ classify|retrieve|compose|guard|headroom)\s+(\d+) ms/gm,
+  );
+
+  test("TDD §5 publishes all five stages", () => {
+    assert.equal(fromTable.length, 5, `found ${fromTable.map((s) => s.stage).join(", ")}`);
+  });
+
+  test("the stages sum to the target the code enforces", () => {
+    const target = Number(text("src/config.ts").match(/latencyBudgetMs: num\("LATENCY_BUDGET_MS", (\d+)\)/)![1]);
+    const sum = fromTable.reduce((a, s) => a + s.ms, 0);
+    assert.equal(
+      sum,
+      target,
+      `TDD §5 allocates ${sum} ms across its stages but the enforced budget is ${target} ms ` +
+        "— a stage budget moved without headroom moving with it",
+    );
+    assert.ok(tdd.includes(`p95 < ${target} ms`), `TDD §5 states a target other than ${target} ms`);
+  });
+
+  test("spans.ts repeats the same allocation, stage for stage", () => {
+    assert.deepEqual(
+      fromComment,
+      fromTable,
+      "the allocation comment in src/latency/spans.ts has drifted from TDD §5",
+    );
+  });
+});
+
 describe("the submission's own checklist is intact", () => {
   test("README carries all six required labels", () => {
     // The brief names these exactly; a reviewer looks for them by name.
