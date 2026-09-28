@@ -173,6 +173,33 @@ export class Accounts {
   }
 
   /**
+   * A session that can only LOOK at one show's recorded media, for an hour.
+   *
+   * Same argument as `openBridgeSession`, for the other place a token has to
+   * ride in a URL: `<img>` and `<audio>` cannot send a bearer header, so the
+   * post-show report put the console's thirty-day account session into a `src`
+   * attribute — once per frame, in the rendered DOM, and in every access-log
+   * line the report generated. The path allowlist in the API layer governs
+   * where a query token may be READ, not what the token can do: harvested from
+   * the DOM and replayed as `Authorization: Bearer`, an `sst_` is the whole
+   * account for thirty days.
+   *
+   * This is what belongs in a `src` instead. Distinguished from the bridge's by
+   * prefix rather than a column, because the two differ only in what they may
+   * reach and the scope predicate is the one place that needs to know: `sbt_`
+   * FEEDS a show, `smt_` only reads back what was recorded.
+   */
+  async openMediaSession(account: Account, showId: string, minutes = 60): Promise<Session> {
+    const token = `smt_${randomBytes(24).toString("hex")}`;
+    const expiresAt = new Date(Date.now() + minutes * 60_000).toISOString();
+    await this.d.query(
+      "INSERT INTO auth_sessions (token, account_id, expires_at, scope_show_id) VALUES ($1, $2, $3, $4)",
+      [token, account.id, expiresAt, showId],
+    );
+    return { token, account, expiresAt, scopeShowId: showId };
+  }
+
+  /**
    * Resolve a bearer token to an account, or null.
    *
    * Expiry is enforced in the QUERY rather than in JavaScript: a check the
