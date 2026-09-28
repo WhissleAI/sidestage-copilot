@@ -28,7 +28,9 @@ export interface PrdMetrics {
     /** Sent ÷ admitted questions. The report's `engagement.answeredRate` is
      *  the same figure from the same function; they cannot disagree. */
     answeredQuestionRate: number | null;
-    timeToAnswerP95Ms: number;
+    /** Null when nothing was answered — a p95 of 0ms is the fastest possible
+     *  reply, not the absence of one. */
+    timeToAnswerP95Ms: number | null;
     /** Share of sold lots that had at least one answered buyer question.
      *  The PRD's "isolates the effect from general show variance" metric. */
     sellThroughWithAnswer: { withAnswer: number; total: number; rate: number | null };
@@ -167,7 +169,11 @@ export async function prdMetrics(d: Pool, showId: string): Promise<PrdMetrics> {
       hours: Number(hours.toFixed(2)),
       perShowHourCents: hours >= MIN_HOURS_FOR_RATE ? Math.round(grossCents / hours) : null,
       answeredQuestionRate: answeredRate({ sent: sent.length, questionsAsked: admitted }),
-      timeToAnswerP95Ms: pct(lat, 0.95),
+      // Null when nothing was answered. `pct` of an empty list is 0, and a p95
+      // of 0ms is the fastest possible reply — the report would claim perfect
+      // latency for a session that answered nobody. `medianDecisionMs` nine
+      // lines below already guards exactly this; this line did not.
+      timeToAnswerP95Ms: lat.length ? pct(lat, 0.95) : null,
       sellThroughWithAnswer: {
         withAnswer: soldWithAnswer,
         total: soldLots.size,
