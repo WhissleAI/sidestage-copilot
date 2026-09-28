@@ -492,10 +492,44 @@ Stated plainly, because these are the things a reviewer would otherwise find.
     movement while a show ran alone counts as that show's spend; a show that overlapped another is
     priced by its metered calls at the average cost per call learned from the shows that ran alone
     (`GET /api/cost`, `show_costs.account_id`). Every figure names its basis.
-19. **One Whissle agent per stream, and the workspace caps agents at fifty.** A show's agent is
+19. **One Whissle agent per stream, on the workspace's lightweight lane.** A show's agent is
     retired a day after its report (`src/llm/agentGc.ts`, every six hours), a preparation nobody
-    attached is dropped after two days, and hitting the cap triggers one retirement pass and one
-    retry before the operator is told. Re-preparing a show retires the old agent. Fifty
-    concurrent unfinished shows would still hit it.
+    attached is dropped after two days, and hitting a cap triggers one retirement pass and one
+    retry before the operator is told. Re-preparing a show retires the old agent. These are
+    created `kind: "lightweight"`, which the gateway counts apart from the standard fifty and
+    caps at five hundred — verified against the live workspace on 2026-09-27, which held 42
+    agents, 40 of them other projects' standard ones. Until then they were standard, and
+    "you've reached the limit of 50 agents" sat under every prepared card while only one of the
+    workspace's agents was ours.
 20. **CORS is wide open.** Correct for a console on another origin talking to a bearer-token
     API; wrong the day cookies are involved.
+21. **A live show abstained on every question it was asked, and the cause is not closed.** On
+    2026-09-28 a session held 53 correctly-titled lots — a Labradorite Spider among them — and
+    abstained on all thirteen of its questions, including "do you have any spiders?". A
+    `Retriever` built over those same rows answers every one of them, so the index at question
+    time did not hold what the database held. Six hypotheses were tested and none survived: the
+    catalog landed five minutes before the first question, `listings()` does not filter by state,
+    facts are built for every listing, a created lot does return `changed: true`, and proposals
+    continued past a lot change that rebuilds. The container logs had rotated. Two things now
+    cover it from opposite directions rather than one explanation: the draft path rebuilds
+    whenever a listing write is newer than the index (`listingEpochOf`), and every abstention
+    logs the four numbers behind it (`retrieval.abstained` — inventory term, structured count,
+    BM25 top, and the size of the index searched). **It has not recurred, and it has not been
+    explained.**
+22. **The action proposer has never fired.** Across fourteen production sessions:
+    `actions.proposed = 0`. The thresholds are three distinct askers for a markdown and four
+    questions for a swap, inside a three-minute window, and no production show has had the
+    traffic to reach either — the largest had 18 questions across eight minutes. A contributing
+    cause was that **72% of buyer questions classified as `other`** (39 of 54), which is neither
+    on the auto-reply allow-list nor counted as an availability signal; adding possession and
+    existence cues — "do you have any spiders?", "any dragons?" — moved eight of them and took
+    `other` to 57%. The remaining `other` is mostly bare product names ("Nike Air?", "Mexican
+    agate sphere?"), which are almost certainly availability and are deliberately left alone:
+    a rule broad enough to catch them also catches "Its new?", a CONDITION question, on an
+    intent that can auto-send at L3.
+23. **Four stored-report fields still report zero where they mean "not measured".**
+    `cacheHitRate`, the two per-session latency medians and `lostUtterances` are non-null on
+    every `ShowReport` already written, so widening them is a migration rather than an edit.
+    They are listed with that reason in `test/not-measured-is-not-zero.test.ts`, which fails on
+    any NEW zero-fallback in the modules that produce reported numbers. Everything else in that
+    class was fixed: a rate over an empty set now renders as absent, on both sides of the wire.
