@@ -298,3 +298,39 @@ describe("the copilot's share is not the seller's", () => {
     assert.equal(0 > 0 ? 1 : null, null, "a rate over no questions is not zero");
   });
 });
+
+/**
+ * "Sent" is a box the seller ticks, on every surface this product is for.
+ *
+ * eBay Live, Whatnot and TikTok Live are all `delivery: "draft-only"` — only
+ * Twitch and YouTube Live expose a way to post. So the reply is copied into
+ * the platform's own chat by hand and "sent" records what the seller told us,
+ * not what we delivered.
+ *
+ * That is why 34 grounded answers show as 3 sent, and why >85% on these
+ * surfaces is a target for mid-show bookkeeping rather than for the copilot.
+ */
+describe("what the surfaces can actually deliver", () => {
+  test("every live-commerce surface is draft-only", async () => {
+    const { SURFACE_CAPABILITIES } = await import("../src/surfaces/types.js");
+    for (const id of ["ebaylive", "whatnot", "tiktoklive"] as const) {
+      assert.equal(SURFACE_CAPABILITIES[id].delivery, "draft-only", id);
+    }
+  });
+
+  test("the ones that can post are not the ones sellers sell on", async () => {
+    const { SURFACE_CAPABILITIES } = await import("../src/surfaces/types.js");
+    const api = Object.entries(SURFACE_CAPABILITIES)
+      .filter(([, c]) => c.delivery === "api")
+      .map(([id]) => id);
+    assert.deepEqual(api.sort(), ["twitch", "youtubelive"]);
+  });
+
+  test("so a sent count on those surfaces is a floor, never a measurement", () => {
+    // 34 grounded, 3 marked. The gap is unobservable by construction: nothing
+    // in this system sees the seller paste into eBay's chat.
+    const grounded = 34, marked = 3;
+    assert.ok(marked <= grounded);
+    assert.ok(marked / 45 < 0.1 && grounded / 45 > 0.7);
+  });
+});

@@ -19,6 +19,7 @@ import type { Pool } from "../db/pg.js";
 import type { ShowReport } from "./sessionRecord.js";
 import { AUTO_REPLY_INTENTS } from "../autonomy/ladder.js";
 import { answerableShare, answeredRate, blockRate, share } from "./metrics.js";
+import { capabilitiesOf } from "../surfaces/types.js";
 
 export interface AnalyticsOverview {
   window: { days: number; from: string; to: string };
@@ -27,6 +28,9 @@ export interface AnalyticsOverview {
     /** Sessions that ended without a report — the ones to look at first. */
     withoutReport: number;
     hoursAttached: number;
+    /** Of those, how many ran where we cannot post — so "sent" is the
+     *  seller's own mark, not a delivery. See the note where it is counted. */
+    draftOnly: number;
   };
   engagement: {
     commentsSeen: number;
@@ -131,9 +135,9 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
   const from = new Date(to.getTime() - days * 86_400_000);
 
   const { rows } = await d.query<{
-    id: string; title: string; started_at: string; status: string; report: ShowReport | null;
+    id: string; title: string; started_at: string; status: string; source: string | null; report: ShowReport | null;
   }>(
-    `SELECT s.id, s.title, s.started_at, s.status, r.report
+    `SELECT s.id, s.title, s.started_at, s.status, s.source, r.report
        FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
       WHERE COALESCE(r.generated_at, s.started_at::timestamptz) >= $1 AND s.status = 'ended'
         AND (s.owner_account_id IS NULL OR $2::text IS NULL OR s.owner_account_id = $2)
@@ -223,6 +227,22 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
        * own.
        */
       hoursAttached: Math.round((sum(reported, (r) => r.report.durationMin) / 60) * 10) / 10,
+      /**
+       * Finished shows on a surface this app cannot post to.
+       *
+       * eBay Live, Whatnot and TikTok Live are all `delivery: "draft-only"` —
+       * every live-commerce surface is. Only Twitch and YouTube Live expose a
+       * way to post. So on the shows this product exists for, a reply is
+       * copied by the seller into the platform's own chat, and "sent" is a box
+       * they tick afterwards rather than anything we observed.
+       *
+       * That is the missing half of the answered rate. Across production the
+       * copilot grounded 34 of 45 questions and 3 are marked sent — and the
+       * console showed 7% against a >85% target, which on these surfaces is a
+       * target for how reliably a seller does bookkeeping mid-show. The number
+       * is not wrong; it was being read as something it cannot measure here.
+       */
+      draftOnly: reported.filter((r) => capabilitiesOf(r.source).delivery === "draft-only").length,
     },
     engagement: {
       commentsSeen: sum(reported, (r) => r.report.engagement.commentsSeen),
