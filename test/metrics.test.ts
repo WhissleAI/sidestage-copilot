@@ -265,3 +265,36 @@ describe("the gmv denominator is shows that took money", () => {
     );
   });
 });
+
+/**
+ * Two questions, two numbers.
+ *
+ * `answeredRate` is sent over asked — right for the PRD's row, because a draft
+ * nobody sent reached no buyer. But the PRD hangs its >85% target on sellers
+ * who have reached L3, where the copilot sends for itself, and every show in
+ * production has run at L1_SUGGEST. All sixteen.
+ *
+ * So the console read "Answered rate 7% · target >85%" over a period in which
+ * the copilot had grounded 34 of 45 questions. The failing number was the
+ * seller's send rate wearing the copilot's label.
+ */
+describe("the copilot's share is not the seller's", () => {
+  test("they diverge exactly when the seller does not send", () => {
+    const asked = 45, answered = 34, sent = 3;
+    const answeredRate = sent / asked;
+    const groundedRate = answered / asked;
+    assert.ok(answeredRate < 0.1, `${answeredRate}`);
+    assert.ok(groundedRate > 0.7, `${groundedRate}`);
+    assert.ok(groundedRate > answeredRate * 5, "one number cannot carry both readings");
+  });
+
+  test("at L3 they converge, which is the level the target assumes", () => {
+    // The copilot sends for itself, so every grounded answer reaches a buyer.
+    const asked = 45, answered = 34, sent = 34;
+    assert.equal(sent / asked, answered / asked);
+  });
+
+  test("neither is defined when nothing was asked", () => {
+    assert.equal(0 > 0 ? 1 : null, null, "a rate over no questions is not zero");
+  });
+});

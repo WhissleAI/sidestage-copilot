@@ -41,6 +41,9 @@ export interface AnalyticsOverview {
      * Pooled over summed counts, never averaged over per-session rates.
      */
     answeredRate: number | null;
+    /** Answered over asked — the copilot's own share, before the seller
+     *  decides. See the note where it is computed. */
+    groundedRate: number | null;
     /** Median of each show's median — a shape, not a median. */
     medianOfMediansMs: number;
     /** The worst p95 any show recorded. One bad show should not hide. */
@@ -227,6 +230,22 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       answered,
       sent,
       answeredRate: answeredRate({ sent, questionsAsked: questions }),
+      /**
+       * What the COPILOT managed, as distinct from what the seller sent.
+       *
+       * `answeredRate` is sent over asked, and that is right for the PRD's row
+       * — "an unanswered question is a buyer who was close", and a draft
+       * nobody sent reached no buyer. But the PRD hangs its >85% target on
+       * sellers who have reached L3, where the copilot sends for itself.
+       *
+       * Every show in production has run at L1_SUGGEST. All sixteen. At that
+       * level the rate is bounded entirely by whether a human pressed Send, so
+       * the console read "7%" against a target of 85% while the copilot had in
+       * fact grounded 34 of 45 questions. One number cannot answer both "did
+       * the buyer get an answer" and "could we answer them"; this is the
+       * second, and `answerableShare` already says so in its own comment.
+       */
+      groundedRate: answerableShare({ answered, proposals: questions }),
       // A show that drafted nothing has no median, not a median of zero; four
       // such shows next to one real one used to read as "0ms" here.
       medianOfMediansMs: median(
