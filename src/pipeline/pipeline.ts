@@ -52,7 +52,7 @@ import type { AuditLog } from "../actions/audit.js";
 import { isOverBudget } from "../llm/budget.js";
 import { answeredRate } from "../shows/metrics.js";
 import { recordEvent } from "../obs/events.js";
-import { logSwallowed, errText } from "../obs/log.js";
+import { logSwallowed, logWarn, errText } from "../obs/log.js";
 
 export interface PipelineEvents {
   onChat(m: ChatMessage): void;
@@ -405,6 +405,22 @@ export class Pipeline {
 
     // 1. retrieve (local, no network)
     const r = this.d.retriever.retrieve(msg.text, { pinnedId: show.pinnedListingId });
+    // The copilot declining to answer a buyer, with the reason it declined.
+    //
+    // Only on abstention, so this is quiet on a healthy show and loud on the
+    // one failure an operator cannot otherwise explain. `indexedFacts` is the
+    // field that separates "we looked and found nothing" from "there was
+    // nothing to look at" — the distinction that took a database copy and six
+    // wrong hypotheses to recover the last time it mattered.
+    if (r.abstain) {
+      logWarn("retrieval.abstained", {
+        showId: this.d.repo.showId,
+        question: msg.text.slice(0, 120),
+        ...r.why,
+        listingIds: r.slots.listingIds.length,
+        fields: r.slots.fields.join(","),
+      });
+    }
     this.addHostFacts(msg.text, r);
     // "Is that a good price?" and "how does it compare to the other one?" are
     // market questions, and the comps that answer them were already on disk —
