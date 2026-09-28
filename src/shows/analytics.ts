@@ -51,8 +51,11 @@ export interface AnalyticsOverview {
     /** Median of each show's median — a shape, not a median. */
     medianOfMediansMs: number;
     /** The worst p95 any show recorded. One bad show should not hide. */
-    worstP95Ms: number;
-    cacheHitRate: number;
+    /** Null when nothing in the window answered — not 0, which reads as the
+     *  fastest possible reply and used to award a met target. */
+    worstP95Ms: number | null;
+    /** Null on an empty window, for the same reason. */
+    cacheHitRate: number | null;
   };
   safety: {
     blocked: number;
@@ -271,10 +274,28 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       medianOfMediansMs: median(
         reported.map((r) => r.report.engagement.medianLatencyMs).filter((ms) => ms > 0),
       ),
-      worstP95Ms: Math.max(0, ...reported.map((r) => r.report.engagement.p95LatencyMs)),
+      /**
+       * Null when no session in the window answered anything.
+       *
+       * `Math.max(0, ...[])` is 0, and the page renders that as "0ms" — under
+       * every threshold, so the tile also awarded a MET target. An empty
+       * window was reported as the best latency achievable.
+       *
+       * Same shape as the console meter's `p95 0ms` in green, which came off a
+       * live show 46 seconds in. Zero standing in for "nothing measured" has
+       * now turned up in five places in this codebase; the rate helpers in
+       * `metrics.ts` all return `number | null` for exactly this reason, and
+       * these two were computed inline and missed it.
+       */
+      worstP95Ms: (() => {
+        const seen = reported.map((r) => r.report.engagement.p95LatencyMs).filter((ms) => ms > 0);
+        return seen.length ? Math.max(...seen) : null;
+      })(),
+      /** Null on an empty window. 0% reads as "the cache never hits", which is
+       *  a claim about a cache that was never asked. */
       cacheHitRate: reported.length
         ? sum(reported, (r) => r.report.engagement.cacheHitRate) / reported.length
-        : 0,
+        : null,
     },
     safety: {
       blocked,

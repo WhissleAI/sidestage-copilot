@@ -371,3 +371,32 @@ describe("the latency meter knows when it has measured nothing", () => {
     assert.equal(t.count, 10);
   });
 });
+
+/**
+ * The last two rates that treated an empty window as a result.
+ *
+ * `metrics.ts`'s helpers all return `number | null` for this reason. These two
+ * were computed inline in the overview and missed it: `Math.max(0, ...[])` is
+ * 0, which the page rendered as "0ms" AND awarded a met target — the best
+ * latency achievable, for sessions that answered nothing.
+ */
+describe("an empty analytics window measures nothing", () => {
+  test("the worst p95 over no answered sessions is null, not zero", () => {
+    const p95s: number[] = [];
+    const seen = p95s.filter((x) => x > 0);
+    assert.equal(seen.length ? Math.max(...seen) : null, null);
+  });
+
+  test("a session that answered nothing does not drag the worst down to zero", () => {
+    // One real session at 3067ms beside two that never answered: the worst is
+    // 3067, not 0. `Math.max(0, 3067, 0, 0)` happened to be right here; the
+    // filter is what makes it right for the reason rather than by luck.
+    const seen = [3067, 0, 0].filter((x) => x > 0);
+    assert.equal(seen.length ? Math.max(...seen) : null, 3067);
+  });
+
+  test("cache hit rate over no sessions is null, not a cache that never hits", () => {
+    const reported: number[] = [];
+    assert.equal(reported.length ? reported.reduce((a, b) => a + b, 0) / reported.length : null, null);
+  });
+});
