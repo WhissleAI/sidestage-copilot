@@ -211,7 +211,17 @@ export class Pipeline {
    *   is unarguable rather than merely strict. The override is recorded on the
    *   message so a gate miss stays visible in the report.
    */
-  async ingest(incoming: IncomingMessage, opts: { force?: boolean } = {}): Promise<ChatMessage> {
+  /**
+   * `historic` — said before we attached.
+   *
+   * Recorded, classified and shown in the ticker like anything else, and never
+   * drafted against. Exactly what `L0_OBSERVE` already does, for the same
+   * reason: answering an hour-old question is worse than not answering it.
+   */
+  async ingest(
+    incoming: IncomingMessage,
+    opts: { force?: boolean; historic?: boolean } = {},
+  ): Promise<ChatMessage> {
     const timer = new SpanTimer();
     const intent = classify(incoming.text);
     // The second axis: what KIND of utterance this is, on the same vocabulary
@@ -229,7 +239,12 @@ export class Pipeline {
     // The limiter goes in as a THUNK, not as a value: `admit` draws the token
     // at the last gate rather than the caller drawing it at the first, so a
     // greeting or a "W" no longer costs a proposal the seller could have had.
-    const natural = admit(incoming.text, intent, () => !observing && this.rate.tryAdmit(), speechAct);
+    const natural = admit(
+      incoming.text,
+      intent,
+      () => !observing && !opts.historic && this.rate.tryAdmit(),
+      speechAct,
+    );
     const decision = capped
       ? { admitted: false, reason: BUDGET_REASON }
       : opts.force

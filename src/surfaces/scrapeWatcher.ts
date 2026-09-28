@@ -38,6 +38,11 @@ const ACTIVITY_WINDOW_MS = 90_000;
  *  the feed's own silence is the signal, and fifteen minutes is longer than any
  *  break a host takes with the stream still up. (eBay watcher.) */
 const END_SILENCE_MS = 15 * 60_000;
+
+/** How much of the backlog reaches the ticker. Enough to read the room on
+ *  arrival; not so much that attaching to a busy hour floods the operator with
+ *  an hour of chat they will never scroll. The rest is still marked seen. */
+const BACKLOG_SHOWN = 40;
 /** Reloading forever would hammer the platform if the selector itself broke. */
 const MAX_RELOADS = 20;
 
@@ -139,8 +144,23 @@ export class ScrapedPageWatcher {
     // The first scrape is a BACKLOG, not new traffic: everything on screen was
     // said before we attached. Marking it seen is what stops a freshly attached
     // room from replaying an hour of chat through the reply pipeline.
+    //
+    // It is NOT a reason to hide it. Marking it seen and stopping there meant
+    // the operator attached mid-show and watched an empty room: reported from a
+    // live eBay Live session — 99 viewers, 24 minutes, "Listening to chat" and
+    // nothing under it — while this very line logged `98 backlog` and every one
+    // of those messages sat on the page in front of us.
+    //
+    // So it is emitted as `historic`: recorded, classified and shown in the
+    // ticker, never drafted against. Two different jobs that one `seen.add` was
+    // quietly doing at once.
     const backlog = await this.scrape();
     for (const m of backlog.messages) this.seen.add(dedupeKey(m));
+    for (const m of backlog.messages.slice(-BACKLOG_SHOWN)) {
+      this.ev.onMessage?.({
+        id: m.id || dedupeKey(m), author: m.author, text: m.text, historic: true,
+      });
+    }
     if (backlog.item) this.emitItem(backlog.item);
     this.ev.onStatus?.({
       connected: !backlog.blocked,

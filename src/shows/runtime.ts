@@ -749,16 +749,21 @@ export class ShowRuntime {
         // learn what a subreddit is.
         const meta = (c.meta ?? {}) as { room?: unknown; permalink?: unknown };
         void this.underOwnerPolicy(() =>
-          this.pipeline.ingest({
-            author: c.author,
-            text: c.text,
-            externalId: c.id,
-            at: c.at,
-            threadId: c.threadId,
-            parentId: c.parentId,
-            room: typeof meta.room === "string" ? meta.room : undefined,
-            url: typeof meta.permalink === "string" ? meta.permalink : undefined,
-          }),
+          this.pipeline.ingest(
+            {
+              author: c.author,
+              text: c.text,
+              externalId: c.id,
+              at: c.at,
+              threadId: c.threadId,
+              parentId: c.parentId,
+              room: typeof meta.room === "string" ? meta.room : undefined,
+              url: typeof meta.permalink === "string" ? meta.permalink : undefined,
+            },
+            // Said before we attached: the operator sees it, the pipeline does
+            // not answer it.
+            c.historic ? { historic: true } : {},
+          ),
         );
       },
 
