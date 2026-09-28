@@ -35,6 +35,12 @@ export interface CachedReply {
   verdict: Verdict;
   confidence: number;
   repaired: boolean;
+  /** Retrieval found nothing for this question — the autonomy ladder's
+   *  "abstained". Carried because `evidence` above is what the reply CITED,
+   *  and a cached deflection cites nothing without retrieval having been
+   *  empty. Reading emptiness off `evidence` conflated the two and sent every
+   *  deflection to review. */
+  groundless: boolean;
 }
 
 interface Entry {

@@ -168,7 +168,7 @@ test("a changed FACT makes the old entry unreachable", async () => {
   assert.notEqual(k1, k2);
 
   const c = new ReplyCache();
-  const entry = { answer: "$412.00", claims: [], evidence: [], guards: [], verdict: "allow" as const, confidence: 0.9, repaired: false };
+  const entry = { answer: "$412.00", claims: [], evidence: [], guards: [], verdict: "allow" as const, confidence: 0.9, repaired: false, groundless: true };
   c.set(k1, entry);
   assert.ok(c.get(k1));
   assert.equal(c.get(k2), null, "the post-markdown key must miss");
@@ -192,7 +192,7 @@ test("an unrelated lot taking a bid does NOT invalidate the answer", async () =>
 
 test("a reply that failed a guardrail is never cached", async () => {
   const c = new ReplyCache();
-  const blocked = { answer: "x", claims: [], evidence: [], guards: [], verdict: "block" as const, confidence: 0.1, repaired: false };
+  const blocked = { answer: "x", claims: [], evidence: [], guards: [], verdict: "block" as const, confidence: 0.1, repaired: false, groundless: true };
   c.set("k", blocked);
   assert.equal(c.get("k"), null);
   assert.equal(c.size, 0);
