@@ -77,6 +77,11 @@ export class AgentApiError extends Error {
  *
  * The consequence is stated once, by the caller, because it is the same for
  * all of them: the lineup is prepared and the copilot cannot draft against it.
+ *
+ * Every branch names something a SELLER can do or decide. This string is
+ * rendered verbatim on a card in the console, so no shell command, no env var
+ * and no backticks: on a hosted install the person reading it has no terminal,
+ * and on a self-hosted one the raw error is already in the log next to it.
  */
 export function explainAgentFailure(e: unknown): string {
   const status = e instanceof AgentApiError ? e.status : 0;
@@ -85,12 +90,12 @@ export function explainAgentFailure(e: unknown): string {
   // The cap is counted by the workspace and shared with every other project on
   // it, so "delete one of yours" is not always the fix \u2014 name both moves.
   if (status === 429 || /limit of \d+ agents/i.test(detail))
-    return "the Whissle workspace is at its agent limit. Retire finished ones with `npm run agents:gc`, or delete some in the Whissle console, then prepare again";
-  if (status === 402) return "the Whissle workspace is out of credit";
+    return "this workspace is at its agent limit. Delete a prepared session you no longer need \u2014 that frees its agent \u2014 and prepare this one again";
+  if (status === 402) return "this workspace is out of Whissle credit";
   if (status === 401 || status === 403)
-    return "Whissle rejected the API key \u2014 check `WHISSLE_API_KEY`";
+    return "Whissle rejected this server's credentials. Nothing is wrong with this show \u2014 it is a setup problem, and the log says which";
   if (status >= 500 || status === 0)
-    return "Whissle was unreachable. Nothing is wrong with this show \u2014 prepare again to retry";
+    return "Whissle was unreachable. Nothing is wrong with this show \u2014 prepare it again to retry";
   return `Whissle refused to create the agent (${status})`;
 }
 

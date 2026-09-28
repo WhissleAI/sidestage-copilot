@@ -17,11 +17,27 @@ import { AgentApiError, explainAgentFailure } from "../src/llm/streamAgent.js";
 const CAP = new AgentApiError("POST", "/api/agents", 429, '{"detail":"limit of 500 agents"}');
 
 describe("an agent failure a seller can act on", () => {
-  test("the cap names both moves, because the workspace is shared", () => {
+  test("the cap names a move the seller can make in this product", () => {
     const s = explainAgentFailure(CAP);
     assert.match(s, /agent limit/);
-    assert.match(s, /agents:gc/, "the move that does not need the Whissle console");
-    assert.match(s, /Whissle console/, "and the one for agents this app did not create");
+    assert.match(s, /Delete a prepared session/, "the action, in the console they are already looking at");
+    assert.match(s, /frees its agent/, "and why it helps, since the connection is not obvious");
+  });
+
+  test("no branch tells a seller to run a command or edit a variable", () => {
+    // This renders verbatim on a card. On a hosted install the person reading
+    // it has no terminal; on a self-hosted one the raw error is in the log.
+    for (const e of [
+      CAP,
+      new AgentApiError("POST", "/x", 402, ""),
+      new AgentApiError("POST", "/x", 401, ""),
+      new AgentApiError("POST", "/x", 503, ""),
+      new Error("fetch failed"),
+    ]) {
+      const s = explainAgentFailure(e);
+      assert.ok(!s.includes("`"), `backticks render literally: ${s}`);
+      assert.ok(!/npm |WHISSLE_|\.env/.test(s), `developer instruction in seller copy: ${s}`);
+    }
   });
 
   test("a cap reported as a message rather than a status is still a cap", () => {
@@ -31,8 +47,8 @@ describe("an agent failure a seller can act on", () => {
   });
 
   test("credit, auth and outage are distinguished — the fix differs for each", () => {
-    assert.match(explainAgentFailure(new AgentApiError("POST", "/x", 402, "")), /out of credit/);
-    assert.match(explainAgentFailure(new AgentApiError("POST", "/x", 401, "")), /API key/);
+    assert.match(explainAgentFailure(new AgentApiError("POST", "/x", 402, "")), /credit/);
+    assert.match(explainAgentFailure(new AgentApiError("POST", "/x", 401, "")), /credentials/);
     assert.match(explainAgentFailure(new AgentApiError("POST", "/x", 503, "")), /unreachable/);
   });
 
