@@ -26,7 +26,7 @@ export interface AnalyticsOverview {
     finished: number;
     /** Sessions that ended without a report — the ones to look at first. */
     withoutReport: number;
-    hoursOnAir: number;
+    hoursAttached: number;
   };
   engagement: {
     commentsSeen: number;
@@ -67,6 +67,8 @@ export interface AnalyticsOverview {
     lotsSold: number;
     /** Shows old enough to predate PRD metrics carry no GMV; said, not zeroed. */
     showsWithGmv: number;
+    /** Hours of the shows that produced it — the matched denominator. */
+    hours: number;
   };
   operator: {
     /** Median of each show's median decision time, where recorded. */
@@ -190,7 +192,18 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
     shows: {
       finished: rows.length,
       withoutReport: rows.length - reported.length,
-      hoursOnAir: Math.round((sum(reported, (r) => r.report.durationMin) / 60) * 10) / 10,
+      /**
+       * Time ATTACHED, not airtime.
+       *
+       * `durationMin` is attach-to-detach, which equals show length for a live
+       * event that ends and does not for a room that persists — the Rooms page
+       * says it plainly, "a room here is a list, not a running watch". In
+       * production a subreddit and a Twitch channel held 21.6 hours each of
+       * this, for one gateway call apiece and nobody answered: 98% of the
+       * number. Named for what it is, and never a rate's denominator on its
+       * own.
+       */
+      hoursAttached: Math.round((sum(reported, (r) => r.report.durationMin) / 60) * 10) / 10,
     },
     engagement: {
       commentsSeen: sum(reported, (r) => r.report.engagement.commentsSeen),
@@ -227,6 +240,16 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       grossCents: sum(withGmv, (r) => r.report.prd!.gmv.grossCents),
       lotsSold: sum(withGmv, (r) => r.report.prd!.gmv.lotsSold),
       showsWithGmv: withGmv.length,
+      /**
+       * The hours BEHIND that GMV, so "GMV per hour" divides two things that
+       * describe the same shows.
+       *
+       * The page divided gross by `hoursAttached`, which includes every room
+       * that sold nothing and every hour one sat idle. With 21.6 idle hours in
+       * the window that reported $205 an hour against roughly $13,000 — on the
+       * metric the PRD names first for proving this product works.
+       */
+      hours: Math.round((sum(withGmv, (r) => r.report.durationMin) / 60) * 100) / 100,
     },
     operator: {
       medianDecisionMs: decision.length ? median(decision) : null,

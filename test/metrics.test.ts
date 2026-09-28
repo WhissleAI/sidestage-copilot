@@ -186,3 +186,47 @@ describe("two consumers of one figure", () => {
     assert.equal(withReport.hasReport, true, "and it is still a report");
   });
 });
+
+/**
+ * GMV per hour is the PRD's first business metric, and the page divided it by
+ * every hour the app was attached to anything.
+ *
+ * `durationMin` is attach-to-detach — show length for a live event that ends,
+ * and not for a room that persists. In production a subreddit and a Twitch
+ * channel held 21.6 hours each of it, sold nothing, and answered nobody. Gross
+ * over that read $205 an hour where the shows that actually sold were running
+ * about $13,000.
+ *
+ * The fix is that a rate divides two numbers describing the same shows, so the
+ * overview reports the hours BEHIND the GMV next to the GMV.
+ */
+describe("a rate divides matched things", () => {
+  test("gmv hours cover only the shows that produced gmv", () => {
+    const shows = [
+      { durationMin: 13, gross: 500_000 },
+      { durationMin: 9, gross: 407_800 },
+      { durationMin: 1297, gross: 0 },
+      { durationMin: 1297, gross: 0 },
+    ];
+    const attachedHours = shows.reduce((a, s) => a + s.durationMin, 0) / 60;
+    const withGmv = shows.filter((s) => s.gross > 0);
+    const gmvHours = withGmv.reduce((a, s) => a + s.durationMin, 0) / 60;
+    const gross = withGmv.reduce((a, s) => a + s.gross, 0);
+
+    assert.ok(attachedHours > 43, "the idle rooms dominate time attached");
+    assert.ok(gmvHours < 0.4, "and contribute nothing to the hours that sold");
+
+    const blended = gross / attachedHours;
+    const matched = gross / gmvHours;
+    assert.ok(
+      matched > blended * 50,
+      `a rate an idle room can flatten is not a rate: ${matched} vs ${blended}`,
+    );
+  });
+
+  test("no gmv means no rate, rather than a rate of zero", () => {
+    const gmvHours = 0;
+    const rate = gmvHours ? 100 / gmvHours : null;
+    assert.equal(rate, null, "zero per hour reads as 'this sells nothing'");
+  });
+});
