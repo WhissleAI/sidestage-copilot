@@ -230,3 +230,38 @@ describe("a rate divides matched things", () => {
     assert.equal(rate, null, "zero per hour reads as 'this sells nothing'");
   });
 });
+
+/**
+ * "Has a gmv block" is not "sold something".
+ *
+ * The first attempt at the matched denominator filtered on `report.prd?.gmv`
+ * being present. A session that sold nothing still carries that block, full of
+ * zeroes, so the two rooms attached overnight passed straight back into the
+ * divisor and the rate did not move — 44.18h of 44.2h, still $205 an hour.
+ * Caught by opening the page after deploying, not by the type checker.
+ */
+describe("the gmv denominator is shows that took money", () => {
+  test("a zeroed gmv block is not a selling hour", () => {
+    const reports = [
+      { durationMin: 13, gmv: { grossCents: 500_000 } },
+      { durationMin: 9, gmv: { grossCents: 407_800 } },
+      { durationMin: 1297, gmv: { grossCents: 0 } },
+      { durationMin: 1297, gmv: { grossCents: 0 } },
+    ];
+    const present = reports.filter((r) => r.gmv);
+    const sold = present.filter((r) => r.gmv.grossCents > 0);
+
+    assert.equal(present.length, 4, "every row carries the block");
+    assert.equal(sold.length, 2, "two of them took money");
+
+    const hoursIfPresent = present.reduce((a, r) => a + r.durationMin, 0) / 60;
+    const hoursIfSold = sold.reduce((a, r) => a + r.durationMin, 0) / 60;
+    assert.ok(hoursIfPresent > 43 && hoursIfSold < 0.4);
+
+    const gross = sold.reduce((a, r) => a + r.gmv.grossCents, 0);
+    assert.ok(
+      gross / hoursIfSold > (gross / hoursIfPresent) * 50,
+      "filtering on presence leaves the rate exactly where it was",
+    );
+  });
+});

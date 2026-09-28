@@ -69,6 +69,9 @@ export interface AnalyticsOverview {
     showsWithGmv: number;
     /** Hours of the shows that produced it — the matched denominator. */
     hours: number;
+    /** Shows that took money. `showsWithGmv` also counts shows whose gmv is
+     *  zero, so it is a reporting count, never a rate's basis. */
+    showsThatSold: number;
   };
   operator: {
     /** Median of each show's median decision time, where recorded. */
@@ -180,6 +183,19 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
   const sent = sum(reported, (r) => r.report.engagement.sent);
   const blocked = sum(reported, (r) => r.report.safety.blocked);
   const withGmv = reported.filter((r) => r.report.prd?.gmv);
+  /**
+   * Shows that actually took money, which is NOT `withGmv`.
+   *
+   * `withGmv` asks whether a report carries a gmv block at all; a session that
+   * sold nothing carries one full of zeroes and passes. Using it as a per-hour
+   * denominator put the two rooms that were attached overnight and sold
+   * nothing straight back in, and the rate did not move: 44.18h of 44.2h,
+   * still $205 an hour.
+   *
+   * A show contributing nothing to the numerator must contribute nothing to
+   * the denominator. That is the whole rule.
+   */
+  const sold = withGmv.filter((r) => (r.report.prd!.gmv.grossCents ?? 0) > 0);
   const decision = reported
     .map((r) => r.report.prd?.operatorLoad?.medianDecisionMs)
     .filter((x): x is number => typeof x === "number");
@@ -249,7 +265,10 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
        * the window that reported $205 an hour against roughly $13,000 — on the
        * metric the PRD names first for proving this product works.
        */
-      hours: Math.round((sum(withGmv, (r) => r.report.durationMin) / 60) * 100) / 100,
+      hours: Math.round((sum(sold, (r) => r.report.durationMin) / 60) * 100) / 100,
+      /** How many of `showsWithGmv` actually took money. The other rows carry
+       *  a gmv block of zeroes, which is why `withGmv` cannot be the basis. */
+      showsThatSold: sold.length,
     },
     operator: {
       medianDecisionMs: decision.length ? median(decision) : null,
