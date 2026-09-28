@@ -69,6 +69,9 @@ export interface AnalyticsOverview {
     blockRate: number | null;
     /** Shows whose audit chain verified intact, over shows with a report. */
     chainsIntact: number;
+    /** Of the finished sessions, how many had an empty chain — nothing to
+     *  verify. Not a failure, and not evidence. */
+    chainsEmpty: number;
   };
   actions: { proposed: number; committed: number; rolledBack: number; failed: number };
   gmv: {
@@ -304,7 +307,27 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       flaggedWrong: sum(reported, (r) => r.report.safety.flaggedWrong ?? 0),
       byGuard,
       blockRate: blockRate({ blocked, answered }),
-      chainsIntact: reported.filter((r) => (r.report.safety?.auditChain?.ok ?? false)).length,
+      /**
+       * Chains that were verified — not chains that had nothing to verify.
+       *
+       * `AuditLog.verify()` walks the entries and returns `{ok: true,
+       * height: 0}` for an empty one, which is correct as a fact and vacuous as
+       * a claim. Counting those made the console read "Audit chains intact
+       * 13/13" in green, hint "hash-verified end to end, per session", when
+       * eleven of the thirteen held no entries at all. That is the strongest
+       * assurance this product gives, on the thing the PRD leans on hardest to
+       * justify letting a copilot near a seller's listings, and it was true of
+       * sessions that recorded nothing.
+       *
+       * An empty chain is not a failure either — a show where nobody sent,
+       * approved or changed anything has nothing to write down. It is simply
+       * not evidence, so it is counted separately and said separately.
+       */
+      chainsIntact: reported.filter(
+        (r) => (r.report.safety?.auditChain?.ok ?? false) && (r.report.safety?.auditChain?.height ?? 0) > 0,
+      ).length,
+      /** Sessions whose chain was empty: nothing to verify, so nothing verified. */
+      chainsEmpty: reported.filter((r) => (r.report.safety?.auditChain?.height ?? 0) === 0).length,
     },
     actions: {
       proposed: sum(reported, (r) => (r.report.actions?.proposed ?? 0)),
