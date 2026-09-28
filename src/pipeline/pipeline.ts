@@ -529,7 +529,34 @@ export class Pipeline {
         // From the FIRST draft: a repair rewrites the words, not the manner it
         // was asked to write them in.
         ...(draft.styleRef ? { styleRef: draft.styleRef } : {}),
-        evidence: r.evidence,
+        /**
+         * A reply that cites nothing has no provenance to show.
+         *
+         * `r.evidence` is what RETRIEVAL found, not what the draft used. A
+         * deflection cites nothing and still carried the chips, so the live
+         * console showed
+         *
+         *   "The host will cover that shortly, bigmike."
+         *   [Catalog · the seller's own stock]   ✓ grounding   0.10
+         *
+         * — a provenance chip and a green tick on a reply containing not one
+         * word from the catalog. `guards.ts` already names this combination
+         * the worst available, "unverified and presented as verified", and the
+         * comment above `researchGrounding` records the same symptom being
+         * chased once before ("a Market · asking now chip beside a reply
+         * saying the host would cover it"). That fix was for one trigger; this
+         * is the general case.
+         *
+         * Narrow on purpose: zero claims means zero chips. A reply that cites
+         * two of three retrieved facts still shows all three, which is looser
+         * than ideal but at least relates to what it said. Only the empty case
+         * asserts provenance for content that has none.
+         *
+         * `r.evidence` itself is untouched — the cache key, `evidenceQuality`
+         * and the `abstained` signal all read it and all mean "what we had".
+         */
+        evidence: finalDraft.claims.length ? r.evidence : [],
+        groundless: r.evidence.length === 0,
         // The rules that were in force, beside the evidence rather than among
         // it: a constraint is not a citation, and `abstained` counts evidence.
         ...(roomRules.length ? { rules: roomRules.map((f) => toEvidence(f, 0)) } : {}),
@@ -614,6 +641,15 @@ export class Pipeline {
     base: ReplyProposal,
     r: {
       answer: string; claims: ReplyProposal["claims"]; evidence: Evidence[];
+      /**
+       * Retrieval came back with nothing — which is what the autonomy ladder
+       * means by "abstained", and is NOT the same question as whether the card
+       * has a chip to show. It used to read `evidence.length === 0`, so the
+       * moment `evidence` became the cited set rather than the retrieved one,
+       * every deflection started reading as an abstention and the ladder sent
+       * it to review. One field, two meanings; this is the other one.
+       */
+      groundless: boolean;
       guards: ReplyProposal["guards"]; verdict: ReplyProposal["verdict"];
       confidence: number; repaired: boolean; spans: ReplyProposal["spans"];
       styleRef?: StyleRef;
@@ -626,7 +662,7 @@ export class Pipeline {
     const delivery = this.deliveryFor(show.source);
     const disposition = decideReply({
       level: show.autonomyLevel, intent: msg.intent, verdict: r.verdict,
-      confidence: r.confidence, abstained: r.evidence.length === 0,
+      confidence: r.confidence, abstained: r.groundless,
       delivery,
     });
 
