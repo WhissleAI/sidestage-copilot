@@ -176,6 +176,15 @@ similarity threshold, because measured over the labelled set ungrounded question
 2.6–5.7 and grounded ones 2.0–10.7. Those distributions overlap almost completely. A confidence
 signal derived from retrieval score would have been noise presented as certainty.
 
+The backstop fires only when all three of its conditions hold: no inventory term was extracted,
+structured lookup returned nothing, and the top BM25 score is below **4.0**
+(`ABSTAIN_BM25_BELOW`). The threshold is a floor on the *third* condition, not the decision —
+that is the whole difference from the similarity threshold rejected above. When it fires, the
+four numbers behind it are logged (`retrieval.abstained`: the inventory term, the structured
+count, the BM25 top score, and the size of the index searched), because an abstention that
+records only that it happened is not diagnosable — recovering one cost a database copy, a local
+`Retriever` and six wrong hypotheses.
+
 **Product research on the reply path.** For `comparison` and market-price questions,
 `researchEvidence()` in the pipeline calls `ResearchService` during retrieval and adds the comps
 as evidence, deduped against what retrieval already found. Comps come from
