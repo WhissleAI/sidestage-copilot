@@ -267,6 +267,57 @@ describe("drafting a follow-up", () => {
     assert.equal(stored.id, followUpId(r.showId, "grounded"));
   });
 
+  test("a draft that defers to the show is not stored — the show is over", async () => {
+    // Found in production: four of the first four follow-ups deferred to a
+    // stream that had already ended, under a heading reading "Written for you
+    // to send". No guard catches it and none should — the chain checks what a
+    // reply asserts about listings and policy, and this asserts nothing about
+    // either. It is a claim about the SESSION, which is the one thing the
+    // drafter knows for certain is finished.
+    const acct = `${account}_deferred`;
+    const out = await buildFollowUps(r.d, {
+      showId: r.showId,
+      accountId: acct,
+      record: record([
+        prop({ author: "told_to_wait", question: "is it authentic", intent: "authenticity" }),
+        prop({ author: "answered", question: "how much for the chicagos", intent: "price_question" }),
+      ]),
+      drafter: stubbedModel(r, {
+        "is it authentic": "I'm not sure about that detail, the host will cover it shortly.",
+        "how much for the chicagos": "The Chicago Reimagined in a size 10 is $412.00 right now.",
+      }),
+    });
+
+    assert.deepEqual(out.followups.map((f) => f.buyer), ["answered"], "only the real answer is kept");
+    assert.equal(out.deferred.length, 1, JSON.stringify(out.deferred));
+    assert.equal(out.deferred[0]!.buyer, "told_to_wait");
+    assert.equal(out.guardedOut.length, 0, "not reported as a guard catch — there is no guardrail bug to hunt");
+
+    await pgPool().query("DELETE FROM followups WHERE account_id = $1", [acct]).catch(() => {});
+  });
+
+  test("hedging is not deferring — an honest 'I am not certain' still sends", async () => {
+    // The rule is narrow on purpose. A follow-up may say it does not know;
+    // what it may not do is promise a finished show will handle it.
+    const acct = `${account}_hedge`;
+    const out = await buildFollowUps(r.d, {
+      showId: r.showId,
+      accountId: acct,
+      record: record([
+        prop({ author: "hedged", question: "how much for the chicagos", intent: "price_question" }),
+      ]),
+      drafter: stubbedModel(r, {
+        "how much for the chicagos":
+          "The Chicago Reimagined in a size 10 is $412.00 right now, though I am not certain it is still unsold.",
+      }),
+    });
+
+    assert.equal(out.deferred.length, 0, JSON.stringify(out.deferred));
+    assert.deepEqual(out.followups.map((f) => f.buyer), ["hedged"]);
+
+    await pgPool().query("DELETE FROM followups WHERE account_id = $1", [acct]).catch(() => {});
+  });
+
   test("two handles that differ only in punctuation are two follow-ups, not a 500", async () => {
     // `rae_kicks` and `rae.kicks` are two people. The id slugified both to
     // `rae-kicks`, so the second insert raised a primary-key violation that the
