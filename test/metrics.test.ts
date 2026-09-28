@@ -334,3 +334,40 @@ describe("what the surfaces can actually deliver", () => {
     assert.ok(marked / 45 < 0.1 && grounded / 45 > 0.7);
   });
 });
+
+/**
+ * A latency meter over no replies said "0ms" in green.
+ *
+ * `pct` of an empty window is 0, and the console could not tell that from a
+ * reply that took no time — so a session that had answered nothing reported
+ * perfect latency. Seen on a live eBay Live show 46 seconds in, queue empty,
+ * "p95 0ms" in the bar.
+ */
+describe("the latency meter knows when it has measured nothing", () => {
+  test("an untouched tracker reports zero samples", async () => {
+    const { LatencyTracker } = await import("../src/latency/spans.js");
+    const t = new LatencyTracker(2000);
+    const p = t.percentiles();
+    assert.equal(p.samples, 0);
+    assert.equal(p.p95, 0, "the percentile is still a number; samples is what qualifies it");
+  });
+
+  test("one reply is one sample", async () => {
+    const { LatencyTracker } = await import("../src/latency/spans.js");
+    const t = new LatencyTracker(2000);
+    t.record(850, false);
+    const p = t.percentiles();
+    assert.equal(p.samples, 1);
+    assert.ok(p.p95 > 0);
+  });
+
+  test("samples count the window, not the lifetime", async () => {
+    // The window is what the percentiles are over, so it is what qualifies
+    // them; `count` is the lifetime total and answers a different question.
+    const { LatencyTracker } = await import("../src/latency/spans.js");
+    const t = new LatencyTracker(2000, 3);
+    for (let i = 0; i < 10; i++) t.record(100 + i, false);
+    assert.equal(t.percentiles().samples, 3);
+    assert.equal(t.count, 10);
+  });
+});
