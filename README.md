@@ -527,7 +527,15 @@ Stated plainly, because these are the things a reviewer would otherwise find.
     agate sphere?"), which are almost certainly availability and are deliberately left alone:
     a rule broad enough to catch them also catches "Its new?", a CONDITION question, on an
     intent that can auto-send at L3.
-23. **Four stored-report fields still report zero where they mean "not measured".**
+23. **Capacity is shared across accounts; only data is isolated.** Tenancy is enforced on every
+    read and write — `show_id` scoping, an ownership preHandler, sealed per-account eBay tokens,
+    six contract tests. Capacity is not: `MAX_WATCHED_SHOWS` (6) counts watched shows across the
+    whole process, and the browser budget behind it does too. One seller attaching six shows
+    makes the seventh attach fail for everyone, with an error naming an environment variable.
+    The limit exists for a real reason — six Whatnot sessions is six Chromes in one container,
+    and the app dies rather than degrades — but nothing gives an account a share of it. Fine at
+    one seller, wrong at the 3–5 the pilot plans for.
+24. **Four stored-report fields still report zero where they mean "not measured".**
     `cacheHitRate`, the two per-session latency medians and `lostUtterances` are non-null on
     every `ShowReport` already written, so widening them is a migration rather than an edit.
     They are listed with that reason in `test/not-measured-is-not-zero.test.ts`, which fails on

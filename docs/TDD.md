@@ -485,6 +485,19 @@ deliberate:** `/api/shows/prepared` is workspace-wide, because a preparation's a
 workspace's Whissle key and its catalog sits in the shared directory. Six contract tests in
 `test/tenancy.test.ts` hold the boundary.
 
+**Tenancy here is about DATA, not capacity.** Every limit that protects the box is
+process-wide and shared: `MAX_WATCHED_SHOWS` (6) counts `runtimes.size + attaching.size` across
+every account, and the browser budget behind it is the same. Those numbers exist because six
+Whatnot sessions is six real Chromes in one container and the app dies rather than degrades —
+an OOM argument, not a fairness one. Nothing gives an account a share of them, so one seller
+attaching six shows leaves the seventh attach failing for everybody, with a message about
+`MAX_WATCHED_SHOWS` that reads like a bug to the seller who did nothing.
+
+That is fine at one seller and wrong at five. The fix is a per-account share rather than a
+bigger global number, and choosing that share is a product decision — the pilot is 3–5 sellers
+(PRD §6), so the cap and the share are the same order of magnitude and the trade-off is real.
+It is listed under Known limitations rather than silently left to be discovered.
+
 **Secrets at rest.** eBay access and refresh tokens are sealed with AES-256-GCM under
 `EBAY_TOKEN_KEY` (`src/ingest/ebay/seal.ts`); a row written before the key existed is still
 readable; a process with no key stores plaintext and warns once. **Divergence:** the scopes
