@@ -79,11 +79,25 @@ export class LatencyTracker {
     if (totalMs > this.budgetMs) this._breaches++;
   }
 
-  percentiles(): { p50: number; p95: number; p99: number; budgetMs: number; breaches: number } {
+  percentiles(): {
+    p50: number; p95: number; p99: number; budgetMs: number; breaches: number; samples: number;
+  } {
     const s = [...this.samples].sort((a, b) => a - b);
     return {
       p50: pct(s, 50), p95: pct(s, 95), p99: pct(s, 99),
       budgetMs: this.budgetMs, breaches: this._breaches,
+      /**
+       * How many replies these percentiles are over.
+       *
+       * `pct` of an empty window is 0, and a console cannot tell that from a
+       * reply that took no time — so a session that had answered NOTHING
+       * showed "p95 0ms" in green, which reads as answering instantly. Seen on
+       * a live eBay Live show 46 seconds in, with the queue empty.
+       *
+       * The percentiles stay numbers; this is what says whether to believe
+       * them.
+       */
+      samples: s.length,
     };
   }
 
