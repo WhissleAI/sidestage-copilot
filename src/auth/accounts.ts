@@ -173,6 +173,33 @@ export class Accounts {
   }
 
   /**
+   * A session that can only LOOK at one show's recorded media, for an hour.
+   *
+   * Same argument as `openBridgeSession`, for the other place a token has to
+   * ride in a URL: `<img>` and `<audio>` cannot send a bearer header, so the
+   * post-show report put the console's thirty-day account session into a `src`
+   * attribute — once per frame, in the rendered DOM, and in every access-log
+   * line the report generated. The path allowlist in the API layer governs
+   * where a query token may be READ, not what the token can do: harvested from
+   * the DOM and replayed as `Authorization: Bearer`, an `sst_` is the whole
+   * account for thirty days.
+   *
+   * This is what belongs in a `src` instead. Distinguished from the bridge's by
+   * prefix rather than a column, because the two differ only in what they may
+   * reach and the scope predicate is the one place that needs to know: `sbt_`
+   * FEEDS a show, `smt_` only reads back what was recorded.
+   */
+  async openMediaSession(account: Account, showId: string, minutes = 60): Promise<Session> {
+    const token = `smt_${randomBytes(24).toString("hex")}`;
+    const expiresAt = new Date(Date.now() + minutes * 60_000).toISOString();
+    await this.d.query(
+      "INSERT INTO auth_sessions (token, account_id, expires_at, scope_show_id) VALUES ($1, $2, $3, $4)",
+      [token, account.id, expiresAt, showId],
+    );
+    return { token, account, expiresAt, scopeShowId: showId };
+  }
+
+  /**
    * Resolve a bearer token to an account, or null.
    *
    * Expiry is enforced in the QUERY rather than in JavaScript: a check the
@@ -258,6 +285,41 @@ export class Accounts {
     const r = await this.d.query("DELETE FROM auth_sessions WHERE expires_at <= now()");
     return r.rowCount ?? 0;
   }
+}
+
+/**
+ * Run the prune on a timer.
+ *
+ * `pruneExpiredSessions` described itself as "safe to run on a timer" and
+ * nothing ever called it, which was survivable while sessions were minted only
+ * at sign-in and when the bridge opened. `openMediaSession` writes one every
+ * time a report page loads, all of them dead within the hour, so the table now
+ * grows with ordinary use rather than with sign-ins.
+ *
+ * Hourly, matching the shortest thing it collects, and `unref`'d so it never
+ * holds the process open — same shape as `startAgentGc`.
+ */
+export function startSessionPrune(
+  accounts: Accounts,
+  opts: { everyMs?: number; firstDelayMs?: number } = {},
+): () => void {
+  let stopped = false;
+  const tick = () => {
+    if (stopped) return;
+    void accounts
+      .pruneExpiredSessions()
+      .then((n) => n > 0 && console.log(`  session-prune: removed ${n} expired`))
+      .catch((e: Error) => console.warn(`  session-prune: ${e.message}`));
+  };
+  const first = setTimeout(tick, opts.firstDelayMs ?? 90_000);
+  const timer = setInterval(tick, opts.everyMs ?? 60 * 60_000);
+  first.unref?.();
+  timer.unref?.();
+  return () => {
+    stopped = true;
+    clearTimeout(first);
+    clearInterval(timer);
+  };
 }
 
 interface AccountRow { id: string; kind: string; handle: string; display_name: string; email?: string | null }

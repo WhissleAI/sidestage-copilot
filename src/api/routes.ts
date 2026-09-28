@@ -268,16 +268,37 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     /^\/api\/shows\/[^/]+\/media\//,
   ];
 
-  /** A show-scoped session (the bridge's) may only reach that show's ingest.
-   *  Not the console, not another show, not a second bridge token. */
-  const inBridgeScope = (path: string, showId: string, query: { showId?: string }): boolean => {
-    if (path === "/audio-bridge") return true;
-    if (path === "/api/stream") return query.showId === showId;
+  /**
+   * A show-scoped session may only reach that one show, and only the part of
+   * it its kind exists for. Not the console, not another show, not a token of
+   * the other kind's routes.
+   *
+   * Two kinds, told apart by prefix rather than a column, because this is the
+   * only place the difference matters:
+   *
+   *   `sbt_`  the audio bridge  — FEEDS the show: audio and visual ingest.
+   *   `smt_`  the report's media — only READS back what was recorded.
+   *
+   * A media token deliberately gets neither `/api/stream` nor `/audio-bridge`:
+   * it exists so an `<img src>` need not carry the account session, and every
+   * reach beyond that is one the report page never needs.
+   */
+  const inShowScope = (
+    path: string,
+    showId: string,
+    query: { showId?: string },
+    token: string | null,
+  ): boolean => {
     const prefix = `/api/shows/${encodeURIComponent(showId)}/`;
     const plain = `/api/shows/${showId}/`;
     const rest = path.startsWith(prefix) ? path.slice(prefix.length)
       : path.startsWith(plain) ? path.slice(plain.length)
         : null;
+
+    if (token?.startsWith("smt_")) return rest != null && rest.startsWith("media/");
+
+    if (path === "/audio-bridge") return true;
+    if (path === "/api/stream") return query.showId === showId;
     return rest != null && (rest.startsWith("audio/") || rest.startsWith("visual/"));
   };
 
@@ -298,9 +319,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     if (!actor && !OPEN.some((re) => re.test(path))) {
       return reply.code(401).send({ error: "sign in to use SideStage", actor: null });
     }
-    if (session?.scopeShowId && !inBridgeScope(path, session.scopeShowId, q)) {
+    if (session?.scopeShowId && !inShowScope(path, session.scopeShowId, q, token)) {
       return reply.code(403).send({
-        error: `this token is the audio bridge's — it can feed show ${session.scopeShowId} and do nothing else`,
+        error: token?.startsWith("smt_")
+          ? `this token reads show ${session.scopeShowId}'s recorded media and does nothing else`
+          : `this token is the audio bridge's — it can feed show ${session.scopeShowId} and do nothing else`,
         code: "out-of-scope",
       });
     }
@@ -3355,7 +3378,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * — address bar, history, and whatever they paste when they send the link to
    * their other machine. That used to be the console session: thirty days,
    * whole account. This one is an hour long and can feed one show's audio and
-   * video and do nothing else (`inBridgeScope`). The show is ownership-checked
+   * video and do nothing else (`inShowScope`). The show is ownership-checked
    * by the preHandler before we get here.
    */
   app.post<{ Params: { showId: string } }>("/api/shows/:showId/bridge-token", async (req, reply) => {
@@ -3370,6 +3393,27 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
        *  token; this is the URL it should build instead. */
       url: `/audio-bridge?showId=${encodeURIComponent(req.params.showId)}&token=${encodeURIComponent(s.token)}`,
     };
+  });
+
+  /**
+   * A token for the report's `<img>` and `<audio>` tags, instead of the console's.
+   *
+   * Same reason as the bridge's, different surface. `frameUrl` and `audioUrl`
+   * are read by tags that cannot send a bearer header, so the token rides in
+   * the query string — which means it is written into the rendered DOM once
+   * per frame and into every access-log line the report generates. That was
+   * the console session: thirty days, whole account, and replayable as an
+   * `Authorization` header against every route, because the query-token path
+   * allowlist governs where a token may be READ, not what it can do.
+   *
+   * This one lasts an hour and can read one show's recorded media and nothing
+   * else. Ownership is the `:showId` preHandler, same as every show route.
+   */
+  app.post<{ Params: { showId: string } }>("/api/shows/:showId/media-token", async (req, reply) => {
+    const actor = mustWrite(req as object, reply, "read this show's media");
+    if (!actor) return reply;
+    const s = await accounts.openMediaSession(actor, req.params.showId, 60);
+    return { token: s.token, expiresAt: s.expiresAt, showId: req.params.showId };
   });
 
   /** Mint a LISTEN-ONLY Whissle session: STT + emotion, no LLM, no TTS. The
