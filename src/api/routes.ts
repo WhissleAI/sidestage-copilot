@@ -1463,6 +1463,28 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const answered = shows.reduce((a, s) => a + s.answered, 0);
     const minutes = shows.reduce((a, s) => a + s.durationMin, 0);
 
+    // The per-hour rate is asked in order to price a SHOW: "if I run one for an
+    // hour, what does this cost me". `durationMin` is attach-to-detach, which
+    // equals show length for a live event that ends and does not for a room
+    // that persists — the Rooms page says it in as many words, "a room here is
+    // a list, not a running watch".
+    //
+    // Measured in production before this was written: a subreddit and a Twitch
+    // channel, attached overnight, held 1297 minutes each — 2594 of 2636
+    // minutes, 98.4% of all counted time — for ONE gateway call apiece and
+    // nothing answered, 0.8% of the spend. Blended in, they reported $0.0474
+    // an hour. Over the sessions that did the work it is $2.95, which is 62×
+    // and the number anyone pricing this product would have used.
+    //
+    // So the rate is taken over the sessions that answered something, on both
+    // sides of the division. A session that answered nothing contributes no
+    // work per hour, and lending it its hours makes the rate describe idling.
+    // `minutes` stays exactly what it is — time attached — and is reported
+    // beside this under its own name.
+    const working = shows.filter((s) => s.answered > 0);
+    const workingMinutes = working.reduce((a, s) => a + s.durationMin, 0);
+    const workingUsd = working.reduce((a, s) => a + (s.estimatedUsd ?? 0), 0);
+
     return {
       days,
       scope: { accountId: actor.id, handle: actor.handle },
@@ -1476,9 +1498,16 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         spentUsd: Math.round(estimatedUsd * 10000) / 10000,
         metered: shows.filter((s) => s.basis === "metered").length,
         answered,
+        /** Time ATTACHED, across every session. Not the rate's denominator. */
         minutes,
+        /** Sessions that answered at least one buyer, and their time and spend.
+         *  The per-hour rate is these two divided, so the page can show what it
+         *  is a rate OVER rather than implying it covers everything. */
+        workingShows: working.length,
+        workingMinutes,
+        workingUsd: Math.round(workingUsd * 10000) / 10000,
         perAnsweredUsd: answered ? Math.round((estimatedUsd / answered) * 100000) / 100000 : null,
-        perHourUsd: minutes ? Math.round((estimatedUsd / (minutes / 60)) * 10000) / 10000 : null,
+        perHourUsd: workingMinutes ? Math.round((workingUsd / (workingMinutes / 60)) * 10000) / 10000 : null,
         showsWithoutWallet: shows.filter((s) => s.basis === "none").length,
         usdPerCall: Math.round(usdPerCall * 100000) / 100000,
       },
