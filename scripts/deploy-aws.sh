@@ -94,6 +94,15 @@ cmd_deploy() {
   # The app runs as the image's pwuser (uid 1001); rsync leaves files owned by
   # ubuntu (1000). Hand the writable directories over before starting.
   $SSH "cd /opt/sidestage && sudo mkdir -p data/shows fixtures/catalogs && sudo chown -R 1001:1001 data fixtures/catalogs && printf 'SITE_ADDRESS=%s\nEBAY_DISCOVERY_PROXY=%s\n' '$SITE' '${EBAY_DISCOVERY_PROXY:-}' > .deploy.env && sudo docker compose --env-file .deploy.env up -d --build --remove-orphans && sudo docker compose ps"
+  # Every deploy builds on the box, and BuildKit keeps every layer it has ever
+  # produced. Nothing pruned it, so the cache — not the database, not the
+  # recorded media — became the largest thing on the disk: 9.7 GB across 245
+  # entries, 70% of a 23 GB volume, climbing with each deploy. A t3.small that
+  # fills up does not fail at the build, it fails at Postgres.
+  #
+  # 2 GB is roughly one full build's worth, so the next deploy still reuses
+  # layers and stays fast; everything older goes.
+  $SSH "sudo docker builder prune -f --keep-storage 2GB >/dev/null 2>&1 || true; df -h / | tail -1"
   echo
   echo "backend:  https://$SITE/health"
   echo "callback: https://$SITE/api/ebay/callback   ← eBay 'auth accepted URL'"
