@@ -62,6 +62,29 @@ export interface ListingPatch {
   views?: number;
 }
 
+/**
+ * How many times this show's listings have been written.
+ *
+ * Keyed by show rather than held on the instance, because `bind()` makes a
+ * second Repo for every transaction and a per-instance counter would lose the
+ * writes that matter most — the ones inside a two-phase commit.
+ *
+ * It exists so retrieval can tell that its index is behind the database. A
+ * live show abstained on all thirteen of its questions against a catalog of 53
+ * good lots, and the most likely explanation was an index built before those
+ * lots landed. Every write path is supposed to rebuild; one of them forgetting
+ * is invisible until a buyer asks something and the copilot says nothing.
+ */
+const listingEpoch = new Map<string, number>();
+
+/** The current write count for a show. `Retriever` records this at rebuild. */
+export const listingEpochOf = (showId: string): number => listingEpoch.get(showId) ?? 0;
+
+/** Any statement that changes the listing table. Matched on the SQL rather than
+ *  called from each write method on purpose: a method added later cannot
+ *  forget to call something it does not know about. */
+const MUTATES_LISTINGS = /\b(?:insert\s+into|update|delete\s+from)\s+listings\b/i;
+
 export class Repo {
   constructor(private d: Queryable, readonly showId: string) {}
 
@@ -78,6 +101,13 @@ export class Repo {
   }
 
   private q<T>(sql: string, args: unknown[] = []): Promise<{ rows: T[]; rowCount: number | null }> {
+    // Counted here, at the one choke point every listing write passes through.
+    // A statement in a transaction that later rolls back still counts, which
+    // costs one unnecessary rebuild and never a stale answer — the right way
+    // round for a cache the copilot grounds on.
+    if (MUTATES_LISTINGS.test(sql)) {
+      listingEpoch.set(this.showId, (listingEpoch.get(this.showId) ?? 0) + 1);
+    }
     return this.d.query(sql, args) as unknown as Promise<{ rows: T[]; rowCount: number | null }>;
   }
 

@@ -404,6 +404,12 @@ export class Pipeline {
     this.d.events.onProposal(proposal);
 
     // 1. retrieve (local, no network)
+    // A listing was written since the index was built, and whichever path did
+    // it did not rebuild. Rather than ground this reply on a catalog that is
+    // provably behind the database, catch up first — the cost is one rebuild on
+    // the rare draft that follows a missed refresh, against a copilot that
+    // abstains on questions its own lineup answers.
+    if (this.d.retriever.stale) await this.d.retriever.rebuild();
     const r = this.d.retriever.retrieve(msg.text, { pinnedId: show.pinnedListingId });
     // The copilot declining to answer a buyer, with the reason it declined.
     //

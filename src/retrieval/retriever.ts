@@ -15,6 +15,7 @@
 
 import type { Evidence } from "../domain/types.js";
 import type { Repo, ListingWithDescription } from "../domain/repo.js";
+import { listingEpochOf } from "../domain/repo.js";
 import { buildFacts, type Fact, type FactField } from "./facts.js";
 import { Bm25Index } from "./bm25.js";
 import { cosine, ngramVector, terms } from "./text.js";
@@ -92,7 +93,22 @@ export class Retriever {
    *  briefly disagree about what was in the show. */
   private listings: ListingWithDescription[] = [];
 
+  /** The write count the current index was built at. See `listingEpochOf`. */
+  private builtAtEpoch = -1;
+
   constructor(private repo: Repo) {}
+
+  /**
+   * Has a listing been written since this index was built?
+   *
+   * Every write path is supposed to rebuild, and one of them forgetting is
+   * invisible: retrieval simply finds nothing and the copilot abstains on a
+   * question its own catalog answers. This is the backstop that makes that
+   * class of mistake self-correcting rather than silent.
+   */
+  get stale(): boolean {
+    return listingEpochOf(this.repo.showId) !== this.builtAtEpoch;
+  }
 
   /** Rebuild the index. Called on boot and whenever a listing write lands, so a
    *  markdown is reflected in retrieved facts on the very next question. */
@@ -102,6 +118,9 @@ export class Retriever {
     this.listings = listings;
     this.byId = new Map(this.facts.map((f) => [f.factId, f]));
     this.bm25 = new Bm25Index(this.facts);
+    // Read AFTER the reads above, so a write that lands mid-rebuild leaves the
+    // index stale rather than marking it fresh for data it did not see.
+    this.builtAtEpoch = listingEpochOf(this.repo.showId);
   }
 
   fact(factId: string): Fact | null {
