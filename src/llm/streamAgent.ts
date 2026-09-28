@@ -51,6 +51,54 @@ export function scoringPrompt(s: StreamAgentSpec): string {
   ].join(" ");
 }
 
+/**
+ * A failed agent-management call, with the status kept rather than baked into a
+ * string. `explainAgentFailure` needs the number; an operator must never see it.
+ */
+export class AgentApiError extends Error {
+  constructor(
+    method: string,
+    path: string,
+    public readonly status: number,
+    public readonly detail: string,
+  ) {
+    super(`${method} ${path} \u2192 ${status} ${detail}`);
+    this.name = "AgentApiError";
+  }
+}
+
+/**
+ * The same failure, said to the seller instead of to the log.
+ *
+ * `prepareEvent` puts this string straight under the card in the console, so
+ * the raw `POST /api/agents \u2192 429 {"detail":\u2026}` it used to push there was
+ * transport noise in a product surface: it named no cause the seller
+ * recognises and no move they could make. Every branch below answers both.
+ *
+ * The consequence is stated once, by the caller, because it is the same for
+ * all of them: the lineup is prepared and the copilot cannot draft against it.
+ *
+ * Every branch names something a SELLER can do or decide. This string is
+ * rendered verbatim on a card in the console, so no shell command, no env var
+ * and no backticks: on a hosted install the person reading it has no terminal,
+ * and on a self-hosted one the raw error is already in the log next to it.
+ */
+export function explainAgentFailure(e: unknown): string {
+  const status = e instanceof AgentApiError ? e.status : 0;
+  const detail = e instanceof AgentApiError ? e.detail : String((e as Error)?.message ?? e);
+
+  // The cap is counted by the workspace and shared with every other project on
+  // it, so "delete one of yours" is not always the fix \u2014 name both moves.
+  if (status === 429 || /limit of \d+ agents/i.test(detail))
+    return "this workspace is at its agent limit. Delete a prepared session you no longer need \u2014 that frees its agent \u2014 and prepare this one again";
+  if (status === 402) return "this workspace is out of Whissle credit";
+  if (status === 401 || status === 403)
+    return "Whissle rejected this server's credentials. Nothing is wrong with this show \u2014 it is a setup problem, and the log says which";
+  if (status >= 500 || status === 0)
+    return "Whissle was unreachable. Nothing is wrong with this show \u2014 prepare it again to retry";
+  return `Whissle refused to create the agent (${status})`;
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const r = await gatewayFetch(`${config.whissle.base}${path}`, {
     method,
@@ -60,7 +108,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status} ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) throw new AgentApiError(method, path, r.status, (await r.text()).slice(0, 200));
   const text = await r.text();
   return (text ? JSON.parse(text) : {}) as T;
 }

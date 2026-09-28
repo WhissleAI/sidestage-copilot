@@ -27,10 +27,11 @@ import type { Pool } from "../db/pg.js";
 import { config } from "../config.js";
 import { ebay } from "../ingest/ebay/client.js";
 import { resolveSellerUsername, sellerListings } from "../ingest/ebaylive/sellerListings.js";
-import { createStreamAgent, deleteStreamAgent } from "../llm/streamAgent.js";
+import { createStreamAgent, deleteStreamAgent, explainAgentFailure } from "../llm/streamAgent.js";
 import { addCatalogFile, removeCatalogFile, type Catalog } from "./catalogs.js";
 import type { CatalogItem } from "./catalogImport.js";
 import { gatewayFetch } from "../net/http.js";
+import { logWarn } from "../obs/log.js";
 
 export interface PreparedShow {
   eventId: string;
@@ -343,7 +344,16 @@ export class Preparer {
         });
         await uploadCatalogKb(agentId, catalog);
       } catch (e) {
-        warnings.push(`agent not created: ${(e as Error).message}`);
+        // The seller reads this under the card. The raw gateway string named no
+        // cause they recognise and no move they could make; `explainAgentFailure`
+        // does both. The transport detail still goes to the log, where it helps.
+        logWarn("prepare.agent_not_created", {
+          eventId: input.eventId,
+          err: (e as Error).message,
+        });
+        warnings.push(
+          `no agent was created \u2014 ${explainAgentFailure(e)}. The lineup is ready; the copilot cannot draft against it yet.`,
+        );
       }
     }
 
