@@ -51,6 +51,49 @@ export function scoringPrompt(s: StreamAgentSpec): string {
   ].join(" ");
 }
 
+/**
+ * A failed agent-management call, with the status kept rather than baked into a
+ * string. `explainAgentFailure` needs the number; an operator must never see it.
+ */
+export class AgentApiError extends Error {
+  constructor(
+    method: string,
+    path: string,
+    public readonly status: number,
+    public readonly detail: string,
+  ) {
+    super(`${method} ${path} \u2192 ${status} ${detail}`);
+    this.name = "AgentApiError";
+  }
+}
+
+/**
+ * The same failure, said to the seller instead of to the log.
+ *
+ * `prepareEvent` puts this string straight under the card in the console, so
+ * the raw `POST /api/agents \u2192 429 {"detail":\u2026}` it used to push there was
+ * transport noise in a product surface: it named no cause the seller
+ * recognises and no move they could make. Every branch below answers both.
+ *
+ * The consequence is stated once, by the caller, because it is the same for
+ * all of them: the lineup is prepared and the copilot cannot draft against it.
+ */
+export function explainAgentFailure(e: unknown): string {
+  const status = e instanceof AgentApiError ? e.status : 0;
+  const detail = e instanceof AgentApiError ? e.detail : String((e as Error)?.message ?? e);
+
+  // The cap is counted by the workspace and shared with every other project on
+  // it, so "delete one of yours" is not always the fix \u2014 name both moves.
+  if (status === 429 || /limit of \d+ agents/i.test(detail))
+    return "the Whissle workspace is at its agent limit. Retire finished ones with `npm run agents:gc`, or delete some in the Whissle console, then prepare again";
+  if (status === 402) return "the Whissle workspace is out of credit";
+  if (status === 401 || status === 403)
+    return "Whissle rejected the API key \u2014 check `WHISSLE_API_KEY`";
+  if (status >= 500 || status === 0)
+    return "Whissle was unreachable. Nothing is wrong with this show \u2014 prepare again to retry";
+  return `Whissle refused to create the agent (${status})`;
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const r = await gatewayFetch(`${config.whissle.base}${path}`, {
     method,
@@ -60,7 +103,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status} ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) throw new AgentApiError(method, path, r.status, (await r.text()).slice(0, 200));
   const text = await r.text();
   return (text ? JSON.parse(text) : {}) as T;
 }
