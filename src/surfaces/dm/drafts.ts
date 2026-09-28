@@ -225,7 +225,32 @@ export interface BuildResult {
   guardedOut: { buyer: string; question: string; guard: string; reason: string }[];
   /** Drafted, and the catalog had nothing to say. Same fate, different cause. */
   abstained: { buyer: string; question: string }[];
+  /** Drafted a promise the show can no longer keep. See `DEFERS_TO_THE_SHOW`. */
+  deferred: { buyer: string; question: string }[];
 }
+
+/**
+ * A reply that hands the question back to the live show.
+ *
+ * Harmless during a show and false after one. These are built for a show that
+ * has ENDED, and they go out as a DM: "the host will cover that shortly" is a
+ * promise about a stream nobody is watching any more, sent to a buyer who
+ * cannot go back and hear it. Four of the first four follow-ups in production
+ * were this — "We'll have the host address that shortly", "I'm not sure about
+ * that detail, the host will cover it shortly" — under a heading that reads
+ * "Written for you to send".
+ *
+ * No guard catches it, and correctly so: the chain checks what a reply asserts
+ * about listings and policy, and this asserts nothing about either. It is a
+ * claim about the SESSION, and the session is the one thing the drafter knows
+ * for certain is over.
+ *
+ * Deliberately narrow. It matches deferral to the show or the host, not
+ * hedging in general: "I'm not certain" is an honest thing to say in a
+ * follow-up and stays.
+ */
+const DEFERS_TO_THE_SHOW =
+  /\b(?:the\s+)?host\s+(?:will|'ll|is going to|can)\s+(?:cover|address|answer|get to|explain|confirm|go over)\b|\bwe'?ll\s+have\s+(?:the\s+)?host\b|\b(?:coming|covered)\s+up\s+(?:shortly|next)\b|\bstay\s+tuned\b|\bkeep\s+watching\b|\blater\s+in\s+the\s+(?:show|stream)\b/i;
 
 /**
  * How many follow-ups one call will draft.
@@ -261,6 +286,7 @@ export async function buildFollowUps(
     followups: [],
     guardedOut: [],
     abstained: [],
+    deferred: [],
   };
 
   // A buyer the seller already sent to or dismissed does not get re-drafted:
@@ -309,6 +335,14 @@ async function draftOne(
   // first as the second sends the operator looking for a guardrail bug.
   if (run.abstained || !run.answer.trim()) {
     result.abstained.push({ buyer: f.buyer, question: f.question });
+    return;
+  }
+  // A follow-up cannot promise the show will handle it: the show is over. This
+  // sits with the abstention above rather than with the guards, because it is
+  // the same kind of fact — there is nothing here worth a seller's send — and
+  // reporting it as a guard catch would send them hunting for a guardrail bug.
+  if (DEFERS_TO_THE_SHOW.test(run.answer)) {
+    result.deferred.push({ buyer: f.buyer, question: f.question });
     return;
   }
   if (run.verdict === "block") {
