@@ -2464,7 +2464,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
                 -- Finished, or finished enough to have left a report behind.
                 AND (s.status = 'ended' OR r.show_id IS NOT NULL)
               ORDER BY COALESCE(s.ended_at, r.generated_at, m.last_seen_at::timestamptz, s.started_at::timestamptz) DESC
-              LIMIT 6`,
+              -- Six was the whole history an operator could reach. There is no
+              -- separate list: /reports redirects here, so a session older than
+              -- the sixth was unreachable from anywhere in the product, report
+              -- and all. Reported by a seller looking for a session that
+              -- answered five questions, thirteen days back.
+              --
+              -- The band still shows six and expands; this is what it expands
+              -- INTO. Fifty is a year of weekly shows and one small query.
+              LIMIT 50`,
             [accountId],
           )
           .then((r) => r.rows)
