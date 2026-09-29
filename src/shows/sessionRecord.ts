@@ -40,8 +40,45 @@ const DECIDED = new Set(["sent", "dismissed"]);
 export class SessionRecord {
   constructor(private d: Pool, private showId: string) {}
 
+  /**
+   * Writes that have been started and not finished.
+   *
+   * `recordChat` and `recordProposal` are fire-and-forget on purpose — a buyer's
+   * question must never wait on a write — but the REPORT is built by counting
+   * these rows, so "not yet landed" and "did not happen" look identical to it.
+   * Measured 2026-09-28: a session's report said `questionsAsked: 0` for a show
+   * whose `chat_messages` held one admitted row, because the report was built
+   * before the insert returned.
+   *
+   * So the writes stay off the hot path and the READER waits for them instead.
+   */
+  private pending = new Set<Promise<unknown>>();
+
+  /** Track a fire-and-forget write so `drain` can wait for it. */
+  private track(work: Promise<unknown>): void {
+    const p = work.finally(() => this.pending.delete(p));
+    this.pending.add(p);
+  }
+
+  /**
+   * Wait for every write started so far.
+   *
+   * Called before a report is built. Rejections are already handled at each call
+   * site (both writes catch and log), so this only waits — it never turns a
+   * failed write into a failed session close.
+   */
+  async drain(): Promise<void> {
+    while (this.pending.size) await Promise.allSettled([...this.pending]);
+  }
+
+  /** How many writes are in flight. A test seam, and a number worth logging. */
+  get inFlight(): number {
+    return this.pending.size;
+  }
+
   recordChat(m: ChatMessage): void {
-    void this.d
+    this.track(
+      this.d
       .query(
         // `thread_id` and `parent_id` have been columns since migration 018 and
         // nothing wrote them: the runtime dropped both on the way in, so an
@@ -56,7 +93,8 @@ export class SessionRecord {
         [this.showId, m.id, m.author, m.text, m.at, m.intent, m.speechAct ?? null,
          m.admitted, m.dropReason ?? null, m.threadId ?? null, m.parentId ?? null],
       )
-      .catch((e) => console.warn(`  record: chat ${m.id} not written — ${(e as Error).message}`));
+        .catch((e) => console.warn(`  record: chat ${m.id} not written — ${(e as Error).message}`)),
+    );
   }
 
   /**
@@ -95,7 +133,8 @@ export class SessionRecord {
   recordProposal(p: ReplyProposal): void {
     // A draft in flight is not a record of anything; wait until it settles.
     if (p.status === "drafting") return;
-    void this.d
+    this.track(
+      this.d
       .query(
         // Twenty columns for twenty values. Migration 005 added decided_at and
         // edited to the VALUES but not to this list; Postgres refused every
@@ -139,7 +178,8 @@ export class SessionRecord {
       )
       // Fire-and-forget is right; silent is not. A record that quietly fails
       // is how a whole night of drafts went missing from every report.
-      .catch((e) => console.warn(`  record: proposal ${p.id} not written — ${(e as Error).message}`));
+        .catch((e) => console.warn(`  record: proposal ${p.id} not written — ${(e as Error).message}`)),
+    );
   }
 }
 
