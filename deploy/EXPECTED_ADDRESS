@@ -1,0 +1,21 @@
+# The public address the deployed frontend and eBay's registration both name.
+#
+# NOT an Elastic IP. `aws ec2 describe-addresses --public-ips 35.173.35.240`
+# answers InvalidAddress.NotFound, so this is the instance's ephemeral public
+# address: a stop/start, an instance replacement or an AWS maintenance event
+# gives the box a different one.
+#
+# Four things name it, and an IP change breaks all four at once:
+#
+#   the frontend      VITE_API_BASE, a Vercel environment variable, baked into
+#                     the bundle at build time — so a change needs a rebuild and
+#                     a redeploy, not just a setting
+#   the TLS name      Caddy holds a certificate for <ip-with-dashes>.sslip.io
+#   eBay OAuth        the redirect registered against the app's RuName
+#   eBay deletion     EBAY_DELETION_ENDPOINT, registered with eBay verbatim and
+#                     a compliance requirement they enforce
+#
+# `scripts/deploy-aws.sh` compares the live address against this file on every
+# deploy and refuses when they differ, because the deploy would otherwise stand
+# up a NEW hostname, report success, and leave the frontend calling the old one.
+35.173.35.240

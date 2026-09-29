@@ -78,6 +78,37 @@ cmd_deploy() {
   IID=$(instance_id); [ -n "$IID" ] || { echo "no instance — run: $0 up"; exit 1; }
   IP=$(public_ip "$IID")
   SITE=${SITE_ADDRESS:-$(echo "$IP" | tr . -).sslip.io}
+
+  # Has the box's address moved?
+  #
+  # This IP is NOT elastic (`describe-addresses` does not know it), so a
+  # stop/start or an instance replacement hands the box a new one — and the
+  # deploy would happily stand up a NEW hostname, get a NEW certificate, report
+  # success, and leave the deployed frontend calling the old address. Four things
+  # name this host and all four break together; they are listed in the file.
+  EXPECTED_FILE="$(dirname "$0")/../deploy/EXPECTED_ADDRESS"
+  EXPECTED=$(grep -v '^#' "$EXPECTED_FILE" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$IP" ]; then
+    cat >&2 <<EOF
+!! this instance's public address has changed
+   deploy/EXPECTED_ADDRESS says $EXPECTED
+   the instance is now        $IP
+
+   Deploying now would serve a working backend at https://$SITE that nothing
+   points at. Four things name the old address and all four need updating:
+
+     1. VITE_API_BASE on Vercel, then REDEPLOY the frontend — it is baked into
+        the bundle at build time, so changing the variable alone does nothing
+     2. the eBay OAuth redirect registered against EBAY_RUNAME
+     3. EBAY_DELETION_ENDPOINT, re-registered with eBay (they enforce it)
+     4. deploy/EXPECTED_ADDRESS in this repo, committed
+
+   Attaching an Elastic IP would make this the last time. Until then:
+     SIDESTAGE_ADDRESS_MOVED=1 $0 deploy
+EOF
+    [ "${SIDESTAGE_ADDRESS_MOVED:-}" = "1" ] || exit 1
+    echo "   proceeding because SIDESTAGE_ADDRESS_MOVED=1" >&2
+  fi
   SSH="ssh -i $PEM -o StrictHostKeyChecking=accept-new ubuntu@$IP"
   echo "deploying to $IP as https://$SITE"
   # wait for cloud-init to finish installing docker
