@@ -21,7 +21,8 @@
     "ebay:shows": "tsx src/ingest/ebaylive/discovery.ts",
     "demo:ebaylive": "tsx bench/ebayLive.demo.ts",
     "ebay:export": "node scripts/ebay-export-session.mjs",
-    "agents:gc": "tsx src/llm/reapAgents.ts"
+    "agents:gc": "tsx src/llm/reapAgents.ts",
+    "traffic": "tsx scripts/traffic.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
