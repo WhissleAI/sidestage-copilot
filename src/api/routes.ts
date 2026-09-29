@@ -950,6 +950,63 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * know about. Authenticated, because each of those is a fact about the
    * deployment rather than about the caller.
    */
+  /**
+   * A browser saying it broke.
+   *
+   * Until now nothing in the frontend's error path reached this process, or
+   * anywhere else. `reportLovableError` — the only reporter the console has, and
+   * the one BOTH error boundaries call — forwards to
+   * `window.__lovableEvents` and `window.__lovableReportRuntimeError`, two
+   * globals that the Lovable editor injects and production does not have.
+   * Verified against the deployed site: no `lovable` script in the HTML of `/` or
+   * `/console`. So every frontend error in production was discarded, including
+   * from the per-panel boundary added the same day to keep one panel's failure
+   * from blanking a seller's console mid-show. The console degraded correctly and
+   * told nobody.
+   *
+   * It lands in `session_events`, beside the backend's own failures, so one
+   * timeline holds both halves of a session — "the panel stopped drawing" next to
+   * whatever the server was doing at that second is the whole value of it.
+   *
+   * Deliberately narrow, because this is a write a browser can make:
+   *   · authenticated, like everything else that is not in OPEN
+   *   · kinds are ALLOW-LISTED, the same rule `/audio/event` follows, so a
+   *     compromised or curious client cannot invent a taxonomy in our own log
+   *   · every field is bounded, and `detail` is not passed through — only the
+   *     four fields named below, so a client cannot post arbitrary JSON into a
+   *     table whose contract is "counts and identifiers"
+   *   · `err` carries the exception's own message, which is the key and the
+   *     bound the process's `unhandledRejection` handler already uses
+   */
+  const CLIENT_ERROR_KINDS = new Set(["panel", "route", "unhandled", "rejection"]);
+  app.post<{
+    Body: { kind?: unknown; where?: unknown; route?: unknown; err?: unknown; build?: unknown };
+  }>("/api/client-error", async (req, reply) => {
+    const b = req.body ?? {};
+    const kind = typeof b.kind === "string" ? b.kind : "";
+    if (!CLIENT_ERROR_KINDS.has(kind)) {
+      return reply.code(400).send({
+        error: `kind must be one of ${[...CLIENT_ERROR_KINDS].join(", ")}`,
+      });
+    }
+    const str = (v: unknown, max: number): string | null =>
+      typeof v === "string" && v.trim() ? v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, max) : null;
+    await recordEvent({
+      kind: `client.${kind}`,
+      level: "error",
+      detail: {
+        // Which panel, or which route — the first question about a broken screen.
+        where: str(b.where, 60),
+        route: str(b.route, 120),
+        err: str(b.err, 300),
+        // Which bundle the browser was running. A seller on a stale tab is a
+        // different report from a seller on the current one.
+        build: str(b.build, 40),
+      },
+    });
+    return { ok: true };
+  });
+
   app.get("/api/diagnostics", async (req, reply) => {
     if (!actorOf(req as object)) return reply.code(401).send({ error: "sign in" });
     let database = false;
