@@ -147,7 +147,28 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
     `SELECT s.id, s.title, s.started_at, s.status, s.source, r.report
        FROM shows s LEFT JOIN show_reports r ON r.show_id = s.id
       WHERE COALESCE(r.generated_at, s.started_at::timestamptz) >= $1 AND s.status = 'ended'
-        AND (s.owner_account_id IS NULL OR $2::text IS NULL OR s.owner_account_id = $2)
+        -- An UNOWNED show is nobody's, and an aggregate is not a list.
+        --
+        -- Every other place this clause appears is a LIST of past shows, where
+        -- including rows written before ownership existed is the documented
+        -- concession (migration 024): they are probably this seller's own
+        -- history, and hiding them would lose it. That argument does not survive
+        -- being AGGREGATED, because the same ownerless rows are then folded into
+        -- EVERY account's figures at once.
+        --
+        -- Measured on production, 2026-09-28: five ended shows are ownerless.
+        -- One seller owns 14 and saw 18 shows-with-GMV; the other owns TWO and
+        -- saw SIX, reporting $435.74 of gross and 11 lots sold that it did not
+        -- earn. 18 + 6 > 20 total, because the ownerless rows were counted into
+        -- both. A seller's dashboard was attributing another seller's revenue to
+        -- them.
+        --
+        -- A null $2 still means unscoped — the box-wide view, used where no
+        -- account is asking. A seller who asks gets their own shows and nothing
+        -- else, which may under-count a genuine pre-ownership session. That is
+        -- the right way round: losing your own history from a chart is a smaller
+        -- wrong than being shown revenue you did not make.
+        AND ($2::text IS NULL OR s.owner_account_id = $2)
       ORDER BY s.started_at DESC`,
     [from.toISOString(), ownerId],
   );
@@ -175,7 +196,28 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
             count(*) FILTER (WHERE p.status IN ('sent','auto_sent'))::int AS sent
        FROM reply_proposals p JOIN shows s ON s.id = p.show_id
       WHERE s.started_at::timestamptz >= $1 AND s.status = 'ended'
-        AND (s.owner_account_id IS NULL OR $2::text IS NULL OR s.owner_account_id = $2)
+        -- An UNOWNED show is nobody's, and an aggregate is not a list.
+        --
+        -- Every other place this clause appears is a LIST of past shows, where
+        -- including rows written before ownership existed is the documented
+        -- concession (migration 024): they are probably this seller's own
+        -- history, and hiding them would lose it. That argument does not survive
+        -- being AGGREGATED, because the same ownerless rows are then folded into
+        -- EVERY account's figures at once.
+        --
+        -- Measured on production, 2026-09-28: five ended shows are ownerless.
+        -- One seller owns 14 and saw 18 shows-with-GMV; the other owns TWO and
+        -- saw SIX, reporting $435.74 of gross and 11 lots sold that it did not
+        -- earn. 18 + 6 > 20 total, because the ownerless rows were counted into
+        -- both. A seller's dashboard was attributing another seller's revenue to
+        -- them.
+        --
+        -- A null $2 still means unscoped — the box-wide view, used where no
+        -- account is asking. A seller who asks gets their own shows and nothing
+        -- else, which may under-count a genuine pre-ownership session. That is
+        -- the right way round: losing your own history from a chart is a smaller
+        -- wrong than being shown revenue you did not make.
+        AND ($2::text IS NULL OR s.owner_account_id = $2)
       GROUP BY p.intent ORDER BY asked DESC`,
     [from.toISOString(), ownerId],
   );
@@ -217,6 +259,15 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
     .map((r) => r.report.prd?.trust?.editRate)
     .filter((x): x is number => typeof x === "number");
 
+  // Every dereference into a stored report is fully optional-chained below.
+  //
+  // `show_reports.report` is JSONB written by code that changes — the engagement
+  // block gained nullable rates earlier today — so a row written under an older
+  // shape is a row that exists. `r.report?.safety.auditChain.ok` guards only the
+  // report being absent: once `safety` is present and `auditChain` is not, it is a
+  // TypeError, and this function serves EVERY seller's dashboard, so one old row
+  // would 500 the whole page for everyone. All 20 production reports carry every
+  // field today; this is the difference between that being true and it mattering.
   return {
     window: { days, from: from.toISOString(), to: to.toISOString() },
     shows: {
@@ -387,12 +438,12 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       // it replaced. `hasReport` is what that change should read.
       hasReport: r.report != null,
       durationMin: r.report?.durationMin ?? 0,
-      answeredRate: r.report?.engagement.answeredRate ?? 0,
-      p95LatencyMs: r.report?.engagement.p95LatencyMs ?? 0,
-      blocked: r.report?.safety.blocked ?? 0,
-      flaggedWrong: r.report?.safety.flaggedWrong ?? 0,
-      gmvCents: r.report?.prd?.gmv.grossCents ?? null,
-      chainOk: r.report?.safety.auditChain.ok ?? false,
+      answeredRate: r.report?.engagement?.answeredRate ?? 0,
+      p95LatencyMs: r.report?.engagement?.p95LatencyMs ?? 0,
+      blocked: r.report?.safety?.blocked ?? 0,
+      flaggedWrong: r.report?.safety?.flaggedWrong ?? 0,
+      gmvCents: r.report?.prd?.gmv?.grossCents ?? null,
+      chainOk: r.report?.safety?.auditChain?.ok ?? false,
     })),
   };
 }
