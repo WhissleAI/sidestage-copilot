@@ -1,5 +1,34 @@
 {$SITE_ADDRESS} {
 	encode zstd gzip
+
+	# Response headers the app does not set per-route.
+	#
+	# Every field uses `?`, which in Caddy means "only if the response does not
+	# already carry one". That matters: `/audio-bridge` sets its own
+	# `referrer-policy: no-referrer` and a nonce CSP (`bridgeCsp`), and a plain
+	# `header` directive here would REPLACE those with the weaker site-wide
+	# values — hardening the API by loosening the one page that actually renders
+	# HTML.
+	header {
+		# The API is reachable only over TLS; say so, so a stolen `http://` link
+		# from an old client or a copied curl never leaves the wire unencrypted.
+		# No `includeSubDomains`: this name is a sslip.io subdomain and this
+		# service has no authority to make a claim about its siblings.
+		?Strict-Transport-Security "max-age=31536000"
+		# Every response here is JSON. A browser that sniffs one as HTML is the
+		# whole reflected-XSS vector for an API that echoes a caller's input back
+		# in an error message — which these do, by design, because a useful error
+		# names what it was given.
+		?X-Content-Type-Options "nosniff"
+		# A backend URL can carry a show id. Chrome and Firefox already default
+		# to this; stating it covers the ones that do not.
+		?Referrer-Policy "strict-origin-when-cross-origin"
+		# Nothing this origin serves is meant to be framed. The bridge page says
+		# so in its own CSP already; this covers everything else, including any
+		# HTML an error path renders.
+		?X-Frame-Options "DENY"
+	}
+
 	reverse_proxy app:8790 {
 		# SSE: never buffer the show stream.
 		flush_interval -1
