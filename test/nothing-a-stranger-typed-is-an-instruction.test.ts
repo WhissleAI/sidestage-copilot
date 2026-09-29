@@ -28,10 +28,30 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { quoted, safe } from "../src/compose/prompts.js";
 
-const SRC = readFileSync(new URL("../src/compose/prompts.ts", import.meta.url), "utf8");
+/**
+ * Every module that builds a prompt. Five, not one — the composer is the obvious
+ * place to look and was not the only place it was wrong.
+ *
+ *   compose/prompts.ts      the reply block: headings and `[factId] fact` lines
+ *   ingest/showContext.ts   an id map the model must choose a listingId from
+ *   ingest/threadContext.ts Reddit ancestors as `author: text` lines
+ *   ingest/enrichLot.ts     newline-joined evidence about the lot on screen
+ *   shows/conclusion.ts     the post-show summary the SELLER reads, built from
+ *                           buyer questions and host speech
+ */
+const BUILDERS = [
+  "src/compose/prompts.ts",
+  "src/ingest/showContext.ts",
+  "src/ingest/threadContext.ts",
+  "src/ingest/enrichLot.ts",
+  "src/shows/conclusion.ts",
+];
+
+const read = (rel: string) => readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
+const SRC = read("src/compose/prompts.ts");
 
 /** Field names that carry text this process did not write. */
 const NOT_OURS =
@@ -45,8 +65,8 @@ const NOT_OURS =
  * `guards.ts` that the repair-block note explains. A scanner that flags prose is
  * a scanner somebody eventually deletes.
  */
-function interpolations(): { line: number; expr: string }[] {
-  const code = SRC.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " ")).replace(
+function interpolations(src: string): { line: number; expr: string }[] {
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " ")).replace(
     /\/\/[^\n]*/g,
     (c) => " ".repeat(c.length),
   );
@@ -59,17 +79,48 @@ function interpolations(): { line: number; expr: string }[] {
 
 describe("what reaches the model", () => {
   test("every interpolation of text we did not write goes through quoted() or safe()", () => {
-    const all = interpolations();
+    const raw: string[] = [];
+    let seen = 0;
+    for (const rel of BUILDERS) {
+      const all = interpolations(read(rel));
+      seen += all.length;
+      for (const i of all) {
+        if (NOT_OURS.test(i.expr) && !/\b(quoted|safe)\(/.test(i.expr)) {
+          raw.push(`${rel}:${i.line} — \${${i.expr}}`);
+        }
+      }
+    }
     // If this drops to nothing the scanner broke, not the risk went away.
-    assert.ok(all.length > 30, `only found ${all.length} interpolations`);
-    const raw = all
-      .filter((i) => NOT_OURS.test(i.expr) && !/\b(quoted|safe)\(/.test(i.expr))
-      .map((i) => `prompts.ts:${i.line} — \${${i.expr}}`);
+    assert.ok(seen > 40, `only found ${seen} interpolations across ${BUILDERS.length} builders`);
     assert.deepEqual(
       raw,
       [],
-      "these put text from outside this process into the prompt block unsanitised; wrap them in " +
-        "quoted() where the shape may change, or safe() where it must not",
+      "these put text from outside this process into a prompt unsanitised; wrap them in " +
+        "quoted() where the rendered shape may change, or safe() where it must not",
+    );
+  });
+
+  test("and the list of prompt builders is still the whole list", () => {
+    // The scan is only as good as this list. Anything that calls the model with
+    // a prompt it composed must be on it.
+    const callers = new Set<string>();
+    const walk = (dir: string): string[] =>
+      readdirSync(new URL(`../${dir}/`, import.meta.url), { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? walk(`${dir}/${e.name}`) : e.name.endsWith(".ts") ? [`${dir}/${e.name}`] : [],
+      );
+    for (const rel of walk("src")) {
+      const src = read(rel);
+      if (/\b(utilityTurn|chatTurn|chatTurnStream)\s*\(/.test(src) && !rel.startsWith("src/llm/")) {
+        callers.add(rel);
+      }
+    }
+    // composer.ts passes the block prompts.ts built; it composes none of its own.
+    callers.delete("src/compose/composer.ts");
+    callers.add("src/compose/prompts.ts");
+    assert.deepEqual(
+      [...callers].sort(),
+      [...BUILDERS].sort(),
+      "a module reaches the model with a prompt the scan above does not cover",
     );
   });
 
