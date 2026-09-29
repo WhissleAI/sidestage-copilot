@@ -172,7 +172,10 @@ async function launchContext(
   },
   lease: BrowserLease,
 ): Promise<{ ctx: BrowserContext; close: () => Promise<void> }> {
-  const viewport = o.viewport ?? { width: 1440, height: 1200 };
+  // 1440×1200 was a viewport for looking at. Nothing looks at this one — the
+  // watcher reads the DOM — and every pixel is compositing memory in a renderer
+  // the kernel has already killed once.
+  const viewport = o.viewport ?? { width: 1280, height: 900 };
   const args = [
     "--disable-blink-features=AutomationControlled",
     // /dev/shm is tmpfs and its pages count against the container's memory
@@ -181,6 +184,23 @@ async function launchContext(
     // the path that runs every five minutes forever.
     "--disable-dev-shm-usage",
     "--disable-gpu",
+    // Hold the renderer inside the container's budget.
+    //
+    // Confirmed by the kernel on 2026-09-29, mid-show: `Memory cgroup out of
+    // memory: Killed process (chrome)` inside the app's 1100 MB cgroup, while a
+    // seller watched an empty chat panel. The eBay Live player page loads a video
+    // player's worth of JavaScript, and the renderer grew until the cgroup killed
+    // it — repeatedly, because every watchdog reload built a fresh one.
+    //
+    // NOT a V8 heap cap. --max-old-space-size=256 was tried here and CRASHED the
+    // renderer outright on this page — reproduced in an A/B on the box, stable
+    // without it and dead with it within 30s. A ceiling low enough to matter is
+    // low enough to abort.
+    // Nothing reads the pixels: the watcher reads the DOM. Not painting is the
+    // cheapest memory there is.
+    "--disable-accelerated-2d-canvas",
+    "--disable-software-rasterizer",
+    "--renderer-process-limit=1",
   ];
   const proxy = discoveryProxy();
   const profile = o.ebaySession === false ? null : profileDir();
