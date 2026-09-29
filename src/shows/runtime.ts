@@ -862,6 +862,17 @@ export class ShowRuntime {
     await this.db
       .query("UPDATE shows SET ended_at = COALESCE(ended_at, now()) WHERE id = $1", [this.showId])
       .catch((e) => console.warn(`  ${this.showId}: end time not stamped — ${(e as Error).message}`));
+    // Let the chat and proposal writes land before counting them.
+    //
+    // `recordChat` and `recordProposal` are fire-and-forget so a buyer's question
+    // never waits on a write, and the report is built by COUNTING those rows — so
+    // "has not landed yet" and "did not happen" are the same thing to it. Measured
+    // 2026-09-28 on a real session: the report said `questionsAsked: 0` for a show
+    // whose `chat_messages` held one admitted row. The writes stay off the hot
+    // path; the reader waits instead.
+    const inFlight = this.record.inFlight;
+    await this.record.drain();
+    if (inFlight) console.log(`  ${this.showId}: waited for ${inFlight} record write(s) before the report`);
     try {
       const chain = await this.audit.verify();
       const listen = (
