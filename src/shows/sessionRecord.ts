@@ -162,9 +162,25 @@ export interface ShowReport {
     /** Sent ÷ admitted questions (src/shows/metrics.ts). Null when nobody
      *  asked — a rate with no denominator is not zero. */
     answeredRate: number | null;
-    medianLatencyMs: number;
-    p95LatencyMs: number;
-    cacheHitRate: number;
+    /**
+     * Null when nothing was answered.
+     *
+     * A percentile of an empty list is 0, and 0 ms is the fastest reply
+     * possible — the report claimed perfect latency for a session that
+     * answered nobody. These were the last three fields in the codebase still
+     * saying zero where they meant "not measured"; they were held back twice
+     * on the belief that widening them needed a data migration. It does not:
+     * the report is JSONB, and every report already written holds a number,
+     * which a `number | null` reads without complaint.
+     *
+     * What cannot be recovered is the OLD zeros. A report written before this
+     * change cannot say whether its 0 ms meant "instant" or "nothing
+     * happened", and nothing here pretends otherwise.
+     */
+    medianLatencyMs: number | null;
+    p95LatencyMs: number | null;
+    /** Null when no reply was drafted — 0% reads as a cache that never hit. */
+    cacheHitRate: number | null;
   };
   /** Can I trust it. */
   safety: {
@@ -281,7 +297,10 @@ export async function buildReport(
   ).rows;
 
   const lat = props.map((p) => p.latency_ms).filter((n) => n > 0).sort((a, b) => a - b);
-  const pick = (q: number) => (lat.length ? Math.round(lat[Math.min(lat.length - 1, Math.floor(q * lat.length))]!) : 0);
+  // Null, not 0. A percentile of an empty list is not a fast reply — it is the
+  // absence of one, and 0 ms is the fastest value the scale has.
+  const pick = (q: number): number | null =>
+    lat.length ? Math.round(lat[Math.min(lat.length - 1, Math.floor(q * lat.length))]!) : null;
 
   const byGuard: Record<string, number> = {};
   const examples: ShowReport["safety"]["examples"] = [];
@@ -388,7 +407,9 @@ export async function buildReport(
       answeredRate: answeredRate({ sent, questionsAsked: questions }),
       medianLatencyMs: pick(0.5),
       p95LatencyMs: pick(0.95),
-      cacheHitRate: share(props.filter((p) => p.cache_hit).length, props.length) ?? 0,
+      // `share` already returns null on an empty denominator; the `?? 0` here
+      // was the discipline being undone at the call site.
+      cacheHitRate: share(props.filter((p) => p.cache_hit).length, props.length),
     },
     safety: {
       blocked: props.filter((p) => p.verdict === "block").length,

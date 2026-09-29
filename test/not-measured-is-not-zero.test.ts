@@ -44,24 +44,9 @@ const REPORTED = [
  */
 const ALLOWED: { file: string; needle: string; why: string }[] = [
   {
-    file: "src/latency/spans.ts",
-    needle: "this._total ? Number((this._cacheHits / this._total).toFixed(3)) : 0",
-    why: "ShowReport.engagement.cacheHitRate is a non-null number on every stored report; widening it is a migration, not an edit.",
-  },
-  {
-    file: "src/shows/sessionRecord.ts",
-    needle: "?? 0",
-    why: "Same field, rebuilt from proposals. Moves with the one above or not at all.",
-  },
-  {
-    file: "src/shows/sessionRecord.ts",
-    needle: "Math.floor(q * lat.length))]!) : 0",
-    why: "ShowReport.engagement.{median,p95}LatencyMs are non-null on every stored report. Same migration as cacheHitRate, and they move together.",
-  },
-  {
     file: "src/shows/sessionRecord.ts",
     needle: "sig ? sig.lost(showId) : 0",
-    why: "A COUNT, not a rate — and 'we could not ask the signals service' is still a weaker lie than a rate of zero. Moves with the report shape.",
+    why: "A COUNT, not a rate, and the signals service being unavailable is a weaker claim than a rate of zero. The three report fields beside it are now nullable; this one has no consumer that can act on the difference.",
   },
   {
     file: "src/shows/prdMetrics.ts",
