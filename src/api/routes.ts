@@ -70,6 +70,7 @@ import { WhissleClient } from "../llm/whissle.js";
 import { describeFrames, describing } from "../shows/frameDescriber.js";
 import { SendRefused } from "../pipeline/pipeline.js";
 import type { ShowRuntime } from "../shows/runtime.js";
+import { build } from "../obs/build.js";
 import { GateBusy, RateLimiter } from "./rateLimit.js";
 import type { AppContext } from "./context.js";
 import { recordEvent, droppedEvents } from "../obs/events.js";
@@ -960,6 +961,10 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     }
     return {
       database,
+      /** Which commit is actually running. Authenticated rather than on
+       *  `/health`, which is public and deliberately says two things — but an
+       *  operator asking "is my change live?" has had nowhere to look at all. */
+      build,
       // Named rather than counted: "two browsers open" is a number, "two
       // Whatnot rooms and the eBay discovery poll" is an answer.
       browsers: browserBudget(),

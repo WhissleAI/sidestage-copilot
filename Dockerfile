@@ -25,6 +25,13 @@ COPY fixtures ./fixtures
 RUN mkdir -p /app/data && chown -R pwuser:pwuser /app
 USER pwuser
 
+# What this image IS, baked in so it cannot be recomputed into a lie. Passed by
+# scripts/deploy-aws.sh from the local git HEAD; `unknown` for a hand build,
+# which src/obs/build.ts reports as "unknown" rather than inventing a value.
+ARG GIT_SHA=unknown
+ARG BUILT_AT=
+RUN printf '{"sha":"%s","builtAt":"%s"}\n' "$GIT_SHA" "$BUILT_AT" > /app/build.json
+
 ENV NODE_ENV=production PORT=8790
 EXPOSE 8790
 # The app runs from source via tsx, as `npm start` does locally.

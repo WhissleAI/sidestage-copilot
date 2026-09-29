@@ -21,7 +21,14 @@ services:
       retries: 20
 
   app:
-    build: .
+    build:
+      context: .
+      args:
+        # Written into /app/build.json at image build; the deploy script supplies
+        # both from the local git HEAD. A container whose stamp does not match
+        # HEAD is a deploy that did not take, which is what this exists to catch.
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILT_AT: ${BUILT_AT:-}
     restart: unless-stopped
     # PID 1 that REAPS. The app launches a real Chrome every discovery refresh,
     # and Node as PID 1 does not wait() on orphaned grandchildren: measured on

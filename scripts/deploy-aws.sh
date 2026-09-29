@@ -93,7 +93,40 @@ cmd_deploy() {
   # left prepared_shows rows pointing at catalogs that no longer existed.
   # The app runs as the image's pwuser (uid 1001); rsync leaves files owned by
   # ubuntu (1000). Hand the writable directories over before starting.
-  $SSH "cd /opt/sidestage && sudo mkdir -p data/shows fixtures/catalogs && sudo chown -R 1001:1001 data fixtures/catalogs && printf 'SITE_ADDRESS=%s\nEBAY_DISCOVERY_PROXY=%s\n' '$SITE' '${EBAY_DISCOVERY_PROXY:-}' > .deploy.env && sudo docker compose --env-file .deploy.env up -d --build --remove-orphans && sudo docker compose ps"
+  # What we are asking the box to become. Baked into the image (Dockerfile ARG →
+  # /app/build.json) so the running process can be asked what it is, and checked
+  # below. Taken from the local HEAD, and refused if the tree is dirty: a stamp
+  # that names a commit the running code does not match is worse than no stamp,
+  # because it is believed.
+  SHA=$(git -C "$(dirname "$0")/.." rev-parse HEAD)
+  if ! git -C "$(dirname "$0")/.." diff --quiet HEAD -- src Dockerfile docker-compose.yml deploy; then
+    echo "!! uncommitted changes under src/, Dockerfile, docker-compose.yml or deploy/." >&2
+    echo "   The build stamp would name $(echo "$SHA" | cut -c1-12), which is not what would run." >&2
+    echo "   Commit them, or export SIDESTAGE_ALLOW_DIRTY=1 to stamp it anyway." >&2
+    [ "${SIDESTAGE_ALLOW_DIRTY:-}" = "1" ] || exit 1
+    SHA="${SHA}-dirty"
+  fi
+  BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  echo "building $SHA"
+
+  $SSH "cd /opt/sidestage && sudo mkdir -p data/shows fixtures/catalogs && sudo chown -R 1001:1001 data fixtures/catalogs && printf 'SITE_ADDRESS=%s\nEBAY_DISCOVERY_PROXY=%s\nGIT_SHA=%s\nBUILT_AT=%s\n' '$SITE' '${EBAY_DISCOVERY_PROXY:-}' '$SHA' '$BUILT_AT' > .deploy.env && sudo docker compose --env-file .deploy.env up -d --build --remove-orphans && sudo docker compose ps"
+
+  # Did the deploy take? Ask the RUNNING container what it is, rather than
+  # trusting that a build and an `up -d` mean the new code is serving. This is
+  # the check that was missing when a merged Caddy config sat on disk for two
+  # deploys while the old one kept serving: the script's success criteria were
+  # "rsync exited 0" and "compose came up", neither of which observes the
+  # process.
+  LIVE=$($SSH "cd /opt/sidestage && sudo docker compose --env-file .deploy.env exec -T app cat /app/build.json" 2>/dev/null | tr -d '\r')
+  case "$LIVE" in
+    *"$SHA"*) echo "running $SHA" ;;
+    *)
+      echo "!! the app container is not running the commit just built" >&2
+      echo "   asked for: $SHA" >&2
+      echo "   it says:   ${LIVE:-<no build.json — an image built before this check existed>}" >&2
+      exit 1
+      ;;
+  esac
   # Every deploy builds on the box, and BuildKit keeps every layer it has ever
   # produced. Nothing pruned it, so the cache — not the database, not the
   # recorded media — became the largest thing on the disk: 9.7 GB across 245
