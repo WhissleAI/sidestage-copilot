@@ -272,6 +272,14 @@ export class EbayLiveWatcher {
     });
 
     this.page = await ctx.newPage();
+    // Playwright says so directly; nothing else does.
+    this.page.on("crash", () => {
+      this.crashed = true;
+      this.o.onStatus?.({
+        connected: false,
+        detail: "the page's renderer crashed — rebuilding it",
+      });
+    });
     await this.page.goto(`https://www.ebay.com/ebaylive/events/${this.o.eventId}/player.html`, {
       waitUntil: "domcontentloaded",
       timeout: 45_000,
@@ -353,8 +361,13 @@ export class EbayLiveWatcher {
    */
   private async recoverIfDead(): Promise<void> {
     if (this.stopped) return;
-    const dead = !this.page || this.page.isClosed() || !this.page.context().browser()?.isConnected();
+    const dead =
+      this.crashed ||
+      !this.page ||
+      this.page.isClosed() ||
+      !this.page.context().browser()?.isConnected();
     if (!dead) return;
+    this.crashed = false;
     try {
       // The LEAK this fixes: `openPage()` calls `acquireBrowser()`, and this
       // path had no matching release. Every renderer crash-and-recover — which
@@ -387,6 +400,19 @@ export class EbayLiveWatcher {
    * nothing for minutes has lost its feed.
    */
   private ended = false;
+
+  /**
+   * The renderer died under us.
+   *
+   * A crashed renderer is not a closed page and not a disconnected browser, so
+   * `recoverIfDead` could not see one: the watcher polled a dead page for ever,
+   * every scrape threw "Target crashed", and the chat watchdog read the silence
+   * as a quiet room and reloaded — which built a fresh renderer that was killed
+   * the same way. Reported live on 2026-09-29 as "Listening to chat" for a whole
+   * show, with the kernel log showing `Memory cgroup out of memory: Killed
+   * process (chrome)` behind it.
+   */
+  private crashed = false;
 
   private async watchdog(): Promise<void> {
     const quietMs = Date.now() - this.lastCommentAt;
