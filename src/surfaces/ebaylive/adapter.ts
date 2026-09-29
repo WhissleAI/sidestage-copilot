@@ -41,7 +41,15 @@ export const ebayLiveAdapter: SurfaceAdapter = {
       onGaveUp: ev.onGaveUp ? (g) => ev.onGaveUp!(g) : undefined,
       onViewers: ev.onViewers ? (n) => ev.onViewers!(n) : undefined,
       onComment: ev.onMessage
-        ? (c) => ev.onMessage!({ id: c.id, author: c.author, text: c.text })
+        ? (c) =>
+            ev.onMessage!({
+              id: c.id,
+              author: c.author,
+              text: c.text,
+              // Carried, not dropped: this is what tells the pipeline to show it
+              // and not answer it. Renaming a field must not lose one.
+              ...(c.historic ? { historic: true } : {}),
+            })
         : undefined,
       // A live-commerce lot is an item with two fields the general shape does
       // not have: who is winning it, and how long is left. Both feed
