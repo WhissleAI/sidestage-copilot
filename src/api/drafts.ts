@@ -320,9 +320,18 @@ export async function persistedAsyncDrafts(
 ): Promise<SurfaceDraft[]> {
   const asyncSurfaces = ASYNC_SURFACES();
   if (!asyncSurfaces.length) return [];
+  // Scoped to the owner, with no ownerless allowance.
+  //
+  // These rows are `reply_proposals`: a buyer's HANDLE and a buyer's QUESTION,
+  // in an inbox. The ownerless concession that makes sense for a list of a
+  // seller's own past shows (migration 024) would hand one account the drafted
+  // follow-ups of another account's buyers. Not reachable in production today —
+  // all five ownerless shows are eBay Live and this reads only the asynchronous
+  // surfaces — so this closes a latent hole rather than a live leak, and it
+  // closes it before an ownerless Reddit or DM session ever exists.
   const { rows } = await q.query<PersistedRow>(
     `${STORED_SELECT}
-      WHERE (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      WHERE s.owner_account_id = $1
         AND COALESCE(s.surface, s.source) = ANY($2)
       ORDER BY p.at DESC
       LIMIT $3`,
@@ -379,7 +388,7 @@ export async function storedDraft(
 ): Promise<SurfaceDraft | null> {
   const { rows } = await q.query<PersistedRow>(
   `${STORED_SELECT}
-    WHERE (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+    WHERE s.owner_account_id = $1
       AND COALESCE(s.surface, s.source) = ANY($2)
       AND p.id = $3
     LIMIT 1`,
@@ -433,7 +442,7 @@ export async function markStoredSent(
           decided_at = COALESCE(p.decided_at, $3)
      FROM shows s
     WHERE s.id = p.show_id AND p.id = $2
-      AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND s.owner_account_id = $1
       AND p.status NOT IN ('blocked', 'dismissed')`,
   [accountId, id, new Date().toISOString()],
   );
@@ -454,7 +463,7 @@ export async function dismissStored(
       SET status = 'dismissed', decided_at = COALESCE(p.decided_at, $3)
      FROM shows s
     WHERE s.id = p.show_id AND p.id = $2
-      AND (s.owner_account_id = $1 OR s.owner_account_id IS NULL)
+      AND s.owner_account_id = $1
       AND p.status NOT IN ('sent', 'auto_sent')`,
   [accountId, id, new Date().toISOString()],
   );
