@@ -402,13 +402,12 @@ describe("a blocked card says 'edit it and send' — and now that is true", () =
     h.llm.repairs = [say("Sure — email me at rae@kicksbyrae.com and I'll sort it out.")];
     const p = await h.ask("how do i reach you about the chicagos");
     await h.pipeline.send(p.id, "Drop me a message through the eBay app.");
-    // The audit append is deliberately not awaited on the send path — a buyer's
-    // reply must not wait on a write — so give the chain a beat to land.
-    let sentEntry: Awaited<ReturnType<typeof h.r.audit.list>>[number] | undefined;
-    for (let i = 0; i < 100 && !sentEntry; i++) {
-      sentEntry = (await h.r.audit.list()).find((e) => e.kind === "reply_sent");
-      if (!sentEntry) await new Promise((res) => setTimeout(res, 10));
-    }
+    // `send` awaits its own ledger write — see `Pipeline.record` — so the entry
+    // is there by the time send returns. This was a poll of up to 100 × 10 ms
+    // against a fire-and-forget append, with a comment claiming a buyer's reply
+    // must not wait on a write. The write is ~3 ms against a 2000 ms budget, and
+    // a send the ledger does not record is not a send worth being quick about.
+    const sentEntry = (await h.r.audit.list()).find((e) => e.kind === "reply_sent");
     assert.ok(sentEntry, "the send is in the audit chain");
     assert.equal((sentEntry!.detail as Record<string, unknown>).clearedBlockByEdit, true);
     assert.equal((sentEntry!.detail as Record<string, unknown>).edited, true);

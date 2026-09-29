@@ -737,20 +737,22 @@ export class Pipeline {
     }
     if (status === "blocked") {
       this.counters.blocked++;
-      this.d.audit.append("reply_blocked", "copilot", `blocked reply to ${msg.author}: ${msg.text.slice(0, 80)}`, {
+      await this.record("reply_blocked", "copilot", `blocked reply to ${msg.author}: ${msg.text.slice(0, 80)}`, {
         proposalId: proposal.id,
         guards: r.guards.filter((g) => g.verdict === "block"),
         draft: r.answer,
-      });
+      }, false);
     }
     if (status === "auto_sent") {
       this.counters.autoSent++;
       this.counters.sent++;
       // Only reachable with a deliverer wired, and only after it returned.
       this.counters.delivered++;
-      this.d.audit.append("reply_sent", "copilot", `auto-sent to ${msg.author}`, {
+      // Required: an auto-send happens with no human in the loop, so the ledger
+      // is the only record that it did.
+      await this.record("reply_sent", "copilot", `auto-sent to ${msg.author}`, {
         proposalId: proposal.id, text: r.answer, confidence: r.confidence, delivery,
-      });
+      }, true);
     }
 
     this.latency.record(r.spans.totalMs, r.spans.cacheHit);
@@ -865,7 +867,9 @@ export class Pipeline {
     this.counters.sent++;
     if (delivery === "api") this.counters.delivered++;
     else this.counters.handedOff++;
-    this.d.audit.append(
+    // Awaited, and allowed to fail the send: the seller must not be told a reply
+    // went out if the ledger does not say so.
+    await this.record(
       "reply_sent",
       actor,
       delivery === "api"
@@ -879,10 +883,56 @@ export class Pipeline {
         ...(wasBlocked ? { clearedBlockByEdit: true } : {}),
         verdictAtSend: verdict, guardsAtSend: guards.map((g) => `${g.guard}:${g.verdict}`),
       },
+      true,
     );
     this.d.events.onProposal(next);
     void this.emitMetrics();
     return next;
+  }
+
+  /**
+   * An audit write on the reply path, awaited, with its failure handled.
+   *
+   * These three appends — `reply_blocked`, the auto-send and the seller's send —
+   * were the only ones in the codebase whose promise was DROPPED. Every action
+   * write (`executor.ts`, five of them) and the autonomy change are awaited. The
+   * asymmetry cost three separate things:
+   *
+   *  a crash        `append` is async and there is no `unhandledRejection`
+   *                 handler, so Node 20's default is to throw. A failed INSERT
+   *                 on this path — Postgres restarting, a lock timeout, the
+   *                 container stopping mid-write — took the whole backend down.
+   *  a silent loss  if it did not crash: the proposal marked sent, the counter
+   *                 incremented, the seller told it went, and no ledger entry.
+   *                 The ledger exists to answer what this copilot and this
+   *                 seller actually did.
+   *  a flaky test   `room-rules.test.ts` slept 100 ms hoping the write landed,
+   *                 and under parallel load it sometimes had not.
+   *
+   * `reply_sent` is required: see `send`, which lets the failure through. A
+   * failed `reply_blocked` write is recorded and swallowed, because losing the
+   * log of a block must not also lose the block.
+   */
+  private async record(
+    kind: "reply_blocked" | "reply_sent",
+    actor: string,
+    summary: string,
+    detail: Record<string, unknown>,
+    required: boolean,
+  ): Promise<void> {
+    try {
+      await this.d.audit.append(kind, actor, summary, detail);
+    } catch (e) {
+      const err = errText(e);
+      logWarn("audit.append_failed", { kind, showId: this.d.repo.showId, required, err });
+      void recordEvent({
+        showId: this.d.repo.showId,
+        kind: "audit.append_failed",
+        level: "error",
+        detail: { auditKind: kind, required, err },
+      });
+      if (required) throw e;
+    }
   }
 
   dismiss(id: string): ReplyProposal {

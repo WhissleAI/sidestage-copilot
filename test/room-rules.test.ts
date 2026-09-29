@@ -309,8 +309,10 @@ describe("marking a session draft sent", () => {
     assert.equal(again.sentAt, first.sentAt, "the moment it went does not move");
     assert.equal(again.sentText, first.sentText);
 
-    // The audit write is fire-and-forget off the send path.
-    await new Promise((r) => setTimeout(r, 100));
+    // No sleep. `send` awaits its own ledger write now — see `Pipeline.record`.
+    // This used to be `await new Promise((r) => setTimeout(r, 100))` against a
+    // fire-and-forget append, and under parallel load 100 ms was sometimes not
+    // enough: the test failed roughly one run in three with `sent.length === 0`.
     const sent = (await rt.audit.list(200)).filter(
       (e) => e.kind === "reply_sent" && e.detail?.proposalId === p.id,
     );
