@@ -587,10 +587,16 @@ one the code checks.
 1. **Commit a markdown through the eBay adapter on air** from a show the connected account
    owns — the first live exercise of the two-phase protocol against an API not designed for it
    (F-07). Everything up to the write is in place; the write has not been watched happen.
-2. **Rate limiting on the API** (the other half of F-14).
-3. **A watchdog test** (F-13): the "active show + silent chat = dead socket" and "silent
-   everything = show over" judgements have no test of their own.
-4. **Evict finished proposals and action keys from memory** (F-12) and wire or delete
+2. **Evict finished proposals and action keys from memory** (F-12) and wire or delete
    `KbSync.scheduleSync` (F-11).
-5. **A neural embedder at the `Embedder` seam**, once a catalog is large enough that lexical
+3. **A neural embedder at the `Embedder` seam**, once a catalog is large enough that lexical
    recall degrades — measured, not assumed.
+
+Two items left this list by being done, and both had sat on it after the fact.
+Rate limiting (the other half of F-14) is in `src/api/rateLimit.ts` and enforced
+in an `onRequest` hook — per address, per address for auth, and per email —
+alongside a concurrency `Gate` on scrypt. The watchdog test (F-13) is
+`test/watchdog-quiet-versus-dead.test.ts`, which drives the shipped `watchdog()`
+on both watchers across the quiet-room / dead-socket / show-over matrix. See
+REVIEW.md for both, and `docs-match-the-code.test.ts` for the rule that now
+fails when a doc says a control is missing that the tree has.
