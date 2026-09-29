@@ -161,3 +161,53 @@ describe("expired sessions are actually collected", () => {
     stop();
   });
 });
+
+describe("a session's liveness costs one write, not one per request", () => {
+  // `last_seen` was updated unconditionally on EVERY authenticated request. A
+  // console open on a live show holds an SSE stream and polls beside it, so the
+  // hottest small table in the database took an UPDATE per request — and in
+  // Postgres an UPDATE writes a new row version, so that is WAL, bloat and
+  // autovacuum churn, all for a column nothing reads.
+  //
+  // Nothing reads it: expiry is `expires_at > now()` in `resolveSession`, and
+  // the reaper prunes on `expires_at`. It is kept because "when was this token
+  // last used" is worth having when somebody asks whether to sign out
+  // everywhere — but at the resolution a human would ask it, not a request's.
+  test("resolving twice in a row does not write twice", async () => {
+    const accounts = new Accounts(pgPool());
+    const a = await accounts.register(`live-${Date.now()}@example.com`, "hunter2hunter2", "Live");
+    const token = a.token;
+
+    const seenAt = async (): Promise<string> =>
+      String(
+        (
+          await pgPool().query<{ last_seen: Date }>(
+            "SELECT last_seen FROM auth_sessions WHERE token = $1",
+            [token],
+          )
+        ).rows[0]!.last_seen.toISOString(),
+      );
+
+    await accounts.resolveSession(token);
+    const first = await seenAt();
+
+    // Ten more resolves, back to back — the shape of one console tab.
+    for (let i = 0; i < 10; i++) await accounts.resolveSession(token);
+    // The write is fire-and-forget; give it a turn of the loop to land if it
+    // were going to.
+    await new Promise((r) => setTimeout(r, 120));
+
+    assert.equal(
+      await seenAt(), first,
+      "last_seen moved on a request inside the resolution window — every request is writing a row version",
+    );
+  });
+
+  test("and the session still resolves, which is the part that matters", async () => {
+    const accounts = new Accounts(pgPool());
+    const a = await accounts.register(`live2-${Date.now()}@example.com`, "hunter2hunter2", "Live");
+    const r = await accounts.resolveSession(a.token);
+    assert.ok(r, "throttling the liveness write must not affect authentication");
+    assert.equal(r.account.id, a.account.id);
+  });
+});

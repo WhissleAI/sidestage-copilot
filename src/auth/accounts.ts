@@ -95,6 +95,11 @@ export interface Resolved {
 const SESSION_DAYS = 30;
 
 
+/** How stale `auth_sessions.last_seen` is allowed to get. One write per session
+ *  per interval instead of one per request; nothing reads it more finely. */
+const LAST_SEEN_RESOLUTION = "5 minutes";
+
+
 export class Accounts {
   constructor(private d: Pool) {}
 
@@ -220,8 +225,32 @@ export class Accounts {
       [token],
     );
     if (!r.rows[0]) return null;
-    // Best-effort liveness, never on the critical path of the answer.
-    void this.d.query("UPDATE auth_sessions SET last_seen = now() WHERE token = $1", [token]).catch(() => {});
+    // Best-effort liveness, never on the critical path of the answer — and at
+    // most once every few minutes per session.
+    //
+    // This fired on EVERY authenticated request. A console open on a live show
+    // holds an SSE stream and polls beside it, so the hottest small table in the
+    // database took an unconditional UPDATE per request — and in Postgres an
+    // UPDATE writes a new row version, so that is WAL, bloat and autovacuum
+    // churn, all of it for a column nothing reads.
+    //
+    // Nothing reads it: expiry is `expires_at > now()` in the resolve query
+    // above, and the reaper prunes on `expires_at` too. It is kept rather than
+    // dropped because "when was this token last used" is a real answer to have
+    // when somebody asks whether to sign out everywhere — but it is worth one
+    // write every `LAST_SEEN_RESOLUTION`, not one per request. The predicate is
+    // what does that: no matching row, no new tuple.
+    //
+    // The failure is logged rather than swallowed. A silent `.catch(() => {})`
+    // on a fire-and-forget DB write is exactly how the analytics-zeros bug hid
+    // an INSERT that had been failing on every proposal for weeks.
+    void this.d
+      .query(
+        `UPDATE auth_sessions SET last_seen = now()
+          WHERE token = $1 AND last_seen < now() - $2::interval`,
+        [token, LAST_SEEN_RESOLUTION],
+      )
+      .catch((e) => console.warn(`  auth: last_seen not updated — ${(e as Error).message}`));
     return { account: toAccount(r.rows[0]), scopeShowId: r.rows[0].scope_show_id ?? null };
   }
 
