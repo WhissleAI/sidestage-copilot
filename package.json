@@ -22,7 +22,8 @@
     "demo:ebaylive": "tsx bench/ebayLive.demo.ts",
     "ebay:export": "node scripts/ebay-export-session.mjs",
     "agents:gc": "tsx src/llm/reapAgents.ts",
-    "traffic": "tsx scripts/traffic.ts"
+    "traffic": "tsx scripts/traffic.ts",
+    "test:serial": "NODE_ENV=test CATALOGS_DIR=.tmp/test-catalogs node --import tsx --test --test-concurrency=1 test/*.test.ts test/*.eval.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
