@@ -71,6 +71,25 @@ describe("one database per test file", () => {
     // failed is still there to open and look at — which was impossible when every
     // file shared one.
     assert.match(sh, /LIKE 'sidestage_test_%'/);
-    assert.match(sh, /DROP DATABASE IF EXISTS .* WITH \(FORCE\)/, "FORCE, or a leaked connection blocks it");
+  });
+
+  test("and a database in use is left alone, so two runs cannot sabotage each other", () => {
+    const sh = read("scripts/ensure-test-db.mjs");
+    // The first version of this cleanup used `WITH (FORCE)`, which evicts whatever
+    // is connected — so two overlapping suite runs dropped each other's live
+    // databases mid-test. That is a worse failure than the flakiness the per-file
+    // split fixed. The filter is on `pg_stat_activity`, not on age: no connection
+    // means no owning process is left, and a connection means a run is still going.
+    assert.match(sh, /pg_stat_activity/, "the cleanup must skip databases in use");
+    // Comments blanked: the script EXPLAINS why FORCE was removed, and a scanner
+    // that trips on its own rationale is a scanner somebody deletes. Third time
+    // today I have made this mistake, so it is written down here.
+    const code = sh
+      .replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " "))
+      .replace(/\/\/[^\n]*/g, (c) => " ".repeat(c.length));
+    assert.ok(
+      !/WITH \(FORCE\)/.test(code),
+      "FORCE evicts a live run's connection — it must not come back",
+    );
   });
 });

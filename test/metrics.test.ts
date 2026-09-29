@@ -152,10 +152,22 @@ describe("two consumers of one figure", () => {
   test("the report's duration is measured to when the session stopped", async () => {
     await seedSession();
     const d = db();
-    // Started 90 minutes ago, stopped 30 minutes ago: an hour on air, and a
-    // half-hour of a console left attached afterwards that is nobody's airtime.
-    const stopped = new Date(Date.now() - 30 * 60_000).toISOString();
-    await d.query("UPDATE shows SET ended_at = $2 WHERE id = $1", [SHOW, stopped]);
+    // Started 90 minutes before it stopped, stopped 30 minutes ago: an hour on
+    // air, and a half-hour of a console left attached afterwards that is nobody's
+    // airtime.
+    //
+    // BOTH timestamps are set here, from one instant. `started` is computed once
+    // at module load, so setting only `ended_at` made the duration
+    // `60 + however long the earlier tests in this file took` — it read 62 the
+    // first time the suite got slow enough, which is a time bomb rather than a
+    // test. The arithmetic is exact now whenever it runs.
+    const stopped = new Date(Date.now() - 30 * 60_000);
+    const began = new Date(stopped.getTime() - 90 * 60_000);
+    await d.query("UPDATE shows SET started_at = $2, ended_at = $3 WHERE id = $1", [
+      SHOW,
+      began.toISOString(),
+      stopped.toISOString(),
+    ]);
 
     const report = await buildReport(d, SHOW, { auditChain: { ok: true, height: 0 } });
     assert.equal(report.durationMin, 60, "60 minutes on air, not 90 to report-generation time");

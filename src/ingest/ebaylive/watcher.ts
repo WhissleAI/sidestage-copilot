@@ -32,6 +32,9 @@ export interface LiveComment {
   id: string;
   author: string;
   text: string;
+  /** Already on screen when we attached, or after a reload. Shown in the ticker,
+   *  never drafted against. */
+  historic?: boolean;
 }
 
 export interface LiveLot {
@@ -78,6 +81,10 @@ const ACTIVITY_WINDOW_MS = 90_000;
 const END_SILENCE_MS = 15 * 60_000;
 /** Reloading forever would hammer eBay if the selector itself broke. */
 const MAX_RELOADS = 20;
+
+/** How much of the backlog to put on screen. The same number the scraped
+ *  surfaces use — enough to see the room, not an hour of replay. */
+const BACKLOG_SHOWN = 40;
 
 /** Shared browser across every watched show — one Chromium, N pages. */
 let shared: Browser | null = null;
@@ -202,7 +209,7 @@ export class EbayLiveWatcher {
     if (pageTitle) this.o.onTitle?.(pageTitle);
 
     const backlog = await this.scrape();
-    for (const c of backlog.comments) this.seen.add(c.id);
+    this.absorb(backlog.comments);
     if (backlog.lot) this.emitLot(backlog.lot);
     this.o.onStatus?.({ connected: true, detail: `attached to ${this.o.eventId} (${backlog.comments.length} backlog)` });
 
@@ -281,6 +288,27 @@ export class EbayLiveWatcher {
 
   }
 
+  /**
+   * Take a scrape as HISTORY: mark it seen, and show the tail of it.
+   *
+   * Marking it seen and stopping there is what "Listening to chat" and nothing
+   * under it was. `surfaces/scrapeWatcher.ts` already carries the fix and its
+   * comment names the report it came from — "a live eBay Live session, 99
+   * viewers, 24 minutes, and nothing under it" — but the fix went to the
+   * Whatnot/TikTok watcher and never to the eBay Live one it was reported on.
+   * Seen again on 2026-09-29: `attached to C99NAJFehcYoQjpw (100 backlog)` and an
+   * empty panel, with all hundred messages on the page in front of us.
+   *
+   * `historic` is the distinction that makes showing them safe: the operator sees
+   * the room, and the pipeline does not answer an hour-old question.
+   */
+  private absorb(comments: LiveComment[]): void {
+    for (const c of comments) this.seen.add(c.id);
+    for (const c of comments.slice(-BACKLOG_SHOWN)) {
+      this.o.onComment?.({ ...c, historic: true });
+    }
+  }
+
   private tick(): void {
     if (this.stopped) return;
     this.timer = setTimeout(async () => {
@@ -338,9 +366,10 @@ export class EbayLiveWatcher {
       this.page = null;
       await this.releasePage();
       await this.openPage();
-      // Everything on screen after a relaunch is history, not new traffic.
+      // Everything on screen after a relaunch is history, not new traffic — but
+      // it is still what is in the room, so it is shown rather than dropped.
       const backlog = await this.scrape();
-      for (const c of backlog.comments) this.seen.add(c.id);
+      this.absorb(backlog.comments);
       this.lastCommentAt = Date.now();
       this.o.onStatus?.({ connected: true, detail: "browser recovered — feed reattached" });
     } catch (e) {
@@ -399,9 +428,11 @@ export class EbayLiveWatcher {
         null,
         { timeout: 30_000 },
       );
-      // Everything on screen after a reload is history, not new traffic.
+      // Everything on screen after a reload is history, not new traffic — and a
+      // reload happens BECAUSE chat went quiet, so whatever did arrive in the
+      // meantime is here. Dropping it made every reload lose a room.
       const backlog = await this.scrape();
-      for (const c of backlog.comments) this.seen.add(c.id);
+      this.absorb(backlog.comments);
       this.lastCommentAt = Date.now();
       this.o.onStatus?.({ connected: true, detail: `feed reloaded (${backlog.comments.length} backlog suppressed)` });
     } catch (e) {

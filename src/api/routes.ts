@@ -73,7 +73,7 @@ import type { ShowRuntime } from "../shows/runtime.js";
 import { build } from "../obs/build.js";
 import { GateBusy, RateLimiter } from "./rateLimit.js";
 import type { AppContext } from "./context.js";
-import { recordEvent, droppedEvents } from "../obs/events.js";
+import { recordEvent, droppedEvents, showEvents } from "../obs/events.js";
 import { logSwallowed, logWarn, errText } from "../obs/log.js";
 import { browserBudget } from "../surfaces/browserBudget.js";
 
@@ -1022,6 +1022,30 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
        *  `/health`, which is public and deliberately says two things — but an
        *  operator asking "is my change live?" has had nowhere to look at all. */
       build,
+      /**
+       * What has gone wrong lately, on THIS seller's shows.
+       *
+       * The cross-show question `idx_session_events_kind` was built for — "has any
+       * watcher given up today" — and the second half of giving `session_events` a
+       * reader at all.
+       *
+       * Scoped by joining `shows` and filtering on the owner, which also EXCLUDES
+       * every event with a null `show_id`: a boot, an attach that failed before a
+       * show row existed, an unhandled rejection. Those belong to no seller, and
+       * showing them here would put one account's operational failures in another
+       * account's diagnostics — the same mistake as folding ownerless shows into
+       * everybody's revenue (F-22). They are in the process's own log, which is
+       * where a box-wide question belongs.
+       */
+      recentFailures: (
+        await pgPool().query<{ at: string; show_id: string; kind: string; detail: unknown }>(
+          `SELECT e.at, e.show_id, e.kind, e.detail
+             FROM session_events e JOIN shows s ON s.id = e.show_id
+            WHERE e.level = 'error' AND s.owner_account_id = $1
+            ORDER BY e.at DESC LIMIT 20`,
+          [actorOf(req as object)?.id ?? null],
+        )
+      ).rows,
       // Named rather than counted: "two browsers open" is a number, "two
       // Whatnot rooms and the eBay discovery poll" is an answer.
       browsers: browserBudget(),
@@ -3669,6 +3693,34 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
    * from `started_at`, plus the host summary. This is what the report's
    * playable timeline is drawn from, and it works after the show has ended.
    */
+  /**
+   * What the SYSTEM did during this session, in order.
+   *
+   * `session_events` has had five writers and no reader. Migration 030 created it
+   * so that "it stopped answering mid-show" would have an answer other than asking
+   * the seller what they saw, and `idx_session_events_show` exists for exactly
+   * this query — but `showEvents()` was called only from tests, so a watcher that
+   * gave up after twenty reloads, a listen session that was cut, a ledger write
+   * that failed, an unhandled rejection and (since yesterday) a console panel that
+   * stopped drawing all landed somewhere nobody could look. Recorded is not
+   * visible.
+   *
+   * Distinct from `/timeline`, which is the MEDIA timeline — what the host said and
+   * what the camera showed. This is what the process did.
+   *
+   * Ownership is the `:showId` preHandler every show route gets: a stranger is
+   * told there is no such show.
+   */
+  app.get<{ Params: { showId: string }; Querystring: { limit?: string } }>(
+    "/api/shows/:showId/events",
+    async (req, reply) => {
+      const exists = await pgPool().query("SELECT 1 FROM shows WHERE id = $1", [req.params.showId]);
+      if (!exists.rowCount) return reply.code(404).send({ error: `no show ${req.params.showId}` });
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+      return { showId: req.params.showId, events: await showEvents(pgPool(), req.params.showId, limit) };
+    },
+  );
+
   app.get<{ Params: { showId: string } }>("/api/shows/:showId/timeline", async (req, reply) => {
     const exists = await pgPool().query("SELECT 1 FROM shows WHERE id = $1", [req.params.showId]);
     if (!exists.rowCount) return reply.code(404).send({ error: `no show ${req.params.showId}` });

@@ -34,33 +34,43 @@ try {
   process.exit(1);
 }
 
-// Drop the per-file databases the last run left behind.
+// Drop the per-file databases a previous run left behind — and only those.
 //
-// Each test FILE gets its own database now (`src/db/pg.ts`), which is what stopped
-// the suite racing itself — but nothing reliably drops them: a file that is
-// interrupted, or one that never calls `closeDb`, leaves its database sitting
-// there. So they are cleaned up at the START of a run rather than the end of one,
-// where a crash cannot skip it. That also leaves the last run's databases around
-// for as long as they are useful: after a failure you can still open the one that
-// failed and look, which was impossible when every file shared one.
+// Each test FILE gets its own database (`src/db/pg.ts`), which is what stopped the
+// suite racing itself. Nothing reliably drops them: an interrupted file, or one
+// that never calls `closeDb`, leaves its database behind. So they are cleaned up at
+// the START of a run, where a crash cannot skip it, and the last run's databases
+// stay around until then — after a failure you can still open the one that failed
+// and look, which was impossible when every file shared one.
+//
+// IN USE MEANS LEAVE ALONE. The first version of this used `WITH (FORCE)`, which
+// evicts whatever is connected — so two overlapping suite runs dropped each
+// other's live databases mid-test. That is a worse failure than the flakiness the
+// per-file split fixed, and it is why the filter below is on `pg_stat_activity`
+// rather than on age: a database with no connection has no owning process left, and
+// one with a connection belongs to a run that is still going.
 try {
-  const stale = execFileSync(
+  const idle = execFileSync(
     "psql",
-    [admin.toString(), "-tAc", "SELECT datname FROM pg_database WHERE datname LIKE 'sidestage_test_%'"],
+    [
+      admin.toString(),
+      "-tAc",
+      `SELECT d.datname FROM pg_database d
+         WHERE d.datname LIKE 'sidestage_test_%'
+           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)`,
+    ],
     { stdio: ["ignore", "pipe", "pipe"] },
   )
     .toString()
     .split("\n")
     .map((x) => x.trim())
     .filter(Boolean);
-  for (const d of stale) {
-    // WITH (FORCE) evicts a connection a leaked process is still holding, which
-    // is the case that otherwise leaves a database nothing can drop.
-    execFileSync("psql", [admin.toString(), "-c", `DROP DATABASE IF EXISTS "${d}" WITH (FORCE)`], {
-      stdio: "ignore",
-    });
+  for (const d of idle) {
+    // No FORCE: it was checked idle a moment ago, and if something connected in
+    // between, the right answer is to leave it.
+    execFileSync("psql", [admin.toString(), "-c", `DROP DATABASE IF EXISTS "${d}"`], { stdio: "ignore" });
   }
-  if (stale.length) console.log(`[pretest] dropped ${stale.length} per-file database(s) from the last run`);
+  if (idle.length) console.log(`[pretest] dropped ${idle.length} idle per-file database(s)`);
 } catch (e) {
   // Not fatal. A run with leftovers is slower to read, not wrong.
   console.error(`[pretest] could not clean per-file databases: ${e.message}`);
