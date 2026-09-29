@@ -225,9 +225,23 @@ being true the moment someone demos it from a laptop on conference wifi.
 
 **Fixed.** Accounts with email + password (scrypt) and bearer sessions on
 2026-09-14 (`src/auth/accounts.ts`, migration 014; the guest door closed in 015);
-ownership and per-account scoping on 2026-09-15 — see §10. Rate limiting on the
-API itself is still absent; the proposal token bucket and the per-show action
-budget are the only limits.
+ownership and per-account scoping on 2026-09-15 — see §10.
+
+Rate limiting followed, and this row said "still absent" for longer than it was
+true. `src/api/rateLimit.ts` is a fixed-window limiter applied in an `onRequest`
+hook: **20 auth requests a minute per address**, **240 a minute per address for
+everything else**, and — because a per-address limit does nothing about a
+distributed guess at one seller's password — **10 attempts per EMAIL in ten
+minutes**, wherever they come from. `/health` is exempt as a liveness probe;
+`/api/stream` is one long-lived request and costs one hit. Refusals carry
+`Retry-After`. Beside it, `Gate` bounds scrypt CONCURRENCY, which rate limiting
+does not: seventy simultaneous logins is 1.1 GB whether they arrived over a
+second or a minute, and that is what OOM-killed the container.
+
+Verified against production on 2026-09-28: 20 logins from one address with
+distinct emails, the 21st refused with `retry-after`; 10 against one email
+refused on the 11th by the account limit. The proposal token bucket and the
+per-show action budget remain, and are about something else.
 
 ### F-15 · Restart durability is inconsistent  — **FIXED 2026-09-15**
 
@@ -395,7 +409,7 @@ Closed today, each verified against the code rather than the commit message:
 | # | Finding | Status |
 |---|---|---|
 | F-07 | Write path never run against a real show | **Open, narrowed.** The eBay adapter is real and armed per show; since 2026-09-15 a show attaches writable when the connected eBay username matches its seller handle (`routes.ts` attach). It has still not been exercised on a live show the account owns. The adapter is exercised only by `test/ebay.test.ts` with an injected fetcher |
-| F-13 | The watchdog (dead-socket reload, and now end-of-show on silence) has no test of its own | **Open** |
+| F-13 | The watchdog (dead-socket reload, and now end-of-show on silence) has no test of its own | **FIXED 2026-09-28.** `test/watchdog-quiet-versus-dead.test.ts` drives the shipped `watchdog()` on BOTH watchers across the whole matrix: chat talking, chat silent under a moving room (reload), chat silent under a still room (a quiet room — left alone), total silence past the end threshold (ended once, no reload), a moving room with long-dead chat (reload, never "ended"), and the reload budget at 19 and at 20. Shown load-bearing: flipping the end-of-show `&&` to `||` fails exactly the "a show still moving is NEVER declared over" case and nothing else. The give-up branch was already covered in `observability.test.ts` |
 | — | A SIGTERM keeps live shows resumable rather than finishing them: a deploy restart must not end every show on air. A show whose feed stays silent after the restart is finished by the end-of-show rule instead | **By design** |
 | — | L4 auto-act is locked as a starting rung only; `POST /api/autonomy` will set L4 whatever the write target | **Open** (policy, not code) |
 | — | Rate limiting on the API (the other half of F-14) | **Open** |

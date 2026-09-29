@@ -66,6 +66,54 @@ const BOUND: { what: string; file: string; constant: RegExp; inDocs: RegExp }[] 
     constant: /MAX_PER_BUILD = (\d+)/,
     inDocs: /\b50\b/,
   },
+  // REVIEW.md F-14 now quotes all three limits. It previously said rate
+  // limiting was absent, months after it shipped.
+  {
+    what: "auth requests a minute per address",
+    file: "src/api/routes.ts",
+    constant: /AUTH_LIMIT = \{ windowMs: 60_000, max: (\d+) \}/,
+    inDocs: /\*\*(\d+) auth requests a minute per address\*\*/,
+  },
+  {
+    what: "login attempts per email per window",
+    file: "src/api/routes.ts",
+    constant: /LOGIN_ACCOUNT_LIMIT = \{ windowMs: 10 \* 60_000, max: (\d+) \}/,
+    inDocs: /\*\*(\d+) attempts per EMAIL in ten\s+minutes\*\*/,
+  },
+];
+
+/**
+ * A doc must not assert the ABSENCE of something the code has.
+ *
+ * This is the failure that produced the entry above, and it is a different
+ * failure from a stale number: REVIEW.md's F-14 read "rate limiting on the API
+ * itself is still absent" while `src/api/rateLimit.ts` had been in the tree for
+ * two weeks, enforcing three limits in production. A number going stale is
+ * noise; a status line saying a control does not exist is a reviewer's decision
+ * made on false information, in the one document written to be diffed against
+ * the code.
+ *
+ * Narrow on purpose — each row is a specific sentence, not a heuristic — so
+ * that a row can only ever fail for the reason it was added.
+ */
+const DENIED_ABSENCE: { phrase: RegExp; provenBy: string; what: string }[] = [
+  {
+    what: "rate limiting",
+    phrase: /rate limiting[^.\n]*\b(?:is|remains)\s+(?:still\s+)?absent/i,
+    provenBy: "src/api/rateLimit.ts",
+  },
+  {
+    // The same claim lived a second life as a to-do in the TDD's "what I would
+    // do next", which is an absence claim in a different grammar.
+    what: "rate limiting, as an outstanding task",
+    phrase: /\*\*Rate limiting on the API\*\*/,
+    provenBy: "src/api/rateLimit.ts",
+  },
+  {
+    what: "the watchdog's own test",
+    phrase: /watchdog[^.\n]*has no test of its own \| \*\*Open\*\*/i,
+    provenBy: "test/watchdog-quiet-versus-dead.test.ts",
+  },
 ];
 
 describe("numbers in the docs match the constants that decide them", () => {
@@ -149,4 +197,25 @@ describe("the submission's own checklist is intact", () => {
       assert.ok(readme.includes(label), `README is missing the "${label}" section`);
     }
   });
+});
+
+describe("no doc claims something is missing that is in the tree", () => {
+  for (const row of DENIED_ABSENCE) {
+    test(`${row.what} exists, so nothing may say it does not`, () => {
+      // If the proof moves, the row is wrong rather than the docs.
+      assert.ok(
+        existsSync(join(root, row.provenBy)),
+        `${row.provenBy} is gone — this row is now checking the wrong thing`,
+      );
+      for (const d of all) {
+        const hit = d.src.match(row.phrase);
+        assert.equal(
+          hit,
+          null,
+          `${d.rel} says ${JSON.stringify(hit?.[0])} — but ${row.provenBy} exists. ` +
+            `A status line claiming a control is absent is a reviewer's decision made on false information.`,
+        );
+      }
+    });
+  }
 });
