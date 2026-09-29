@@ -898,8 +898,8 @@ export class Pipeline {
    * write (`executor.ts`, five of them) and the autonomy change are awaited. The
    * asymmetry cost three separate things:
    *
-   *  a crash        `append` is async and there is no `unhandledRejection`
-   *                 handler, so Node 20's default is to throw. A failed INSERT
+   *  a crash        `append` is async and there was no `unhandledRejection`
+   *                 handler, so Node's default since v15 applies: throw. A failed INSERT
    *                 on this path — Postgres restarting, a lock timeout, the
    *                 container stopping mid-write — took the whole backend down.
    *  a silent loss  if it did not crash: the proposal marked sent, the counter

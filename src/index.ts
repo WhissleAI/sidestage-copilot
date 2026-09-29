@@ -15,8 +15,46 @@ import { startBudgetWatch, stopBudgetWatch } from "./llm/budget.js";
 import { retireStaleAgents, startAgentGc } from "./llm/agentGc.js";
 import { Accounts, startSessionPrune } from "./auth/accounts.js";
 import { onAgentCap } from "./llm/streamAgent.js";
+import { logError } from "./obs/log.js";
+import { recordEvent } from "./obs/events.js";
+
+/**
+ * A dropped promise must not take the show down with it.
+ *
+ * Node's default for an unhandled rejection has been to throw since v15, which
+ * ends the process. That default is right for a script and wrong for THIS: one container
+ * serves the whole site, a show is on air inside it, and `restart:
+ * unless-stopped` brings it back in a few seconds having lost the watcher, the
+ * proposals held in memory and the host audio session.
+ *
+ * Three unawaited `audit.append` calls on the reply path were exactly this bug
+ * (PR #54): a failed INSERT, on a box that has been OOM-killed before, ended the
+ * process. Those three are awaited now. This is the class rather than the
+ * instances — the next dropped promise, wherever it is, becomes a loud line and
+ * a row instead of an outage.
+ *
+ * It does NOT swallow. Both channels get it, and `level: "error"` puts it in the
+ * report: an unhandled rejection is a bug in this code every time, and one that
+ * is invisible is one nobody fixes. A `uncaughtException` is deliberately left
+ * alone — that one means the process state is unknown, and continuing is worse
+ * than restarting.
+ */
+function keepServingThroughDroppedPromises(): void {
+  process.on("unhandledRejection", (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    logError("process.unhandled_rejection", { err: err.message, stack: err.stack?.slice(0, 2000) });
+    void recordEvent({
+      kind: "process.unhandled_rejection",
+      level: "error",
+      // No showId: a rejection arrives with no context, and guessing one would
+      // put this box's most confusing failure on the wrong session's timeline.
+      detail: { err: err.message },
+    });
+  });
+}
 
 async function main(): Promise<void> {
+  keepServingThroughDroppedPromises();
   // Configuration is checked HERE, before a port is opened and before a
   // migration runs. Every variable used to be discovered at first use — no
   // schema, no required set, no report of what was read — so a malformed one

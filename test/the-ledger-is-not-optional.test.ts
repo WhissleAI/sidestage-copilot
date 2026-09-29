@@ -6,8 +6,8 @@
 // record what was said to a buyer. `append` is async and the promise was
 // discarded, not even `void`-ed. Three separate costs:
 //
-//  a crash        there is no `unhandledRejection` handler, so Node 20's default
-//                 is to throw. A failed INSERT on this path — Postgres
+//  a crash        there was no `unhandledRejection` handler, so Node's default
+//                 since v15 applied: throw. A failed INSERT on this path — Postgres
 //                 restarting, a lock timeout, the container stopping mid-write —
 //                 took the whole backend down, on a 2 GB box that has been
 //                 OOM-killed before.
@@ -104,5 +104,54 @@ describe("every ledger write is awaited", () => {
       }
     }
     assert.deepEqual(offenders, [], "a sleep before reading the audit log means the write is not awaited");
+  });
+});
+
+// ── and the class, not just the three instances ──────────────────────────────
+//
+// Awaiting those three closes the bugs I found. It does not close the shape of
+// them: Node throws on an unhandled rejection by default (v15+), so the NEXT
+// dropped promise anywhere in this process ends it. That default is right for a
+// script and wrong here — one container serves the whole site, a show is on air
+// inside it, and `restart: unless-stopped` brings it back in seconds having lost
+// the watcher, the proposals held in memory and the host audio session.
+
+describe("a dropped promise does not end the show", () => {
+  const index = read("src/index.ts");
+
+  test("the process installs a handler, before anything else runs", () => {
+    assert.match(index, /process\.on\("unhandledRejection"/);
+    // Before the port opens and before a migration runs: a rejection during
+    // startup is exactly when there is no handler yet.
+    const call = index.indexOf("keepServingThroughDroppedPromises();");
+    const mainAt = index.indexOf("async function main(): Promise<void> {");
+    assert.ok(call > mainAt, "it must be called inside main");
+    assert.ok(
+      call < index.indexOf("const problems = checkConfig()"),
+      "it must be installed before the first work main does",
+    );
+  });
+
+  test("it reports on both channels rather than swallowing", () => {
+    const fn = index.slice(index.indexOf("function keepServingThroughDroppedPromises"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+    assert.match(body, /logError\("process\.unhandled_rejection"/);
+    assert.match(body, /kind: "process\.unhandled_rejection"/);
+    assert.match(body, /level: "error"/, "it belongs in the report, not only the log");
+    // The stack is the whole value of the line — without it, "something
+    // rejected somewhere" is not actionable.
+    assert.match(body, /stack/);
+  });
+
+  test("it does not also catch uncaughtException", () => {
+    // Different failure: an uncaught exception means the process state is
+    // unknown, and continuing is worse than restarting.
+    //
+    // Comments blanked, because index.ts explains this distinction in prose and
+    // a scanner that flags its own rationale is a scanner somebody deletes.
+    const code = index
+      .replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " "))
+      .replace(/\/\/[^\n]*/g, (c) => " ".repeat(c.length));
+    assert.ok(!/uncaughtException/.test(code), "an uncaught exception must still end the process");
   });
 });
