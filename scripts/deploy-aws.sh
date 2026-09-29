@@ -102,6 +102,21 @@ cmd_deploy() {
   #
   # 2 GB is roughly one full build's worth, so the next deploy still reuses
   # layers and stays fast; everything older goes.
+  # The Caddyfile is a BIND MOUNT, and `compose up -d` only recreates a
+  # container whose image or config changed. Editing deploy/Caddyfile changes
+  # neither, so the rsync lands the new file on disk and Caddy — which reads it
+  # once, at start — keeps serving the old one. Measured: the security-header
+  # block shipped, the deploy reported success, and `curl -D -` came back with
+  # none of it.
+  #
+  # A reload rather than a restart: it is hot, drops no connection, and does not
+  # make Caddy revisit ACME. It is also idempotent, so it runs every deploy
+  # instead of trying to detect whether the file moved. A bad Caddyfile fails
+  # here loudly, with the running config untouched — which is the right failure.
+  $SSH "cd /opt/sidestage && sudo docker compose --env-file .deploy.env exec -T caddy caddy reload --config /etc/caddy/Caddyfile" || {
+    echo "!! caddy did not reload — the proxy is still on its previous config" >&2
+    exit 1
+  }
   $SSH "sudo docker builder prune -f --keep-storage 2GB >/dev/null 2>&1 || true; df -h / | tail -1"
   echo
   echo "backend:  https://$SITE/health"

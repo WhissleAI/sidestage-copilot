@@ -85,7 +85,17 @@ services:
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS}
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The DIRECTORY, not the file. Docker binds a single-file mount by inode,
+      # and rsync replaces a file by writing a temporary one and renaming it —
+      # so a deploy that changed the Caddyfile left this container reading the
+      # inode it started with. Measured 2026-09-28: the header block below
+      # shipped, the deploy reported success, `caddy reload` re-read the same
+      # stale file and reported success too, and `curl -D -` came back with none
+      # of it. Mounting the directory makes the path resolve fresh on every read,
+      # which is what lets the hot reload in scripts/deploy-aws.sh work at all.
+      # Caddy's default config path is /etc/caddy/Caddyfile, so nothing else
+      # changes.
+      - ./deploy:/etc/caddy:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
