@@ -36,7 +36,7 @@ import type { ResearchService } from "../research/research.js";
 import type { GuardInput } from "../guardrails/types.js";
 import { capabilitiesOf } from "../surfaces/types.js";
 import { runChain, emptyGuardBlocks } from "../guardrails/chain.js";
-import { admit, classify, classifySpeechAct, RateLimiter } from "../ingest/classify.js";
+import { admit, classify, classifySpeechAct, RATE_CAP_REASON, RateLimiter } from "../ingest/classify.js";
 import type { IncomingMessage } from "../ingest/sources.js";
 import { ShowContextEngine } from "../ingest/showContext.js";
 import type { ThreadContext } from "../ingest/threadContext.js";
@@ -170,6 +170,9 @@ export type ReplyDeliverer = (m: {
 /** Said the same way in the firehose, in the report and in the audit entry. */
 const BUDGET_REASON = "this show reached its spend cap — the copilot stopped drafting";
 
+/** Why a backlog message was not drafted against: it predates the console. */
+const HISTORIC_REASON = "asked before you attached";
+
 /** The guards said no at the moment of sending. Not an error in the system. */
 export class SendRefused extends Error {}
 
@@ -275,7 +278,16 @@ export class Pipeline {
               ? BUDGET_REASON
               : observing
                 ? "autonomy is L0 — observing only"
-                : decision.reason,
+                : // A backlog message reaches the limiter thunk with `historic`
+                  // already false-ing it, so the gate reports the cap — which is
+                  // not what happened. Attach mid-show and every real question
+                  // in the backlog read "proposal rate cap reached": a cap the
+                  // seller never hit, on a console whose whole claim is that it
+                  // says where a thing came from. Worse than noise — a seller
+                  // reading it goes and raises a cap that was never the problem.
+                  opts.historic && decision.reason === RATE_CAP_REASON
+                  ? HISTORIC_REASON
+                  : decision.reason,
           }
         : {}),
       ...(!capped && opts.force && !natural.admitted

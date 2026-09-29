@@ -238,6 +238,16 @@ export function classifySpeechAct(text: string): SpeechAct {
  * limiter in and calling it LAST, at the one point where the message is
  * otherwise admissible, is the whole fix: a token now buys a proposal.
  */
+/**
+ * What the gate says when the token bucket is empty.
+ *
+ * Named because callers pass a thunk that can be false for a reason of their
+ * own — a backlog message was never rate-limited, it was simply said before we
+ * were listening — and a caller that cannot tell the two apart reports the
+ * wrong cause to the operator.
+ */
+export const RATE_CAP_REASON = "proposal rate cap reached";
+
 export function admit(
   text: string,
   intent: ChatIntent,
@@ -299,7 +309,7 @@ export function admit(
   // LAST. Everything above this line is a reason not to reply that costs
   // nothing; the token is only drawn once none of them applied.
   if (!(typeof rate === "function" ? rate() : rate)) {
-    return { admitted: false, intent, speechAct, stance, reason: "proposal rate cap reached" };
+    return { admitted: false, intent, speechAct, stance, reason: RATE_CAP_REASON };
   }
 
   return { admitted: true, intent, speechAct, stance };
