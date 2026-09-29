@@ -62,14 +62,13 @@ const BRIDGE_TEMPLATE = `<!doctype html>
 
   <div class="panel">
     <ol>
-      <li>Open the eBay Live show in another tab and make sure it is playing.</li>
-      <li>Pick a show below, click <strong>Start capture</strong>.</li>
+      <li>Click <strong>Start capture</strong>. The show should already be open in another tab — the console's <strong>Host audio</strong> button opens it alongside this one.</li>
       <li>In the picker choose that <strong>tab</strong> and tick <strong>Share tab audio</strong>.</li>
     </ol>
     <div class="row">
       <label for="show">showId</label>
       <input id="show" value="" placeholder="ebay_xxxxxxxx" />
-      <button id="start">Start capture</button>
+      <button id="start" autofocus>Start capture</button>
       <button id="stop" class="secondary" disabled>Stop</button>
     </div>
     <p id="status" style="margin:14px 0 0"><span class="dot" id="dot"></span>idle</p>
