@@ -22,9 +22,18 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { db, migrate, closeDb, type Pool } from "../src/db/pg.js";
+import { databaseName, db, migrate, closeDb, type Pool } from "../src/db/pg.js";
 
-const SOURCE = process.env["TEST_DATABASE_URL"] || "postgres://localhost:5432/sidestage_test";
+// The database THIS FILE owns, not the base test name.
+//
+// Each test file gets its own database now (`src/db/pg.ts`), so dumping
+// `TEST_DATABASE_URL` would dump a database this process never wrote to — and the
+// round trip would pass while proving nothing. `databaseName()` is what the pool
+// is actually connected to.
+const SOURCE = (process.env["TEST_DATABASE_URL"] || "postgres://localhost:5432/sidestage_test").replace(
+  /\/[^/]+$/,
+  () => `/${databaseName()}`,
+);
 const SCRATCH = SOURCE.replace(/\/[^/]+$/, "/sidestage_restore_probe");
 const ADMIN = SOURCE.replace(/\/[^/]+$/, "/postgres");
 const SHOW = "show_backup_probe";

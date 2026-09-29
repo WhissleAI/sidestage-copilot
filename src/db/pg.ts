@@ -37,10 +37,51 @@ pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => Number(v));
 
 let pool: Pool | null = null;
 
+/**
+ * One database per test FILE, so the suite cannot race itself.
+ *
+ * Node's runner gives each test file its own process and runs the files in
+ * parallel; every one of them used the same `sidestage_test`. Measured
+ * 2026-09-28: three different tests failed on three consecutive parallel runs
+ * while `--test-concurrency=1` passed 865/865 twice. One of those three was a
+ * genuine bug hiding in the noise, and finding it took an hour of "is this my
+ * change?" — a suite that lies a third of the time is worth less than a smaller
+ * suite that does not.
+ *
+ * The file's own path is in `process.argv` under `--test`, so the database is
+ * named after the file that owns it: `sidestage_test_decision_test` is readable
+ * in `\l` and in an error, which `..._pid_41290` would not be. The pid is
+ * appended because two runs can overlap.
+ *
+ * Costs 151 ms per file to create and migrate — measured, and the reason this is
+ * a database rather than a schema or a template: `CREATE DATABASE ... TEMPLATE`
+ * measured the same 153 ms AND fails while anything is connected to the
+ * template, which is machinery bought for nothing.
+ *
+ * Outside NODE_ENV=test this returns `config.databaseUrl` untouched.
+ */
+function connectionString(): string {
+  if (process.env["NODE_ENV"] !== "test") return config.databaseUrl;
+  const owner = process.argv.find((a) => /\.(test|eval)\.ts$/.test(a));
+  if (!owner) return config.databaseUrl;
+  const slug = owner
+    .split("/")
+    .pop()!
+    .replace(/\.(test|eval)\.ts$/, "")
+    .replace(/[^a-z0-9]+/gi, "_")
+    .toLowerCase()
+    // Postgres truncates an identifier at 63 bytes, and the suffix must survive.
+    .slice(0, 40);
+  return config.databaseUrl.replace(/\/[^/]+$/, `/sidestage_test_${slug}_${process.pid}`);
+}
+
+/** The database this process is using — named so a failure can say which. */
+export const databaseName = (): string => connectionString().split("/").pop()!;
+
 export function db(): Pool {
   if (pool) return pool;
   pool = new pg.Pool({
-    connectionString: config.databaseUrl,
+    connectionString: connectionString(),
     max: 10,
     idleTimeoutMillis: 30_000,
   });
@@ -109,7 +150,51 @@ const MIGRATION_LOCK = 0x51d3_57a6;
  * it, so a half-applied schema change remains impossible. This only makes sure
  * one process is doing it.
  */
+/** Once per process, however many callers ask. */
+let creating: Promise<void> | null = null;
+
+/**
+ * `CREATE DATABASE` for this process's own test database.
+ *
+ * Only under NODE_ENV=test, and only for a name this module derived — it will not
+ * create `config.databaseUrl`, so a typo in DATABASE_URL still fails loudly
+ * instead of quietly standing up an empty database and migrating it.
+ *
+ * MEMOISED, because a file can call `migrate()` twice — `retrieval.eval.ts` does,
+ * through two `rig()`s — and two concurrent creates of the same name do not fail
+ * the way the obvious guess says. `42P04` is "database already exists" and is what
+ * a SEQUENTIAL second attempt gets; a CONCURRENT one surfaces as `23505`, a unique
+ * violation on `pg_database_datname_index`, because both statements got past the
+ * existence check before either inserted. The promise makes that impossible within
+ * a process; both codes are tolerated for the case across processes.
+ */
+async function createTestDatabaseIfMissing(): Promise<void> {
+  if (process.env["NODE_ENV"] !== "test") return;
+  const url = connectionString();
+  const name = url.split("/").pop()!;
+  if (!name.startsWith("sidestage_test_")) return;
+  creating ??= (async () => {
+    const admin = new pg.Pool({ connectionString: url.replace(/\/[^/]+$/, "/postgres"), max: 1 });
+    try {
+      await admin.query(`CREATE DATABASE "${name}"`);
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      // 42P04 already exists · 23505 two creates raced and this one lost.
+      if (code !== "42P04" && code !== "23505") throw e;
+    } finally {
+      await admin.end().catch(() => {});
+    }
+  })();
+  await creating;
+}
+
 export async function migrate(p: Pool): Promise<void> {
+  // Create the database first, if this is a test process that owns its own.
+  //
+  // Every test file that touches Postgres already awaits `migrate()` — directly
+  // or through `rig()` — so this is the one place that covers all of them, and
+  // no test file had to change.
+  await createTestDatabaseIfMissing();
   const c = await p.connect();
   try {
     // Blocks rather than failing: a second booter should wait a moment and
