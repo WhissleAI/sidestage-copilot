@@ -636,6 +636,13 @@ describe("the spend cap", () => {
     // it: past the limit the copilot does not draft, the question still arrives,
     // and the reason travels on the message rather than living in a log.
     const showId = demo().showId;
+    // `SpendWindow.open` is a NO-OP on a window that is already open, and says
+    // nothing when it declines. So this test used to depend on nothing having
+    // opened one for the demo show first — which is an order dependency, and
+    // one that only appeared when a real WHISSLE_API_KEY was in scope and the
+    // pipeline opened a window against the real wallet. Close first, and the
+    // opening balance below is the one that counts whatever ran before.
+    spendWindow.close(showId);
     // Opening balance $10, wallet now $0 → a $10 upper bound against a $1 cap.
     spendWindow.open(showId, 10);
     const watch = new BudgetWatch(

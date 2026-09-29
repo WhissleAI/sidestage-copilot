@@ -78,3 +78,43 @@ describe("the build stamp", () => {
     assert.ok(!/\bbuild\b/.test(body), "/health must stay at two fields");
   });
 });
+
+// ── the suite reads the environment it was given, and nothing else ───────────
+//
+// `npm test` used to load the developer's `.env`, which holds a real
+// `WHISSLE_API_KEY`. Two failures from one cause, and the second hid the first:
+//
+//   it spent money      live calls to the gateway on every run. The dry-run
+//                       contract test took 5.3 SECONDS, which is a network
+//                       round trip, not an assertion
+//   it was not hermetic `test/contract.test.ts` passed on a clean checkout and
+//                       failed on mine at "the cap did not latch", with nothing
+//                       in any diff to explain it. A real key, two layers away
+//
+// `ensure-test-db.mjs` already keeps the suite out of the developer's database.
+// This is the other half of the same principle.
+
+describe("a test run is the run CI does", () => {
+  test("config.ts does not read .env under NODE_ENV=test", () => {
+    const cfg = text("src/config.ts");
+    assert.match(cfg, /NODE_ENV !== "test"/, "loadEnvFile must be conditional");
+    // Guarded, not merely mentioned: the call itself must sit behind the flag.
+    const at = cfg.indexOf("process.loadEnvFile()");
+    assert.ok(at > cfg.indexOf("const LOAD_ENV_FILE"), "the flag must be declared before the call");
+    assert.match(
+      cfg.slice(cfg.lastIndexOf("if (", at), at),
+      /LOAD_ENV_FILE/,
+      "loadEnvFile() is not inside the LOAD_ENV_FILE guard",
+    );
+  });
+
+  test("and no live credential is in scope while it runs", () => {
+    // If this ever fails, the suite is about to bill somebody. It checks the
+    // ambient environment rather than the file, because an exported variable
+    // reaches the run whatever config.ts does.
+    for (const k of ["WHISSLE_API_KEY", "WHISSLE_AGENT_ID"]) {
+      const v = process.env[k] ?? "";
+      assert.equal(v, "", `${k} is set — the suite would make real, billed calls`);
+    }
+  });
+});

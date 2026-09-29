@@ -4,10 +4,30 @@
 
 import { resolve } from "node:path";
 
-try {
-  process.loadEnvFile();
-} catch {
-  /* no .env — rely on the ambient environment */
+// The suite does not read `.env`, and this is not tidiness.
+//
+// `.env` on a developer's machine holds a REAL `WHISSLE_API_KEY`. Loaded under
+// test, `npm test` stopped being hermetic in two ways at once: it made live,
+// BILLED calls to the gateway — the dry-run contract test took 5.3 seconds,
+// which is a network round trip — and its results depended on whose machine it
+// ran on. Measured on 2026-09-28: `test/contract.test.ts` passed on a clean
+// checkout and failed on mine, at "the cap did not latch", for no reason
+// visible in any diff. The cause was a real key two layers away (see the
+// spend-window note in that test), and finding it took the better part of an
+// hour.
+//
+// `ensure-test-db.mjs` already exists so the suite cannot write into the
+// developer's database. This is the same principle for the other half of the
+// environment: a test run reads the ambient environment it was given and
+// nothing else, so every run is the run CI does.
+const LOAD_ENV_FILE = process.env.NODE_ENV !== "test";
+
+if (LOAD_ENV_FILE) {
+  try {
+    process.loadEnvFile();
+  } catch {
+    /* no .env — rely on the ambient environment */
+  }
 }
 
 /**
