@@ -47,6 +47,35 @@ public_ip() {
 cmd_dump() {
   OUT_DIR=${1:-./backups}
   mkdir -p "$OUT_DIR"
+  # A dump holds every seller's scrypt hash, every sealed eBay token, every
+  # buyer's chat and the whole audit chain. It must not be committable.
+  #
+  # This is not hypothetical: `backups/` was NOT in .gitignore when the first
+  # dump was written into it, and this repo gets `git add -A`. One commit and a
+  # production credential set is in git history, where removing it means
+  # rewriting history and rotating everything.
+  #
+  # So: refuse a destination git would track. Checked with git itself rather than
+  # by matching path strings, because the rule that matters is the one git
+  # applies.
+  if git -C "$(dirname "$0")/.." rev-parse --git-dir > /dev/null 2>&1; then
+    PROBE="$OUT_DIR/.gitignore-probe.sql.gz"
+    : > "$PROBE"
+    if ! git -C "$(dirname "$0")/.." check-ignore -q "$PROBE" 2>/dev/null; then
+      rm -f "$PROBE"
+      cat >&2 <<EOF
+!! git would TRACK a dump written to $OUT_DIR
+   A dump holds every seller's password hash, every sealed eBay token, every
+   buyer's chat and the whole audit chain. Committing one puts all of it in git
+   history, where the fix is rewriting history and rotating every credential.
+
+   Add the directory to .gitignore, or write the dump somewhere outside the repo:
+     $0 dump ~/sidestage-backups
+EOF
+      exit 1
+    fi
+    rm -f "$PROBE"
+  fi
   IID=$(instance_id); [ -n "$IID" ] || { echo "no running sidestage-backend instance" >&2; exit 1; }
   IP=$(public_ip "$IID")
   STAMP=$(date -u +%Y%m%dT%H%M%SZ)

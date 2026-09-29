@@ -11,3 +11,11 @@ dist/
 data/
 bench-results/
 .tmp/
+
+# Database dumps. `scripts/backup.sh dump` writes here by default, and a dump
+# holds every seller's scrypt hash, every sealed eBay token, every buyer's chat
+# and the whole audit chain. It must never be committable — and this was NOT
+# ignored when the first dump was taken, so one `git add -A` would have done it.
+# `backup.sh` refuses to write into a directory git would not ignore.
+/backups/
+*.sql.gz

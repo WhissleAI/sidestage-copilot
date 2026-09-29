@@ -128,6 +128,35 @@ describe("the backup restores", () => {
     );
   });
 
+  test("a dump cannot be committed, two ways", () => {
+    // The hazard I created writing the first one: `backups/` was NOT in
+    // .gitignore, and this repo gets `git add -A`. A committed dump puts every
+    // seller's password hash, every sealed eBay token, every buyer's chat and the
+    // whole audit chain into git history, where the fix is rewriting history and
+    // rotating every credential.
+    const ignore = readFileSync(join(process.cwd(), ".gitignore"), "utf8");
+    assert.match(ignore, /^\/backups\/$/m, "the default destination must be ignored");
+    assert.match(ignore, /^\*\.sql\.gz$/m, "and a dump written anywhere else in the tree too");
+
+    // git's own answer, not a string match on a path.
+    const ignored = (rel: string) => {
+      try {
+        execFileSync("git", ["check-ignore", "-q", rel], { cwd: process.cwd(), stdio: "ignore" });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    assert.ok(ignored("backups/anything.sql.gz"), "backups/ is not ignored");
+    assert.ok(ignored("docs/oops.sql.gz"), "a dump in docs/ would be committable");
+
+    // And the script refuses a destination git would track, so removing either
+    // rule above does not silently re-open the hazard.
+    const sh = readFileSync(join(process.cwd(), "scripts/backup.sh"), "utf8");
+    assert.match(sh, /git would TRACK a dump/);
+    assert.match(sh, /check-ignore -q/, "checked with git, not by matching path strings");
+  });
+
   test("and it says out loud what it does NOT cover", () => {
     const sh = readFileSync(join(process.cwd(), "scripts/backup.sh"), "utf8");
     // The media are files, not rows. A backup that quietly omits a person's
