@@ -349,7 +349,9 @@ export interface Metrics {
   blocked: number;
   guardBlocks: Record<GuardName, number>;
   latency: { p50: number; p95: number; p99: number; budgetMs: number; breaches: number };
-  cacheHitRate: number;
+  /** Null before anything has been drafted — 0% reads as a cache that never
+   *  hits, which is a claim about a cache nobody has asked yet. */
+  cacheHitRate: number | null;
   /** Sent ÷ admitted questions (src/shows/metrics.ts). Null before anyone has
    *  asked anything — not 0%, which is a grade. */
   answeredRate: number | null;

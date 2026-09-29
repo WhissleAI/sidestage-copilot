@@ -101,8 +101,10 @@ export class LatencyTracker {
     };
   }
 
-  get cacheHitRate(): number {
-    return this._total ? Number((this._cacheHits / this._total).toFixed(3)) : 0;
+  /** Null before anything has been drafted. 0% reads as a cache that never
+   *  hits, which is a claim about a cache nobody has asked yet. */
+  get cacheHitRate(): number | null {
+    return this._total ? Number((this._cacheHits / this._total).toFixed(3)) : null;
   }
 
   get count(): number {

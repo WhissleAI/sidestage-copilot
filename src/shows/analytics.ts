@@ -117,7 +117,8 @@ export interface AnalyticsOverview {
     startedAt: string;
     durationMin: number;
     answeredRate: number | null;
-    p95LatencyMs: number;
+    /** Null when the session answered nothing — see ShowReport.engagement. */
+    p95LatencyMs: number | null;
     blocked: number;
     flaggedWrong: number;
     gmvCents: number | null;
@@ -275,7 +276,9 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
       // A show that drafted nothing has no median, not a median of zero; four
       // such shows next to one real one used to read as "0ms" here.
       medianOfMediansMs: median(
-        reported.map((r) => r.report.engagement.medianLatencyMs).filter((ms) => ms > 0),
+        reported
+          .map((r) => r.report.engagement.medianLatencyMs)
+          .filter((ms): ms is number => ms != null && ms > 0),
       ),
       /**
        * Null when no session in the window answered anything.
@@ -291,14 +294,22 @@ export async function analyticsOverview(d: Pool, days: number, ownerId: string |
        * these two were computed inline and missed it.
        */
       worstP95Ms: (() => {
-        const seen = reported.map((r) => r.report.engagement.p95LatencyMs).filter((ms) => ms > 0);
+        const seen = reported
+          .map((r) => r.report.engagement.p95LatencyMs)
+          .filter((ms): ms is number => ms != null && ms > 0);
         return seen.length ? Math.max(...seen) : null;
       })(),
       /** Null on an empty window. 0% reads as "the cache never hits", which is
        *  a claim about a cache that was never asked. */
-      cacheHitRate: reported.length
-        ? sum(reported, (r) => r.report.engagement.cacheHitRate) / reported.length
-        : null,
+      // Averaged over the sessions that MEASURED one. A session that drafted
+      // nothing has no hit rate, and folding its null in as zero would drag the
+      // average toward "the cache never hits" — the same mistake one layer up.
+      cacheHitRate: (() => {
+        const seen = reported
+          .map((r) => r.report.engagement.cacheHitRate)
+          .filter((x): x is number => x != null);
+        return seen.length ? seen.reduce((a, b) => a + b, 0) / seen.length : null;
+      })(),
     },
     safety: {
       blocked,

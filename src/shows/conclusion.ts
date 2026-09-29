@@ -54,7 +54,13 @@ export interface ConclusionEvidence {
   title: string;
   host: string;
   durationMin: number;
-  engagement: { commentsSeen: number; questionsAsked: number; answered: number; sent: number; p95LatencyMs: number };
+  engagement: {
+    commentsSeen: number; questionsAsked: number; answered: number; sent: number;
+    /** Null when the session answered nothing. Never interpolate it raw — the
+     *  agent writes prose from this line, and "p95 0 ms" told a seller their
+     *  copilot answered instantly when it had answered nobody. */
+    p95LatencyMs: number | null;
+  };
   safety: { blocked: number; revised: number; abstained: number; flaggedWrong: number; byGuard: Record<string, number> };
   actions: { proposed: number; committed: number; rolledBack: number; failed: number };
   inventory: { lotsObserved: number; lotsEnded: number; priceChanges: number; peakViewers: number };
@@ -98,7 +104,10 @@ function evidenceText(e: ConclusionEvidence): string {
   lines.push(`SHOW: "${e.title}" hosted by ${e.host}, ${e.durationMin} min on air, peak ${e.inventory.peakViewers} viewers.`);
   lines.push(
     `ENGAGEMENT: ${e.engagement.commentsSeen} comments seen, ${e.engagement.questionsAsked} questions, ` +
-    `${e.engagement.answered} answered, ${e.engagement.sent} sent, p95 time-to-answer ${e.engagement.p95LatencyMs} ms.`,
+    `${e.engagement.answered} answered, ${e.engagement.sent} sent, ` +
+      (e.engagement.p95LatencyMs == null
+        ? "and no reply was timed because none was drafted."
+        : `p95 time-to-answer ${e.engagement.p95LatencyMs} ms.`),
   );
   lines.push(
     `SAFETY: ${e.safety.blocked} blocked, ${e.safety.revised} revised, ${e.safety.abstained} abstained, ` +
