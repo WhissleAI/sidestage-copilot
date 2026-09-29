@@ -25,6 +25,7 @@ import type { LlmPort } from "../llm/types.js";
 import { logSwallowed, logWarn } from "../obs/log.js";
 import type { HostSummary } from "./signals.js";
 
+import { quoted, safe } from "../llm/untrusted.js";
 export type NextActionKind = "catalog" | "pricing" | "inventory" | "hosting" | "policy" | "setup";
 const KINDS = new Set<NextActionKind>(["catalog", "pricing", "inventory", "hosting", "policy", "setup"]);
 
@@ -101,7 +102,7 @@ function money(c: number): string {
 
 function evidenceText(e: ConclusionEvidence): string {
   const lines: string[] = [];
-  lines.push(`SHOW: "${e.title}" hosted by ${e.host}, ${e.durationMin} min on air, peak ${e.inventory.peakViewers} viewers.`);
+  lines.push(`SHOW: ${quoted(e.title, 200)} hosted by ${safe(e.host, 120)}, ${e.durationMin} min on air, peak ${e.inventory.peakViewers} viewers.`);
   lines.push(
     `ENGAGEMENT: ${e.engagement.commentsSeen} comments seen, ${e.engagement.questionsAsked} questions, ` +
     `${e.engagement.answered} answered, ${e.engagement.sent} sent, ` +
@@ -124,7 +125,9 @@ function evidenceText(e: ConclusionEvidence): string {
   );
   if (e.gaps.length) {
     lines.push("GAPS (questions with no grounded answer):");
-    for (const g of e.gaps.slice(0, 10)) lines.push(`  - "${g.question}" asked ${g.asked}× — ${g.reason}`);
+    // A buyer\'s own words, on a `  - "…"` line, in the prompt the seller\'s
+    // post-show summary is written from.
+    for (const g of e.gaps.slice(0, 10)) lines.push(`  - ${quoted(g.question, 400)} asked ${g.asked}× — ${safe(g.reason, 200)}`);
   } else lines.push("GAPS: none.");
   if (e.hostSignals) {
     const h = e.hostSignals;
@@ -136,7 +139,7 @@ function evidenceText(e: ConclusionEvidence): string {
       `median speech rate ${h.medianSpeechRate ?? "unknown"} wpm; ${h.emotionFlips} emotion flips.`,
     );
     if (h.style) {
-      lines.push(`HOST STYLE (delivery, not buyer sentiment): ${h.style.label} — ${h.style.detail}.`);
+      lines.push(`HOST STYLE (delivery, not buyer sentiment): ${safe(h.style.label, 60)} — ${safe(h.style.detail, 300)}.`);
     }
     if (h.trajectory?.length > 1) {
       lines.push(
@@ -157,7 +160,7 @@ function evidenceText(e: ConclusionEvidence): string {
   if (e.said.length) {
     lines.push("HOST SAID (sample):");
     for (const s of e.said) {
-      lines.push(`  [${Math.round(s.offsetMs / 1000)}s] "${s.text}"${s.emotion ? ` (${s.emotion}` : ""}${s.intent ? `${s.emotion ? ", " : " ("}${s.intent}` : ""}${s.emotion || s.intent ? ")" : ""}`);
+      lines.push(`  [${Math.round(s.offsetMs / 1000)}s] ${quoted(s.text, 600)}${s.emotion ? ` (${safe(s.emotion, 40)}` : ""}${s.intent ? `${s.emotion ? ", " : " ("}${s.intent}` : ""}${s.emotion || s.intent ? ")" : ""}`);
     }
   }
   if (e.onScreen.length) {

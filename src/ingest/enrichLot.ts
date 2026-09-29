@@ -30,6 +30,7 @@
 import type { LlmPort } from "../llm/types.js";
 import type { ShowContext } from "../domain/types.js";
 
+import { safe } from "../llm/untrusted.js";
 /**
  * Titles eBay or the seller filled in with a shrug.
  *
@@ -99,8 +100,8 @@ export async function enrichLot(
   if (!speech && !camera) return null;
 
   const evidence = [
-    `Show: ${showTitle}`,
-    `Lot as eBay names it: ${lot.title}`,
+    `Show: ${safe(showTitle, 200)}`,
+    `Lot as eBay names it: ${safe(lot.title, 200)}`,
     speech ? `What the host is saying right now: ${speech}` : "",
     camera ? `What is on camera right now: ${camera}` : "",
   ].filter(Boolean).join("\n");

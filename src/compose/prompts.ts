@@ -338,47 +338,11 @@ export function buildRegenerateBlock(base: string, previous: string): string {
   );
 }
 
-/**
- * The one sanitiser. Everything that is not ours goes through it.
- *
- * The block this file builds is STRUCTURED BY NEWLINES: `=== SECTION ===`
- * headings, and one `[factId] the fact` line per piece of evidence. So a
- * newline inside a value is not a formatting nuisance, it is a way to write new
- * lines of the block — a forged heading, or a forged fact — and a `"` inside a
- * value that the call site wrapped in bare quotes ends the quoting early.
- *
- * Collapses every control character to a space, strips a leading section marker,
- * trims, and bounds the length.
- */
-function oneLine(s: string, max: number): string {
-  return String(s)
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    // A value that begins `=== ` reads as one of this block's own headings.
-    .replace(/^[\s=]*={3,}[\s=]*/, "")
-    .replace(/\s{2,}/g, " ")
-    .trim()
-    .slice(0, max);
-}
-
-/** Untrusted text on its way into a prompt: one line, bounded, no control
- *  characters. A buyer name or a chat message is data, never an instruction,
- *  and the model is told so wherever one appears. */
-export function quoted(s: string, max = 400): string {
-  return JSON.stringify(oneLine(s, max));
-}
-
-/**
- * The same sanitising WITHOUT the surrounding quotes, for the places whose
- * rendered shape has to stay as it is — a lot title inside a sentence, a fact
- * on its own `[id] text` line.
- *
- * Two functions rather than one, because the choice at each call site is about
- * FORMAT, and making every value JSON-quoted to get the escaping would change
- * what the model reads on nearly every line of the block.
- */
-export function safe(s: string, max = 400): string {
-  return oneLine(s, max);
-}
+// The sanitiser lives in `llm/untrusted.ts`: five modules build prompts and only
+// one of them is this one. Re-exported because this file's own callers, and the
+// test that scans every prompt builder, import it from here.
+import { quoted, safe } from "../llm/untrusted.js";
+export { quoted, safe };
 
 export function buildUserMessage(author: string, text: string): string {
   return (

@@ -17,6 +17,7 @@ import { styleOf, type StyleSample } from "./hostStyle.js";
 import type { LlmPort } from "../llm/types.js";
 import { extractJsonObject } from "../compose/composer.js";
 
+import { safe } from "../llm/untrusted.js";
 export interface ShowContextOpts {
   llm: LlmPort;
   /** Catalog titles, so the summariser picks a real lot rather than inventing one. */
@@ -167,7 +168,10 @@ export class ShowContextEngine {
       "From the recent transcript of what the HOST is saying, extract what they are on RIGHT NOW.",
       'Shape: {"currentTopic":"<short phrase>","listingId":"<id>"|null,"recentPoints":["<=4 short bullets"],"tone":"<one word>"|null}',
       "`listingId` MUST be one of these ids or null — never invent one:",
-      ...lots.map((l) => `  ${l.id} = ${l.title}`),
+      // The model is told `listingId` MUST be one of these ids. A newline in a
+      // scraped lot title forges another `  <id> = <title>` line, which is the
+      // one thing this list exists to make impossible.
+      ...lots.map((l) => `  ${l.id} = ${safe(l.title, 200)}`),
       "Do not infer facts the host did not say.",
     ].join("\n");
 
