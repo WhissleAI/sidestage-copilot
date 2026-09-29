@@ -34,6 +34,38 @@ try {
   process.exit(1);
 }
 
+// Drop the per-file databases the last run left behind.
+//
+// Each test FILE gets its own database now (`src/db/pg.ts`), which is what stopped
+// the suite racing itself — but nothing reliably drops them: a file that is
+// interrupted, or one that never calls `closeDb`, leaves its database sitting
+// there. So they are cleaned up at the START of a run rather than the end of one,
+// where a crash cannot skip it. That also leaves the last run's databases around
+// for as long as they are useful: after a failure you can still open the one that
+// failed and look, which was impossible when every file shared one.
+try {
+  const stale = execFileSync(
+    "psql",
+    [admin.toString(), "-tAc", "SELECT datname FROM pg_database WHERE datname LIKE 'sidestage_test_%'"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  )
+    .toString()
+    .split("\n")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  for (const d of stale) {
+    // WITH (FORCE) evicts a connection a leaked process is still holding, which
+    // is the case that otherwise leaves a database nothing can drop.
+    execFileSync("psql", [admin.toString(), "-c", `DROP DATABASE IF EXISTS "${d}" WITH (FORCE)`], {
+      stdio: "ignore",
+    });
+  }
+  if (stale.length) console.log(`[pretest] dropped ${stale.length} per-file database(s) from the last run`);
+} catch (e) {
+  // Not fatal. A run with leftovers is slower to read, not wrong.
+  console.error(`[pretest] could not clean per-file databases: ${e.message}`);
+}
+
 // The catalogs are files, and one route writes to them. Without a copy, a test
 // that closes a gap edits the fixture a reviewer is about to read.
 const catalogs = process.env.TEST_CATALOGS_DIR || ".tmp/test-catalogs";
