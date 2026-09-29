@@ -64,3 +64,82 @@ describe("what we store about a person is declared, not discovered", () => {
     assert.match(sql, /chat_messages[\s\S]*?REFERENCES shows\(id\) ON DELETE CASCADE/);
   });
 });
+
+// ── the one table that survives a deletion and is not a person's words ──────
+//
+// `session_events` has no foreign key to `shows` on purpose (migration 030): an
+// event about a session stays true after the session row is gone, including the
+// attach that failed before any show existed. So it OUTLIVES a deletion, which
+// makes it the third item in the privacy page's "things that outlive the session
+// they came from" — a list that said two until 2026-09-28.
+//
+// Its safety rests entirely on one sentence in that migration: "`detail` carries
+// COUNTS AND IDENTIFIERS ONLY — never a buyer's message, a draft, a transcript
+// segment or a token." Nothing enforced it. A `detail: { text }` added in good
+// faith would put a stranger's words in the one table that deleting their
+// session does not empty, and the privacy page would be wrong in the direction
+// that matters.
+
+describe("the operational log keeps no one's words", () => {
+  /** Key names that mean free text somebody said, or a credential. */
+  const FORBIDDEN =
+    /\b(text|message|comment|draft|reply|body|transcript|utterance|content|token|password|secret|prompt|answer|question)\s*:/i;
+
+  /** Every `recordEvent({...})` in the tree, with its `detail` object. */
+  function eventDetails(): { file: string; line: number; detail: string }[] {
+    const out: { file: string; line: number; detail: string }[] = [];
+    const walk = (dir: string): string[] =>
+      readdirSync(join(process.cwd(), dir), { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory()
+          ? walk(join(dir, e.name))
+          : e.name.endsWith(".ts")
+            ? [join(dir, e.name)]
+            : [],
+      );
+    for (const rel of walk("src")) {
+      const src = readFileSync(join(process.cwd(), rel), "utf8");
+      for (const m of src.matchAll(/recordEvent\(\s*\{/g)) {
+        const obj = balanced(src, src.indexOf("{", m.index!));
+        const at = obj.indexOf("detail:");
+        if (at === -1) continue;
+        out.push({
+          file: rel,
+          line: src.slice(0, m.index!).split("\n").length,
+          detail: balanced(obj, obj.indexOf("{", at)),
+        });
+      }
+    }
+    return out;
+  }
+
+  /** The `{...}` beginning at `from`, brace-matched. */
+  function balanced(src: string, from: number): string {
+    let depth = 0;
+    for (let i = from; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}" && --depth === 0) return src.slice(from, i + 1);
+    }
+    return src.slice(from);
+  }
+
+  test("no event carries a field whose name means somebody's words", () => {
+    const calls = eventDetails();
+    // If this is 0 the scanner broke, not the risk went away.
+    assert.ok(calls.length >= 5, `only found ${calls.length} recordEvent details to check`);
+    const offenders = calls
+      .filter((c) => FORBIDDEN.test(c.detail))
+      .map((c) => `${c.file}:${c.line} — ${c.detail.replace(/\s+/g, " ").slice(0, 100)}`);
+    assert.deepEqual(
+      offenders,
+      [],
+      "session_events survives the deletion of the session it describes, so a person's words must " +
+        "never reach it — see migration 030 and the privacy page's third 'outlives' item",
+    );
+  });
+
+  test("and it is declared as outliving a session, in both places", () => {
+    const sql = readFileSync(join(MIGRATIONS, "030_session_events.sql"), "utf8");
+    assert.match(sql, /Deliberately NO foreign key/i, "the migration must say why it survives");
+    assert.match(sql, /COUNTS AND IDENTIFIERS ONLY/i, "and state the rule the test above enforces");
+  });
+});
