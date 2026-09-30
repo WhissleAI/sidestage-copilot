@@ -100,6 +100,9 @@ interface Harness {
   pipeline: Pipeline;
   /** Ingest a question and wait for its proposal to reach a terminal status. */
   ask(text: string): Promise<ReplyProposal>;
+  /** Every proposal the pipeline has EMITTED, by id — the observable record of
+   *  what `finish` actually wrote. */
+  seen: Map<string, ReplyProposal>;
   stop(): Promise<void>;
 }
 
@@ -128,7 +131,7 @@ async function harness(): Promise<Harness> {
     Boolean(p) && p!.status !== "drafting";
 
   return {
-    r, llm, pipeline,
+    r, llm, pipeline, seen,
     async ask(text: string) {
       const msg = await pipeline.ingest({ author: "@buyer", text });
       assert.ok(msg.admitted, `"${text}" was dropped by the gate: ${msg.dropReason}`);
@@ -587,6 +590,54 @@ describe("a backlog message says why it was not answered", () => {
       const hype = await h.pipeline.ingest({ author: "@buyer", text: "W" }, { historic: true });
       assert.equal(hype.admitted, false);
       assert.equal(hype.dropReason, "reaction, not a question");
+    } finally {
+      await h.stop();
+    }
+  });
+});
+
+describe("stop() waits for the write, because the write is the point", () => {
+  // `pump` tracks DRAFTS in `pending` and `stop` awaits those. But the thing
+  // that writes the proposal and emits it is `finish`, and its promise was
+  // dropped on the main reply path — so `draft` resolved before the write had
+  // happened and `stop` had nothing left to wait for.
+  //
+  // That is precisely the failure `stop()`'s own note describes: "the draft
+  // comes back to a closed database and throws from a promise nobody awaits —
+  // an unhandled rejection on every shutdown that happened to land mid-reply".
+  // The guard was there; the one call site that needed it was not using it.
+  test("a proposal is settled by the time stop() returns", async () => {
+    const h = await harness();
+    const msg = await h.pipeline.ingest({ author: "@buyer", text: "do you ship to canada?" });
+    assert.ok(msg.admitted, `the gate dropped the question: ${msg.dropReason}`);
+
+    // No sleeping, no polling: stop() either waits for the write or it does not.
+    await h.pipeline.stop();
+
+    const p = h.seen.get(`prop_${msg.id}`);
+    assert.ok(p, "stop() returned before the proposal was ever emitted");
+    assert.notEqual(
+      p.status, "drafting",
+      "stop() returned while the proposal was still being written — the write raced the teardown",
+    );
+  });
+
+  test("the fan-out bound counts the write, not just the composition", async () => {
+    // `inflight--` runs in `pump`'s `finally`, on the DRAFT promise. With the
+    // write outside that promise, `replyConcurrency` bounded composition only
+    // and an arbitrary number of writes could be in flight beneath it.
+    const h = await harness();
+    try {
+      const msgs = await Promise.all([
+        h.pipeline.ingest({ author: "@a", text: "do you ship to canada?" }),
+        h.pipeline.ingest({ author: "@b", text: "what is your return window?" }),
+      ]);
+      await h.pipeline.stop();
+      for (const m of msgs) {
+        if (!m.admitted) continue;
+        const p = h.seen.get(`prop_${m.id}`);
+        assert.ok(p && p.status !== "drafting", `"${m.text}" was still being written at stop()`);
+      }
     } finally {
       await h.stop();
     }

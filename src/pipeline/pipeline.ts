@@ -616,7 +616,26 @@ export class Pipeline {
         repaired,
       };
       if (!threaded) this.cache.set(key, result);
-      this.finish(proposal, { ...result, spans: timer.result(config.latencyBudgetMs, false) }, msg);
+      // AWAITED. `finish` is what writes the proposal and emits it; dropping its
+      // promise made `draft` resolve before the write had happened, with three
+      // consequences that all point the same way:
+      //
+      //   · `stop()` could not wait for it. `pump` tracks DRAFTS in `pending`
+      //     and `stop` awaits those — but a draft that has already resolved is
+      //     not waiting for anything, so the write raced the teardown. That is
+      //     precisely the failure `stop()`'s own note describes: "the draft
+      //     comes back to a closed database and throws from a promise nobody
+      //     awaits".
+      //   · the fan-out bound was wrong. `inflight--` ran while the write was
+      //     still going, so `replyConcurrency` counted composition only.
+      //   · a failure lost its session. An unhandled rejection is caught by the
+      //     process handler, which records the event with NO showId by design —
+      //     so the most consequential failure on the reply path landed on
+      //     nobody's timeline. Awaited, it is caught by the retry/report path
+      //     below, which knows which show it is.
+      //
+      // The other call site (the abstain path above) already awaited it.
+      await this.finish(proposal, { ...result, spans: timer.result(config.latencyBudgetMs, false) }, msg);
       this.evict();
     } catch (e) {
       // The gateway's shared LLM pool 429s a burst. Back off and retry rather
