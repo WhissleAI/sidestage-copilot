@@ -34,7 +34,7 @@ import type { Fact } from "../src/retrieval/facts.js";
 import { ngramVector, terms } from "../src/retrieval/text.js";
 import { capabilitiesOf } from "../src/surfaces/types.js";
 import { decideReply } from "../src/autonomy/ladder.js";
-import { admit, classify } from "../src/ingest/classify.js";
+import { admit, classify, RATE_CAP_REASON } from "../src/ingest/classify.js";
 import { Pipeline, SendRefused } from "../src/pipeline/pipeline.js";
 import { ActionProposer } from "../src/actions/proposer.js";
 import { ResearchService } from "../src/research/research.js";
@@ -548,5 +548,47 @@ describe("what a proposal token is spent on", () => {
     const d = admit("how much for the pandas", "price_question", () => false);
     assert.equal(d.admitted, false);
     assert.match(d.reason!, /rate cap/);
+  });
+});
+
+describe("a backlog message says why it was not answered", () => {
+  // `ingest` passes the limiter as a thunk: `() => !observing && !historic &&
+  // rate.tryAdmit()`. For a backlog message the thunk is false before the
+  // bucket is ever consulted — but the gate's LAST check is the bucket, so the
+  // reason it hands back is the cap's.
+  //
+  // Attach mid-show and every genuine question already on screen read
+  // "proposal rate cap reached": a cap the seller never hit, on a console whose
+  // whole claim is that it says where a thing came from. Worse than noise — a
+  // seller who believes it goes and raises a cap that was never the problem.
+  test("the operator is told the true cause, not the cap's", async () => {
+    const h = await harness();
+    try {
+      const live = await h.pipeline.ingest({ author: "@buyer", text: "do you ship to canada?" });
+      assert.equal(live.admitted, true, "a real question, live, is admitted");
+
+      const old = await h.pipeline.ingest(
+        { author: "@buyer", text: "do you ship to canada?" },
+        { historic: true },
+      );
+      assert.equal(old.admitted, false, "shown, never drafted against");
+      assert.equal(old.dropReason, "asked before you attached");
+      assert.notEqual(old.dropReason, RATE_CAP_REASON, "blamed a cap the seller never hit");
+    } finally {
+      await h.stop();
+    }
+  });
+
+  test("one the gate would have dropped anyway keeps its own reason", async () => {
+    // The override is only for the limiter. "W" is not a question, and saying
+    // "asked before you attached" about it would be a second wrong answer.
+    const h = await harness();
+    try {
+      const hype = await h.pipeline.ingest({ author: "@buyer", text: "W" }, { historic: true });
+      assert.equal(hype.admitted, false);
+      assert.equal(hype.dropReason, "reaction, not a question");
+    } finally {
+      await h.stop();
+    }
   });
 });

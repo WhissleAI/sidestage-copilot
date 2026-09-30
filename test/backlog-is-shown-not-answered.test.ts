@@ -13,7 +13,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { admit } from "../src/ingest/classify.js";
+import { admit, RATE_CAP_REASON } from "../src/ingest/classify.js";
 import { classify } from "../src/ingest/classify.js";
 
 describe("backlog reaches the operator but not the drafter", () => {
@@ -62,4 +62,29 @@ describe("the backlog cap", () => {
     assert.equal(seen.size, 98);
     assert.ok(backlog.slice(-40).every((m) => seen.has(m)));
   });
+});
+
+describe("the backlog says why it was not answered", () => {
+  // `ingest` passes the limiter as a thunk: `() => !observing && !historic &&
+  // rate.tryAdmit()`. For a backlog message the thunk is false before the
+  // bucket is ever consulted — but the gate's LAST check is the bucket, so the
+  // reason it hands back is the cap's.
+  //
+  // Attach mid-show and every genuine question already on screen read
+  // "proposal rate cap reached": a cap the seller never hit, on a console whose
+  // whole claim is that it says where a thing came from. Worse than noise — a
+  // seller who believes it goes and raises a cap that was never the problem.
+  test("the gate cannot tell a backlog message from a throttled one", () => {
+    const q = "do you ship to canada?";
+    // Both reach the limiter, and both are refused by it, for reasons that have
+    // nothing to do with each other.
+    const throttled = admit(q, classify(q), () => false, "query");
+    assert.equal(throttled.reason, RATE_CAP_REASON);
+    // Which is why the caller, not the gate, has to name the cause: only the
+    // caller knows it passed `historic`.
+  });
+
+  // The pipeline-level proof — that the operator is actually told
+  // "asked before you attached" — lives in decision.test.ts, which already
+  // stands up the real pipeline against the real catalog.
 });
